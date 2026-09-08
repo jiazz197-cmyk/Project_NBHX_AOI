@@ -895,13 +895,14 @@ STORAGE_EXISTED_COUNT_BATCH_SIZE = int(get_env('STORAGE_EXISTED_COUNT_BATCH_SIZE
 USE_NGINX_FOR_EXPORT_DOWNLOADS = get_bool_env('USE_NGINX_FOR_EXPORT_DOWNLOADS', False)
 USE_NGINX_FOR_UPLOADS = get_bool_env('USE_NGINX_FOR_UPLOADS', True)
 
-if get_env('MINIO_STORAGE_ENDPOINT') and not get_bool_env('MINIO_SKIP', False):
+_minio_endpoint = get_env('MINIO_STORAGE_ENDPOINT', 'http://localhost:9000')
+if _minio_endpoint and not get_bool_env('MINIO_SKIP', False):
     CLOUD_FILE_STORAGE_ENABLED = True
     STORAGES['default']['BACKEND'] = 'storages.backends.s3boto3.S3Boto3Storage'
-    AWS_STORAGE_BUCKET_NAME = get_env('MINIO_STORAGE_BUCKET_NAME')
-    AWS_ACCESS_KEY_ID = get_env('MINIO_STORAGE_ACCESS_KEY')
-    AWS_SECRET_ACCESS_KEY = get_env('MINIO_STORAGE_SECRET_KEY')
-    AWS_S3_ENDPOINT_URL = get_env('MINIO_STORAGE_ENDPOINT')
+    AWS_STORAGE_BUCKET_NAME = get_env('MINIO_STORAGE_BUCKET_NAME', 'aoi-images')
+    AWS_ACCESS_KEY_ID = get_env('MINIO_STORAGE_ACCESS_KEY', 'minioadmin')
+    AWS_SECRET_ACCESS_KEY = get_env('MINIO_STORAGE_SECRET_KEY', 'minioadmin')
+    AWS_S3_ENDPOINT_URL = _minio_endpoint
     AWS_QUERYSTRING_AUTH = False
     # make domain for FileUpload.file
     AWS_S3_SECURE_URLS = False

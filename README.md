@@ -55,15 +55,17 @@ label-studio/
 
 ### 3.1 后端
 
-要求：Python 3.10+，uv，PostgreSQL 可选（开发可用 SQLite）。
+要求：Python 3.10+，uv，PostgreSQL + MinIO（默认）。
+
+默认说明：本仓库已不再默认 SQLite。`core.settings.label_studio` 未显式设置 `DJANGO_DB` 时默认走 **PostgreSQL**；未显式关闭 MinIO 时默认连接 `http://localhost:9000`，上传图片会落到 MinIO bucket `aoi-images`。
 
 ```bash
 # 1. 安装后端依赖
 uv sync --frozen
 
-# 2. 开发环境可用 SQLite，免外部依赖
-export DJANGO_DB=sqlite
-export DJANGO_SETTINGS_MODULE=core.settings.label_studio
+# 2. 准备环境变量
+cp .env.example .env
+# 按需修改 .env；默认即 PostgreSQL + MinIO
 
 # 3. 初始化数据库
 uv run python label_studio/manage.py migrate
@@ -73,6 +75,8 @@ uv run python label_studio/manage.py runserver 0.0.0.0:8080
 ```
 
 后端默认开发地址：`http://localhost:8080`
+
+> 本地裸跑前请确保 PostgreSQL 和 MinIO 已启动，且 MinIO 中已创建 `aoi-images` bucket。
 
 ### 3.2 前端
 
@@ -95,13 +99,30 @@ Vite 已配置代理：
 
 ### 3.3 使用 PostgreSQL + MinIO（推荐接近交付形态）
 
-```bash
-# 仅 LS + PostgreSQL
-docker compose up --build
+`docker-compose.yml` 提供 PostgreSQL；启动本地开发栈时叠加 `docker-compose.minio.yml` 启用 MinIO。两者共同构成默认的 PG + MinIO 开发环境。
 
-# 带 MinIO 对象存储
-docker compose -f docker-compose.yml -f docker-compose.minio.yml up --build
+```bash
+# 1. 准备环境变量
+cp .env.example .env
+# 编辑 .env，至少确认：
+#   DJANGO_DB=default
+#   POSTGRE_HOST=db
+#   POSTGRE_USER=postgres
+#   POSTGRE_PASSWORD=...
+#   POSTGRE_NAME=postgres
+#   MINIO_STORAGE_ENDPOINT=http://minio:9000
+#   MINIO_STORAGE_BUCKET_NAME=aoi-images
+#   MINIO_STORAGE_ACCESS_KEY=minioadmin
+#   MINIO_STORAGE_SECRET_KEY=minioadmin
+
+# 2. 启动 PostgreSQL + MinIO + Label Studio
+docker compose -f docker-compose.yml -f docker-compose.minio.yml up -d --build
+
+# 3. 在 MinIO 控制台创建 bucket：aoi-images
+#    控制台默认 http://localhost:9009
 ```
+
+启用后，Label Studio 的上传文件/图片默认存储会切到 MinIO bucket `aoi-images`；用户、项目、标注等业务数据仍在 PostgreSQL。
 
 ## 4. 生产构建
 

@@ -43,6 +43,12 @@ services:
       - POSTGRE_HOST=db
       - LABEL_STUDIO_HOST=${LABEL_STUDIO_HOST:-}
       - JSON_LOG=1
+      # MinIO 可选：不填 endpoint 则不启用，填了才会把上传/图片存到 MinIO
+      - MINIO_STORAGE_ENDPOINT=${MINIO_STORAGE_ENDPOINT:-}
+      - MINIO_STORAGE_BUCKET_NAME=${MINIO_STORAGE_BUCKET_NAME:-aoi-images}
+      - MINIO_STORAGE_ACCESS_KEY=${MINIO_STORAGE_ACCESS_KEY:-}
+      - MINIO_STORAGE_SECRET_KEY=${MINIO_STORAGE_SECRET_KEY:-}
+      - MINIO_SKIP=${MINIO_SKIP:-false}
     #      - LOG_LEVEL=DEBUG
     volumes:
       - ./mydata:/label-studio/data:rw
