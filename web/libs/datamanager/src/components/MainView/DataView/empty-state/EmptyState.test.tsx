@@ -1,0 +1,352 @@
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { EmptyState } from "./EmptyState";
+import * as uiModule from "@humansignal/ui";
+import * as iconsModule from "@humansignal/icons";
+import * as docsModule from "../../../../../../editor/src/utils/docs";
+import * as authProviderModule from "@humansignal/core/providers/AuthProvider";
+
+// Mock global window.APP_SETTINGS
+Object.defineProperty(window, "APP_SETTINGS", {
+  value: { whitelabel_is_active: false },
+  writable: true,
+});
+
+describe("EmptyState Component", () => {
+  const defaultProps = {
+    canImport: true,
+    onOpenSourceStorageModal: mock(),
+    onOpenImportModal: mock(),
+  };
+
+  beforeEach(() => {
+    mock.clearAllMocks();
+
+    spyOn(uiModule, "Button").mockImplementation(
+      ({ children, onClick, disabled, "data-testid": testId, ...props }: any) => (
+        <button onClick={onClick} disabled={disabled} data-testid={testId} {...props}>
+          {children}
+        </button>
+      ),
+    );
+    spyOn(uiModule, "Typography").mockImplementation(({ children, className, ...props }: any) => (
+      <div className={className} {...props}>
+        {children}
+      </div>
+    ));
+    spyOn(uiModule, "IconExternal").mockImplementation(({ width, height }: any) => (
+      <span data-testid="icon-external" width={width} height={height} />
+    ));
+    spyOn(iconsModule, "IconUpload").mockImplementation(() => <span data-testid="icon-upload" />);
+    spyOn(iconsModule, "IconLsLabeling").mockImplementation(({ width, height }: any) => (
+      <span data-testid="icon-ls-labeling" width={width} height={height} />
+    ));
+    spyOn(iconsModule, "IconCheck").mockImplementation(({ width, height }: any) => (
+      <span data-testid="icon-check" width={width} height={height} />
+    ));
+    spyOn(iconsModule, "IconSearch").mockImplementation(({ width, height }: any) => (
+      <span data-testid="icon-search" width={width} height={height} />
+    ));
+    spyOn(iconsModule, "IconInbox").mockImplementation(({ width, height }: any) => (
+      <span data-testid="icon-inbox" width={width} height={height} />
+    ));
+    spyOn(docsModule, "getDocsUrl").mockImplementation((path: string) => `https://docs.example.com/${path}`);
+
+    spyOn(authProviderModule, "useAuth").mockReturnValue({
+      user: { id: 1, username: "testuser" },
+      permissions: {
+        can: (ability: string) => ability === "storages.change",
+      },
+      isLoading: false,
+    } as any);
+  });
+
+  describe("Basic Import Functionality", () => {
+    it("should render the default import state when no role is specified", () => {
+      render(<EmptyState {...defaultProps} />);
+
+      // Check main title and description
+      expect(screen.getByText("Import data to get your project started")).toBeInTheDocument();
+      expect(screen.getByText("Upload files from your computer or use local file storage")).toBeInTheDocument();
+
+      // Cloud storage provider icons should not be rendered
+      expect(screen.queryByTestId("dm-storage-provider-icons")).not.toBeInTheDocument();
+
+      // Check that both buttons are present
+      expect(screen.getByTestId("dm-connect-source-storage-button")).toBeInTheDocument();
+      expect(screen.getByTestId("dm-import-button")).toBeInTheDocument();
+
+      // Check accessibility features
+      expect(screen.getByTestId("empty-state-label")).toHaveAttribute("aria-labelledby", "dm-empty-title");
+      expect(screen.getByTestId("empty-state-label")).toHaveAttribute("aria-describedby", "dm-empty-desc");
+    });
+
+    it("should render non-interactive state when canImport is false", () => {
+      render(<EmptyState {...defaultProps} canImport={false} />);
+
+      const label = screen.getByTestId("empty-state-label");
+      expect(label).toHaveAttribute("aria-labelledby", "dm-empty-title");
+      expect(label).toHaveAttribute("aria-describedby", "dm-empty-desc");
+
+      // Import button should not be present when canImport is false
+      expect(screen.queryByTestId("dm-import-button")).not.toBeInTheDocument();
+      // Connect Storage button should still be present
+      expect(screen.getByTestId("dm-connect-source-storage-button")).toBeInTheDocument();
+    });
+
+    it("should render interactive state when canImport is true", () => {
+      render(<EmptyState {...defaultProps} canImport={true} />);
+
+      const label = screen.getByTestId("empty-state-label");
+      expect(label).toHaveAttribute("aria-labelledby", "dm-empty-title");
+      expect(label).toHaveAttribute("aria-describedby", "dm-empty-desc");
+
+      // Both buttons should be present
+      expect(screen.getByTestId("dm-connect-source-storage-button")).toBeInTheDocument();
+      expect(screen.getByTestId("dm-import-button")).toBeInTheDocument();
+    });
+  });
+
+  describe("Button Interactions", () => {
+    it("should call onOpenSourceStorageModal when Connect Storage button is clicked", async () => {
+      const user = userEvent.setup();
+      const mockOpenStorage = mock();
+
+      render(<EmptyState {...defaultProps} onOpenSourceStorageModal={mockOpenStorage} />);
+
+      const connectButton = screen.getByTestId("dm-connect-source-storage-button");
+      await user.click(connectButton);
+
+      expect(mockOpenStorage).toHaveBeenCalledTimes(1);
+    });
+
+    it("should call onOpenImportModal when Import button is clicked", async () => {
+      const user = userEvent.setup();
+      const mockOpenImport = mock();
+
+      render(<EmptyState {...defaultProps} onOpenImportModal={mockOpenImport} />);
+
+      const importButton = screen.getByTestId("dm-import-button");
+      await user.click(importButton);
+
+      expect(mockOpenImport).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("Role-Based Empty States", () => {
+    describe("Filter-based Empty State", () => {
+      it("should render filter empty state when hasFilters is true", () => {
+        render(<EmptyState {...defaultProps} hasFilters={true} onClearFilters={mock()} />);
+
+        expect(screen.getByText("No tasks found")).toBeInTheDocument();
+        expect(screen.getByText("Try adjusting or clearing the filters to see more results")).toBeInTheDocument();
+        expect(screen.getByTestId("dm-clear-filters-button")).toBeInTheDocument();
+        expect(screen.getByTestId("icon-search")).toBeInTheDocument();
+      });
+
+      it("should call onClearFilters when Clear Filters button is clicked", async () => {
+        const user = userEvent.setup();
+        const mockClearFilters = mock();
+
+        render(<EmptyState {...defaultProps} hasFilters={true} onClearFilters={mockClearFilters} />);
+
+        const clearButton = screen.getByTestId("dm-clear-filters-button");
+        await user.click(clearButton);
+
+        expect(mockClearFilters).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe("Reviewer Role", () => {
+      it("should render reviewer empty state", () => {
+        render(<EmptyState {...defaultProps} userRole="REVIEWER" />);
+
+        expect(screen.getByText("No tasks available for review or labeling")).toBeInTheDocument();
+        expect(screen.getByText("Tasks imported to this project will appear here")).toBeInTheDocument();
+        expect(screen.getByTestId("icon-check")).toBeInTheDocument();
+      });
+    });
+
+    describe("Annotator Role", () => {
+      it("should render annotator auto-distribution state with Label All Tasks button", () => {
+        const mockLabelAllTasks = mock();
+        const project = {
+          assignment_settings: {
+            label_stream_task_distribution: "auto_distribution",
+          },
+        };
+
+        render(
+          <EmptyState {...defaultProps} userRole="ANNOTATOR" project={project} onLabelAllTasks={mockLabelAllTasks} />,
+        );
+
+        expect(screen.getByText("Start labeling tasks")).toBeInTheDocument();
+        expect(screen.getByText("Tasks you've labeled will appear here")).toBeInTheDocument();
+        expect(screen.getByTestId("dm-label-all-tasks-button")).toBeInTheDocument();
+        expect(screen.getByTestId("icon-ls-labeling")).toBeInTheDocument();
+      });
+
+      it("should call onLabelAllTasks when Label All Tasks button is clicked", async () => {
+        const user = userEvent.setup();
+        const mockLabelAllTasks = mock();
+        const project = {
+          assignment_settings: {
+            label_stream_task_distribution: "auto_distribution",
+          },
+        };
+
+        render(
+          <EmptyState {...defaultProps} userRole="ANNOTATOR" project={project} onLabelAllTasks={mockLabelAllTasks} />,
+        );
+
+        const labelButton = screen.getByTestId("dm-label-all-tasks-button");
+        await user.click(labelButton);
+
+        expect(mockLabelAllTasks).toHaveBeenCalledTimes(1);
+      });
+
+      it("should render annotator manual distribution state without button", () => {
+        const project = {
+          assignment_settings: {
+            label_stream_task_distribution: "assigned_only",
+          },
+        };
+
+        render(<EmptyState {...defaultProps} userRole="ANNOTATOR" project={project} />);
+
+        expect(screen.getByText("No tasks available")).toBeInTheDocument();
+        expect(screen.getByText("Tasks assigned to you will appear here")).toBeInTheDocument();
+        expect(screen.getByTestId("icon-inbox")).toBeInTheDocument();
+        expect(screen.queryByTestId("dm-label-all-tasks-button")).not.toBeInTheDocument();
+      });
+
+      it("should render fallback annotator state for unknown distribution setting", () => {
+        const project = {
+          assignment_settings: {
+            label_stream_task_distribution: "unknown_setting",
+          },
+        };
+
+        render(<EmptyState {...defaultProps} userRole="ANNOTATOR" project={project} />);
+
+        expect(screen.getByText("No tasks available")).toBeInTheDocument();
+        expect(screen.getByText("Tasks will appear here when they become available")).toBeInTheDocument();
+        expect(screen.getByTestId("icon-inbox")).toBeInTheDocument();
+      });
+    });
+  });
+
+  describe("Accessibility", () => {
+    it("should have proper ARIA attributes", () => {
+      render(<EmptyState {...defaultProps} />);
+
+      const label = screen.getByTestId("empty-state-label");
+      const title = screen.getByText("Import data to get your project started");
+      const description = screen.getByText("Upload files from your computer or use local file storage");
+
+      expect(label).toHaveAttribute("aria-labelledby", "dm-empty-title");
+      expect(label).toHaveAttribute("aria-describedby", "dm-empty-desc");
+      expect(title).toHaveAttribute("id", "dm-empty-title");
+      expect(description).toHaveAttribute("id", "dm-empty-desc");
+    });
+
+    it("should render documentation link with proper accessibility", () => {
+      render(<EmptyState {...defaultProps} />);
+
+      const docLink = screen.getByTestId("dm-docs-data-import-link");
+      expect(docLink).toHaveAttribute("href", "https://docs.example.com/guide/tasks");
+      expect(docLink).toHaveAttribute("target", "_blank");
+      expect(docLink).toHaveAttribute("rel", "noopener noreferrer");
+
+      const srText = docLink.querySelector(".sr-only");
+      expect(srText).toHaveTextContent("(opens in a new tab)");
+    });
+  });
+
+  describe("Conditional Content", () => {
+    it("should hide documentation link when whitelabel is active", () => {
+      // Mock whitelabel active
+      Object.defineProperty(window, "APP_SETTINGS", {
+        value: { whitelabel_is_active: true },
+        writable: true,
+      });
+
+      render(<EmptyState {...defaultProps} />);
+
+      expect(screen.queryByTestId("dm-docs-data-import-link")).not.toBeInTheDocument();
+
+      // Reset for other tests
+      Object.defineProperty(window, "APP_SETTINGS", {
+        value: { whitelabel_is_active: false },
+        writable: true,
+      });
+    });
+
+    it("should show documentation link when whitelabel is not active", () => {
+      render(<EmptyState {...defaultProps} />);
+
+      expect(screen.getByTestId("dm-docs-data-import-link")).toBeInTheDocument();
+    });
+  });
+
+  describe("Storage Provider Icons", () => {
+    it("should not render cloud storage provider icons", () => {
+      render(<EmptyState {...defaultProps} />);
+
+      expect(screen.queryByTestId("dm-storage-provider-icons")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Amazon S3")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Google Cloud Storage")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Azure Blob Storage")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Redis Storage")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("Button States and Props", () => {
+    it("should render buttons with correct text content", () => {
+      render(<EmptyState {...defaultProps} />);
+
+      expect(screen.getByTestId("dm-connect-source-storage-button")).toHaveTextContent("Connect Local Storage");
+      expect(screen.getByTestId("dm-import-button")).toHaveTextContent("Import");
+    });
+
+    it("should render Clear Filters button with correct text", () => {
+      render(<EmptyState {...defaultProps} hasFilters={true} onClearFilters={mock()} />);
+
+      expect(screen.getByTestId("dm-clear-filters-button")).toHaveTextContent("Clear Filters");
+    });
+
+    it("should render Label All Tasks button with correct text and state", () => {
+      const project = {
+        assignment_settings: {
+          label_stream_task_distribution: "auto_distribution",
+        },
+      };
+
+      render(<EmptyState {...defaultProps} userRole="ANNOTATOR" project={project} onLabelAllTasks={mock()} />);
+
+      const labelButton = screen.getByTestId("dm-label-all-tasks-button");
+      expect(labelButton).toHaveTextContent("Label All Tasks");
+      expect(labelButton).not.toBeDisabled();
+    });
+  });
+
+  describe("Edge Cases", () => {
+    it("should handle missing project object gracefully", () => {
+      render(<EmptyState {...defaultProps} userRole="ANNOTATOR" />);
+
+      // Should render fallback state
+      expect(screen.getByText("No tasks available")).toBeInTheDocument();
+      expect(screen.getByText("Tasks will appear here when they become available")).toBeInTheDocument();
+    });
+
+    it("should handle missing assignment settings gracefully", () => {
+      const project = {}; // No assignment_settings
+
+      render(<EmptyState {...defaultProps} userRole="ANNOTATOR" project={project} />);
+
+      // Should render fallback state
+      expect(screen.getByText("No tasks available")).toBeInTheDocument();
+      expect(screen.getByText("Tasks will appear here when they become available")).toBeInTheDocument();
+    });
+  });
+});

@@ -1,0 +1,666 @@
+"""Tests for lazy loading annotations feature (FIT-720).
+
+This module tests the AnnotationStubSerializer and the annotations_stub
+query parameter for the TaskAPI endpoint.
+
+Feature flag fixtures are defined in tasks/tests/conftest.py:
+- fflag_fix_all_fit_720_lazy_load_annotations_on: Enable the feature flag
+- fflag_fix_all_fit_720_lazy_load_annotations_off: Disable the feature flag
+"""
+
+import pytest
+from organizations.tests.factories import OrganizationFactory
+from projects.tests.factories import ProjectFactory
+from rest_framework.test import APITestCase
+from tasks.serializers import AnnotationSerializer, AnnotationStubSerializer
+from tasks.tests.factories import AnnotationFactory, TaskFactory
+
+# FIT-1669: payload mirrors the bug reported in the ticket — two result rows share
+# the same (id, from_name, type) with different taxonomy values. The write path
+# must collapse them before persistence so the editor can't hydrate ghost regions.
+FIT_1669_DUPLICATE_RESULT = [
+    {
+        'id': 'region-A',
+        'from_name': 'tax',
+        'to_name': 'txt',
+        'type': 'taxonomy',
+        'value': {'taxonomy': [['A1_term_inexact', 'B2_diff_trads_var']]},
+    },
+    {
+        'id': 'region-A',
+        'from_name': 'tax',
+        'to_name': 'txt',
+        'type': 'taxonomy',
+        'value': {'taxonomy': [['E1_explicitation', 'F3_err_collocation']]},
+    },
+    {
+        'id': 'region-B',
+        'from_name': 'tax',
+        'to_name': 'txt',
+        'type': 'taxonomy',
+        'value': {'taxonomy': [['A1_term_inexact', 'B2_diff_trads_var']]},
+    },
+    {
+        'id': 'region-C',
+        'from_name': 'tax',
+        'to_name': 'txt',
+        'type': 'taxonomy',
+        'value': {'taxonomy': [['Magnetisme']]},
+    },
+]
+
+
+class TestAnnotationStubSerializer(APITestCase):
+    """Test the AnnotationStubSerializer excludes result field and includes is_stub flag."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.organization = OrganizationFactory(created_by_active_organization=True)
+        cls.project = ProjectFactory(organization=cls.organization)
+        cls.user = cls.organization.created_by
+        cls.task = TaskFactory(project=cls.project, data={'text': 'test'})
+        cls.annotation = AnnotationFactory(
+            task=cls.task,
+            completed_by=cls.user,
+            result=[
+                {
+                    'from_name': 'label',
+                    'to_name': 'text',
+                    'type': 'labels',
+                    'value': {'labels': ['class_A'], 'start': 0, 'end': 10},
+                }
+            ],
+        )
+
+    def test_stub_serializer_excludes_result(self):
+        """Test that AnnotationStubSerializer does not include the result field."""
+        serializer = AnnotationStubSerializer(self.annotation)
+        data = serializer.data
+
+        # Result should NOT be in the stub serializer
+        assert 'result' not in data
+
+    def test_stub_serializer_includes_is_stub_flag(self):
+        """Test that AnnotationStubSerializer includes is_stub=True."""
+        serializer = AnnotationStubSerializer(self.annotation)
+        data = serializer.data
+
+        assert 'is_stub' in data
+        assert data['is_stub'] is True
+
+    def test_stub_serializer_includes_metadata(self):
+        """Test that AnnotationStubSerializer includes only minimal required metadata fields."""
+        serializer = AnnotationStubSerializer(self.annotation)
+        data = serializer.data
+
+        # Minimal metadata fields for displaying annotation list
+        # (reduced to minimize payload size while keeping UI indicators)
+        required_fields = [
+            'id',
+            'created_ago',
+            'created_at',  # needed for TimeAgo component to display correct timestamp
+            'updated_at',  # needed for Updated-at sorting in the annotations list
+            'created_username',
+            'completed_by',
+            'ground_truth',  # needed for star indicator in UI
+            'was_cancelled',  # needed for skip queue / cancel-skip button display
+            'is_stub',
+        ]
+
+        for field in required_fields:
+            assert field in data, f"Field '{field}' should be in stub serializer"
+
+        # Verify we're NOT including heavyweight fields that were removed
+        removed_fields = ['lead_time', 'result']
+        for field in removed_fields:
+            assert field not in data, f"Field '{field}' should NOT be in minimal stub serializer"
+
+    def test_full_serializer_includes_result(self):
+        """Test that the full AnnotationSerializer includes the result field."""
+        serializer = AnnotationSerializer(self.annotation)
+        data = serializer.data
+
+        # Result should be in the full serializer
+        assert 'result' in data
+        assert len(data['result']) == 1
+        assert data['result'][0]['type'] == 'labels'
+
+    def test_full_serializer_does_not_have_is_stub(self):
+        """Test that the full AnnotationSerializer does not include is_stub flag."""
+        serializer = AnnotationSerializer(self.annotation)
+        data = serializer.data
+
+        # is_stub should NOT be in the full serializer
+        assert 'is_stub' not in data
+
+
+class TestAnnotationsStubQueryParameter(APITestCase):
+    """Test the annotations_stub query parameter for TaskAPI."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.organization = OrganizationFactory(created_by_active_organization=True)
+        cls.project = ProjectFactory(organization=cls.organization)
+        cls.user = cls.organization.created_by
+        cls.task = TaskFactory(project=cls.project, data={'text': 'test'})
+        cls.annotation = AnnotationFactory(
+            task=cls.task,
+            completed_by=cls.user,
+            result=[
+                {
+                    'from_name': 'label',
+                    'to_name': 'text',
+                    'type': 'labels',
+                    'value': {'labels': ['class_A'], 'start': 0, 'end': 10},
+                }
+            ],
+        )
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_on')
+    def test_task_api_with_annotations_stub_enabled(self):
+        """Test that TaskAPI returns stub annotations when feature flag is enabled and annotations_stub=true."""
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/tasks/{self.task.id}/?annotations_stub=true')
+
+        assert response.status_code == 200
+        data = response.json()
+
+        assert 'annotations' in data
+        assert len(data['annotations']) == 1
+
+        annotation_data = data['annotations'][0]
+        # When stub mode is enabled, result should be excluded and is_stub should be True
+        assert 'result' not in annotation_data
+        assert annotation_data.get('is_stub') is True
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_on')
+    def test_task_api_stub_annotations_respect_annotations_ordering_desc(self):
+        """annotations_ordering=-id must return highest id first (not prefetch cache order)."""
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            result=[
+                {
+                    'from_name': 'label',
+                    'to_name': 'text',
+                    'type': 'labels',
+                    'value': {'labels': ['class_B'], 'start': 0, 'end': 5},
+                }
+            ],
+        )
+        self.client.force_authenticate(user=self.user)
+        url = f'/api/tasks/{self.task.id}/?annotations_stub=true&annotations_ordering=-id&project={self.project.id}'
+        response = self.client.get(url)
+        assert response.status_code == 200
+        ids = [row['id'] for row in response.json()['annotations']]
+        assert len(ids) == 2
+        assert ids == sorted(ids, reverse=True), ids
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_on')
+    def test_task_api_without_annotations_stub(self):
+        """Test that TaskAPI returns full annotations when annotations_stub is not set."""
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/tasks/{self.task.id}/')
+
+        assert response.status_code == 200
+        data = response.json()
+
+        assert 'annotations' in data
+        assert len(data['annotations']) == 1
+
+        annotation_data = data['annotations'][0]
+        # Without stub mode, result should be included
+        assert 'result' in annotation_data
+        assert 'is_stub' not in annotation_data
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_off')
+    def test_task_api_with_feature_flag_disabled(self):
+        """Test that TaskAPI ignores annotations_stub when feature flag is disabled."""
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/tasks/{self.task.id}/?annotations_stub=true')
+
+        assert response.status_code == 200
+        data = response.json()
+
+        assert 'annotations' in data
+        assert len(data['annotations']) == 1
+
+        annotation_data = data['annotations'][0]
+        # With feature flag disabled, annotations_stub should be ignored
+        # and full annotations should be returned
+        assert 'result' in annotation_data
+        assert 'is_stub' not in annotation_data
+
+
+class TestSingleAnnotationEndpoint(APITestCase):
+    """Test the single annotation endpoint for lazy loading."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.organization = OrganizationFactory(created_by_active_organization=True)
+        cls.project = ProjectFactory(organization=cls.organization)
+        cls.user = cls.organization.created_by
+        cls.task = TaskFactory(project=cls.project, data={'text': 'test'})
+        cls.annotation = AnnotationFactory(
+            task=cls.task,
+            completed_by=cls.user,
+            result=[
+                {
+                    'from_name': 'label',
+                    'to_name': 'text',
+                    'type': 'labels',
+                    'value': {'labels': ['class_A'], 'start': 0, 'end': 10},
+                }
+            ],
+        )
+
+    def test_get_single_annotation(self):
+        """Test that single annotation endpoint returns full annotation data."""
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/annotations/{self.annotation.id}/')
+
+        assert response.status_code == 200
+        data = response.json()
+
+        # Single annotation endpoint should always return full data
+        assert 'result' in data
+        assert len(data['result']) == 1
+        assert data['result'][0]['type'] == 'labels'
+        assert data['id'] == self.annotation.id
+
+
+class TestTaskAgreementAPI(APITestCase):
+    """Test the task agreement endpoint for efficient label aggregation (FIT-720)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.organization = OrganizationFactory(created_by_active_organization=True)
+        cls.project = ProjectFactory(organization=cls.organization)
+        cls.user = cls.organization.created_by
+        cls.task = TaskFactory(project=cls.project, data={'text': 'test'})
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_off')
+    def test_agreement_endpoint_available_without_lazy_load_flag(self):
+        """Agreement is a summary payload, not a lazy-load concern, so FIT-720 does not gate it."""
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/tasks/{self.task.id}/agreement/')
+
+        assert response.status_code == 200
+        assert response.json()['total_annotations'] == 0
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_on')
+    def test_agreement_endpoint_empty_task(self):
+        """Test summary endpoint returns empty distributions for task with no annotations."""
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/tasks/{self.task.id}/agreement/')
+
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data['total_annotations'] == 0
+        assert data['distributions'] == {}
+        assert 'agreement' in data
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_on')
+    def test_agreement_endpoint_with_labels(self):
+        """Test summary endpoint correctly aggregates label annotations."""
+        # Create multiple annotations with different labels
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            result=[
+                {
+                    'from_name': 'label',
+                    'to_name': 'text',
+                    'type': 'labels',
+                    'value': {'labels': ['Car'], 'start': 0, 'end': 10},
+                }
+            ],
+        )
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            result=[
+                {
+                    'from_name': 'label',
+                    'to_name': 'text',
+                    'type': 'labels',
+                    'value': {'labels': ['Car'], 'start': 0, 'end': 10},
+                },
+                {
+                    'from_name': 'label',
+                    'to_name': 'text',
+                    'type': 'labels',
+                    'value': {'labels': ['Person'], 'start': 11, 'end': 20},
+                },
+            ],
+        )
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            result=[
+                {
+                    'from_name': 'label',
+                    'to_name': 'text',
+                    'type': 'labels',
+                    'value': {'labels': ['Dog'], 'start': 0, 'end': 10},
+                }
+            ],
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/tasks/{self.task.id}/agreement/')
+
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data['total_annotations'] == 3
+        assert 'label' in data['distributions']
+        assert data['distributions']['label']['type'] == 'labels'
+        # Car appears twice, Person once, Dog once
+        assert data['distributions']['label']['labels'] == {'Car': 2, 'Person': 1, 'Dog': 1}
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_on')
+    def test_agreement_endpoint_with_choices(self):
+        """Test summary endpoint correctly aggregates choices."""
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            result=[
+                {
+                    'from_name': 'sentiment',
+                    'to_name': 'text',
+                    'type': 'choices',
+                    'value': {'choices': ['Positive']},
+                }
+            ],
+        )
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            result=[
+                {
+                    'from_name': 'sentiment',
+                    'to_name': 'text',
+                    'type': 'choices',
+                    'value': {'choices': ['Positive']},
+                }
+            ],
+        )
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            result=[
+                {
+                    'from_name': 'sentiment',
+                    'to_name': 'text',
+                    'type': 'choices',
+                    'value': {'choices': ['Negative']},
+                }
+            ],
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/tasks/{self.task.id}/agreement/')
+
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data['total_annotations'] == 3
+        assert data['distributions']['sentiment']['type'] == 'choices'
+        assert data['distributions']['sentiment']['labels'] == {'Positive': 2, 'Negative': 1}
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_on')
+    def test_agreement_endpoint_with_ratings(self):
+        """Test summary endpoint correctly calculates rating average."""
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            result=[
+                {
+                    'from_name': 'rating',
+                    'to_name': 'text',
+                    'type': 'rating',
+                    'value': {'rating': 5},
+                }
+            ],
+        )
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            result=[
+                {
+                    'from_name': 'rating',
+                    'to_name': 'text',
+                    'type': 'rating',
+                    'value': {'rating': 3},
+                }
+            ],
+        )
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            result=[
+                {
+                    'from_name': 'rating',
+                    'to_name': 'text',
+                    'type': 'rating',
+                    'value': {'rating': 4},
+                }
+            ],
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/tasks/{self.task.id}/agreement/')
+
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data['total_annotations'] == 3
+        assert data['distributions']['rating']['type'] == 'rating'
+        assert data['distributions']['rating']['average'] == 4.0  # (5 + 3 + 4) / 3
+        assert data['distributions']['rating']['count'] == 3
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_on')
+    def test_agreement_endpoint_excludes_cancelled_annotations(self):
+        """Test that cancelled annotations are not included in summary distributions."""
+        # Create a normal annotation
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            result=[
+                {
+                    'from_name': 'label',
+                    'to_name': 'text',
+                    'type': 'labels',
+                    'value': {'labels': ['Valid']},
+                }
+            ],
+        )
+        # Create a cancelled annotation
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            was_cancelled=True,
+            result=[
+                {
+                    'from_name': 'label',
+                    'to_name': 'text',
+                    'type': 'labels',
+                    'value': {'labels': ['Skipped']},
+                }
+            ],
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/tasks/{self.task.id}/agreement/')
+
+        assert response.status_code == 200
+        data = response.json()
+
+        # Only 1 annotation should be counted (the non-cancelled one)
+        assert data['total_annotations'] == 1
+        assert data['distributions']['label']['labels'] == {'Valid': 1}
+        # Skipped should not appear as it was from cancelled annotation
+        assert 'Skipped' not in data['distributions']['label']['labels']
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_on')
+    def test_agreement_endpoint_with_multiple_controls(self):
+        """Test summary endpoint handles multiple control types in one annotation."""
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            result=[
+                {
+                    'from_name': 'label',
+                    'to_name': 'image',
+                    'type': 'rectanglelabels',
+                    'value': {'rectanglelabels': ['Car'], 'x': 10, 'y': 10, 'width': 50, 'height': 50},
+                },
+                {
+                    'from_name': 'sentiment',
+                    'to_name': 'text',
+                    'type': 'choices',
+                    'value': {'choices': ['Positive']},
+                },
+                {
+                    'from_name': 'quality',
+                    'to_name': 'text',
+                    'type': 'rating',
+                    'value': {'rating': 5},
+                },
+            ],
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/tasks/{self.task.id}/agreement/')
+
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data['total_annotations'] == 1
+        # All three controls should be present
+        assert 'label' in data['distributions']
+        assert 'sentiment' in data['distributions']
+        assert 'quality' in data['distributions']
+        assert data['distributions']['label']['labels'] == {'Car': 1}
+        assert data['distributions']['sentiment']['labels'] == {'Positive': 1}
+        assert data['distributions']['quality']['average'] == 5.0
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_on')
+    def test_agreement_endpoint_task_not_found(self):
+        """Test that summary endpoint returns 404 for non-existent task."""
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get('/api/tasks/99999999/agreement/')
+
+        assert response.status_code == 404
+        assert response.json()['error'] == 'Task not found'
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_on')
+    def test_agreement_endpoint_with_taxonomy(self):
+        """Test summary endpoint correctly handles taxonomy labels."""
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            result=[
+                {
+                    'from_name': 'taxonomy',
+                    'to_name': 'text',
+                    'type': 'taxonomy',
+                    'value': {'taxonomy': [['Animals', 'Mammals', 'Dog'], ['Animals', 'Mammals', 'Cat']]},
+                }
+            ],
+        )
+        AnnotationFactory(
+            task=self.task,
+            completed_by=self.user,
+            result=[
+                {
+                    'from_name': 'taxonomy',
+                    'to_name': 'text',
+                    'type': 'taxonomy',
+                    'value': {'taxonomy': [['Animals', 'Mammals', 'Dog']]},
+                }
+            ],
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/tasks/{self.task.id}/agreement/')
+
+        assert response.status_code == 200
+        data = response.json()
+
+        # Taxonomy aggregates leaf nodes
+        assert data['distributions']['taxonomy']['labels'] == {'Dog': 2, 'Cat': 1}
+
+
+class TestTaskSummaryAPI(APITestCase):
+    """Test the v2 task summary endpoint response shape (FIT-720)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.organization = OrganizationFactory(created_by_active_organization=True)
+        cls.project = ProjectFactory(organization=cls.organization)
+        cls.user = cls.organization.created_by
+        cls.task = TaskFactory(project=cls.project, data={'text': 'test'})
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_off')
+    def test_summary_endpoint_available_without_lazy_load_flag(self):
+        """Summary is permissioned by tasks_view; FIT-720 only controls lazy-loading task GET."""
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/tasks/{self.task.id}/summary/')
+        assert response.status_code == 200
+        assert response.json()['task']['id'] == self.task.id
+
+    @pytest.mark.usefixtures('fflag_fix_all_fit_720_lazy_load_annotations_on')
+    def test_summary_endpoint_includes_annotations_and_task(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/tasks/{self.task.id}/summary/')
+        assert response.status_code == 200
+        data = response.json()
+        assert data['total_predictions'] == 0
+        assert data['annotations'] == []
+        assert data['task']['id'] == self.task.id
+
+
+class TestAnnotationResultDedupe(APITestCase):
+    """FIT-1669 RED: write-path dedupe for AnnotationSerializer.
+
+    Duplicate-id result entries (same (id, from_name, type)) must be collapsed before
+    persistence. We exercise the serializer validator directly — cheaper than a full
+    API round trip and keeps the failure mode localized to the write boundary we are
+    fixing.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.organization = OrganizationFactory(created_by_active_organization=True)
+        cls.project = ProjectFactory(organization=cls.organization)
+        cls.user = cls.organization.created_by
+        cls.task = TaskFactory(project=cls.project, data={'text': 'test'})
+
+    def test_annotation_validate_result_collapses_duplicate_region_ids(self):
+        serializer = AnnotationSerializer(
+            data={
+                'task': self.task.id,
+                'completed_by': self.user.id,
+                'result': FIT_1669_DUPLICATE_RESULT,
+            }
+        )
+        assert serializer.is_valid(), serializer.errors
+
+        cleaned = serializer.validated_data['result']
+        assert len(cleaned) == 3, cleaned
+        assert [row['id'] for row in cleaned] == ['region-A', 'region-B', 'region-C']
+        # First occurrence wins — later duplicates are dropped.
+        assert cleaned[0]['value']['taxonomy'] == [['A1_term_inexact', 'B2_diff_trads_var']]
+
+    def test_annotation_validate_result_preserves_distinct_from_name(self):
+        """Two rows sharing `id` but with different `from_name` must both survive."""
+        payload = [
+            {'id': 'shared', 'from_name': 'tax', 'to_name': 'txt', 'type': 'taxonomy', 'value': {'taxonomy': [['A']]}},
+            {'id': 'shared', 'from_name': 'rating', 'to_name': 'txt', 'type': 'rating', 'value': {'rating': 4}},
+        ]
+        serializer = AnnotationSerializer(data={'task': self.task.id, 'completed_by': self.user.id, 'result': payload})
+        assert serializer.is_valid(), serializer.errors
+        assert serializer.validated_data['result'] == payload

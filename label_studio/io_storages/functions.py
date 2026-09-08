@@ -1,0 +1,116 @@
+import logging
+from typing import Dict, Iterable, List, Union
+
+from django.conf import settings
+from django.db.models import Prefetch
+from django.shortcuts import get_object_or_404
+from io_storages.base_models import ImportStorage
+from rest_framework.exceptions import PermissionDenied, ValidationError
+
+logger = logging.getLogger(__name__)
+
+
+def validate_storage_instance(request, serializer_class):
+    """
+    Preload and prepare a storage instance from request data.
+
+    This function handles the common logic for loading existing storage instances
+    or creating new ones from request data, including permission checks and
+    serializer validation.
+
+    Args:
+        request: The HTTP request containing storage data
+        serializer_class: The serializer class to use for validation
+
+    Returns:
+        The prepared storage instance
+
+    Raises:
+        PermissionDenied: If user doesn't have permission to access the storage
+        ValidationError: If serializer validation fails
+    """
+    if not serializer_class or not hasattr(serializer_class, 'Meta'):
+        raise ValidationError('Invalid or missing serializer class')
+
+    storage_id = request.data.get('id')
+    instance = None
+
+    if storage_id:
+        instance = get_object_or_404(serializer_class.Meta.model.objects.all(), pk=storage_id)
+        if not instance.has_permission(request.user):
+            raise PermissionDenied()
+
+    # combine instance fields with request.data
+    serializer = serializer_class(data=request.data)
+    serializer.is_valid(raise_exception=True)
+
+    # if storage exists, we have to use instance from DB,
+    # because instance from serializer won't have credentials, they were popped intentionally
+    if instance:
+        instance = serializer.update(instance, serializer.validated_data)
+    else:
+        instance = serializer_class.Meta.model(**serializer.validated_data)
+
+    # double check: not all storages validate connection in serializer, just make another explicit check here
+    try:
+        instance.validate_connection()
+    except Exception as exc:
+        logger.error(f'Error validating storage connection: {exc}')
+        raise ValidationError('Error validating storage connection')
+
+    return instance
+
+
+def get_storage_list():
+    # AOI 二开仅保留本地文件/上传导入；外部云存储（S3/GCS/Azure/Redis 数据源）已剥离。
+    return []
+
+
+def get_storage_by_url(url: Union[str, List, Dict], storage_objects: Iterable[ImportStorage]) -> ImportStorage:
+    """Find the first compatible storage and returns storage that can emit pre-signed URL"""
+
+    for storage_object in storage_objects:
+        # check url is string because task can have int, float, dict, list
+        # and 'can_resolve_url' will fail
+        if isinstance(url, str) and storage_object.can_resolve_url(url):
+            return storage_object
+
+    # url is list or dict
+    if isinstance(url, dict) or isinstance(url, list):
+        for storage_object in storage_objects:
+            if storage_object.can_resolve_url(url):
+                # note: only first found storage_object will be used for link resolving
+                # can_resolve_url now checks both the scheme and the bucket to ensure the correct storage is used
+                return storage_object
+
+
+def resolve_own_collection_export_storage(url, project):
+    """An export target that may serve this URI, or None.
+
+    Export connections resolve only the project's own collection folder. They
+    match on bucket name alone and are commonly shared across an organization,
+    so accepting any key in the bucket would let a client-supplied URI read
+    every other project's exported data through a task it happens to can view.
+    """
+    from io_storages.utils import is_own_collection_key, parse_bucket_uri
+
+    if not isinstance(url, str):
+        return None
+    storage = get_storage_by_url(url, project.get_all_export_storage_objects)
+    if storage is None:
+        return None
+    uri = parse_bucket_uri(url, storage)
+    if uri is None or not is_own_collection_key(uri.path, project.organization_id, project.id):
+        logger.warning(f'Refusing export-storage resolution outside project {project.id} own collection folder')
+        return None
+    return storage
+
+
+def get_import_storage_link_prefetches() -> list[Prefetch]:
+    from tasks.models import Task
+
+    prefetches = []
+    for link_name in settings.IO_STORAGES_IMPORT_LINK_NAMES:
+        relation = Task._meta.get_field(link_name)
+        prefetches.append(Prefetch(link_name, queryset=relation.related_model.objects.select_related('storage')))
+    return prefetches

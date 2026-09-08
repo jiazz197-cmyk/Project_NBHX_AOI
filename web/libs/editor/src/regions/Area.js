@@ -1,0 +1,112 @@
+import { types } from "mobx-state-tree";
+import Registry from "../core/Registry";
+import Tree from "../core/Tree";
+import { AreaMixin } from "../mixins/AreaMixin";
+import NormalizationMixin from "../mixins/Normalization";
+import RegionsMixin from "../mixins/Regions";
+import { RectRegionModel } from "./RectRegion";
+import { KeyPointRegionModel } from "./KeyPointRegion";
+import { AudioRegionModel } from "./AudioRegion";
+import { PolygonRegionModel } from "./PolygonRegion";
+import { VectorRegionModel } from "./VectorRegion";
+import { EllipseRegionModel } from "./EllipseRegion";
+import { RichTextRegionModel } from "./RichTextRegion";
+import { BrushRegionModel } from "./BrushRegion";
+import { TimelineRegionModel } from "./TimelineRegion";
+import { TimeSeriesRegionModel } from "./TimeSeriesRegion";
+import { ParagraphsRegionModel } from "./ParagraphsRegion";
+import { VideoRectangleRegionModel } from "./VideoRectangleRegion";
+import { isVideoVectorRegionValue, VideoVectorRegionModel } from "./VideoVectorRegion";
+import { BitmaskRegionModel } from "./BitmaskRegion";
+
+// general Area type for classification Results which doesn't belong to any real Area
+const ClassificationArea = types.compose(
+  "ClassificationArea",
+  RegionsMixin,
+  NormalizationMixin,
+  AreaMixin,
+  types
+    .model({
+      object: types.late(() => types.reference(types.union(...Registry.objectTypes()))),
+      // true only for global classifications
+      classification: true,
+    })
+    .views((_self) => ({
+      get supportSuggestions() {
+        return false;
+      },
+      // it's required in some contexts when it's treated as a region
+      get type() {
+        return "";
+      },
+    }))
+    .actions(() => ({
+      serialize: () => ({}),
+    })),
+);
+
+const Area = types.union(
+  {
+    dispatcher(sn) {
+      // for some deserializations
+      if (sn.$treenode) return sn.$treenode.type;
+
+      for (const customTag of Registry.customTags) {
+        if (customTag.region && customTag.detector) {
+          if (customTag.detector(sn)) return customTag.region;
+        }
+      }
+
+      if (
+        !sn.points && // dirty hack to make it work with polygons, but may be the whole condition is not necessary at all
+        !sn.shape && // same for vector
+        // `sequence` and `ranges` are used for video regions
+        !sn.sequence &&
+        !sn.ranges &&
+        !sn.imageDataURL &&
+        sn.value &&
+        Object.values(sn.value).length <= 1
+      )
+        return ClassificationArea;
+      // may be a tag itself or just its name
+      const objectName = Tree.cleanUpId(sn.object.name || sn.object);
+      // we have to use current config to detect Object tag by name
+      const tag = window.Htx.annotationStore.names.get(objectName);
+      // provide value to detect Area by data
+      const available = Registry.getAvailableAreas(tag.type, sn);
+      // union of all available Areas for this Object type
+
+      if (tag.type === "video") {
+        const seq = sn.sequence || sn.value?.sequence;
+
+        if (seq) {
+          if (isVideoVectorRegionValue(sn)) return VideoVectorRegionModel;
+          return VideoRectangleRegionModel;
+        }
+        return TimelineRegionModel;
+      }
+
+      if (!available.length) return ClassificationArea;
+      return types.union(...available, ClassificationArea);
+    },
+  },
+  AudioRegionModel,
+  ParagraphsRegionModel,
+  TimelineRegionModel,
+  TimeSeriesRegionModel,
+  RectRegionModel,
+  RichTextRegionModel,
+  KeyPointRegionModel,
+  EllipseRegionModel,
+  PolygonRegionModel,
+  VectorRegionModel,
+  BrushRegionModel,
+  BitmaskRegionModel,
+  VideoRectangleRegionModel,
+  VideoVectorRegionModel,
+  ClassificationArea,
+  ...Registry.customTags.map((t) => t.region).filter(Boolean),
+);
+
+export { ClassificationArea };
+export default Area;

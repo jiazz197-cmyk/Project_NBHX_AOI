@@ -1,0 +1,19 @@
+default_stages: [ pre-push ]
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.1
+    hooks:
+      # Run the linter.
+      - id: ruff-check
+        args: [ --no-fix, --show-fixes ]
+      # Run the formatter.
+      - id: ruff-format
+        args: [ --check, --diff ]
+  - repo: local
+    hooks:
+      - id: biome-check
+        name: biome-check
+        entry: bash -c 'cd web && yarn biome check . --diagnostic-level=error'
+        language: system
+        pass_filenames: false
+        files: ^web/.*

@@ -1,0 +1,1220 @@
+/* global LSF_VERSION */
+
+import { destroy, detach, flow, getEnv, getParent, getSnapshot, isRoot, types, walk } from "mobx-state-tree";
+
+import { uniqBy } from "@humansignal/core/lib/utils/lodash-replacements";
+import InfoModal from "../components/Infomodal/Infomodal";
+import { Hotkey } from "../core/Hotkey";
+import { destroy as destroySharedStore } from "../mixins/SharedChoiceStore/mixin";
+import ToolsManager from "../tools/Manager";
+import Utils from "../utils";
+import { guidGenerator } from "../utils/unique";
+import { clamp, delay, isDefined } from "../utils/utilities";
+import { CREATE_RELATION_MODE } from "./Annotation/LinkingModes";
+import AnnotationStore from "./Annotation/store";
+import Project from "./ProjectStore";
+import Settings from "./SettingsStore";
+import Task from "./TaskStore";
+import { UserExtended } from "./UserStore";
+import { UserLabels } from "./UserLabels";
+import { emitRegionDeleted } from "../utils/labelingTelemetry";
+import { FF_CUSTOM_SCRIPT, FF_LSDV_4998, FF_REVIEWER_FLOW, FF_SIMPLE_INIT, isFF } from "../utils/feature-flags";
+import { CommentStore } from "./Comment/CommentStore";
+import { CustomButton } from "./CustomButton";
+
+const hotkeys = Hotkey("AppStore", "Global Hotkeys");
+
+export default types
+  .model("AppStore", {
+    /**
+     * XML config
+     */
+    config: types.string,
+
+    /**
+     * Task with data, id and project
+     */
+    task: types.maybeNull(Task),
+
+    project: types.maybeNull(Project),
+
+    /**
+     * History of task {taskId, annotationId}:
+     */
+    taskHistory: types.array(
+      types.model({
+        taskId: types.number,
+        annotationId: types.maybeNull(types.string),
+      }),
+      [],
+    ),
+
+    /**
+     * Configure the visual UI shown to the user
+     */
+    interfaces: types.array(types.string),
+
+    /**
+     * Flag for labeling of tasks
+     */
+    explore: types.optional(types.boolean, false),
+
+    /**
+     * Annotations Store
+     */
+    annotationStore: types.optional(AnnotationStore, {
+      annotations: [],
+      predictions: [],
+      history: [],
+    }),
+
+    /**
+     * Comments Store
+     */
+    commentStore: types.optional(CommentStore, {
+      comments: [],
+    }),
+
+    /**
+     * User of Label Studio
+     */
+    user: types.optional(types.maybeNull(types.safeReference(UserExtended)), null),
+
+    /**
+     * Debug for development environment
+     */
+    debug: window.HTX_DEBUG === true,
+
+    /**
+     * Settings of Label Studio
+     */
+    settings: types.optional(Settings, {}),
+
+    /**
+     * Data of description flag
+     */
+    description: types.maybeNull(types.string),
+    // apiCalls: types.optional(types.boolean, true),
+
+    /**
+     * Flag for settings
+     */
+    showingSettings: types.optional(types.boolean, false),
+    /**
+     * Flag
+     * Description of task in Label Studio
+     */
+    showingDescription: types.optional(types.boolean, false),
+    /**
+     * Loading of Label Studio
+     */
+    isLoading: types.optional(types.boolean, false),
+    /**
+     * Submitting task; used to prevent from duplicating requests
+     */
+    isSubmitting: false,
+    /**
+     * Flag for disable task in Label Studio
+     */
+    noTask: types.optional(types.boolean, false),
+    /**
+     * Flag for no access to specific task
+     */
+    noAccess: types.optional(types.boolean, false),
+    /**
+     * Flag for overlap reached - prevents annotation submission
+     */
+    overlapReached: types.optional(types.boolean, false),
+    /**
+     * Message to show when overlap is reached
+     */
+    overlapReachedMessage: types.optional(
+      types.string,
+      "Annotation overlap has been reached for this task. Your draft is preserved but cannot be submitted.",
+    ),
+    /**
+     * Finish of labeling
+     */
+    labeledSuccess: types.optional(types.boolean, false),
+
+    /**
+     * Show or hide comments section
+     */
+    showComments: false,
+
+    /**
+     * Dynamic preannotations
+     */
+    _autoAnnotation: false,
+
+    /**
+     * Auto accept suggested annotations
+     */
+    _autoAcceptSuggestions: false,
+
+    /**
+     * Indicator for suggestions awaiting
+     */
+    awaitingSuggestions: false,
+
+    users: types.optional(types.array(UserExtended), []),
+
+    userLabels: types.optional(UserLabels, { controls: {} }),
+
+    queueTotal: types.optional(types.number, 0),
+
+    queuePosition: types.optional(types.number, 0),
+
+    /**
+     * Project field used for applying classifications to comments
+     */
+    commentClassificationConfig: types.maybeNull(types.string),
+
+    customButtons: types.map(
+      types.union(types.string, CustomButton, types.array(types.union(types.string, CustomButton))),
+    ),
+  })
+  .preProcessSnapshot((sn) => {
+    // This should only be handled if the sn.user value is an object, and converted to a reference id for other
+    // entities.
+    if (typeof sn.user !== "number") {
+      const currentUser = sn.user ?? window.APP_SETTINGS?.user ?? null;
+
+      // This should never be null, but just incase the app user is missing from constructor or the window
+      if (currentUser) {
+        sn.user = currentUser.id;
+
+        sn.users = sn.users?.length
+          ? [currentUser, ...sn.users.filter(({ id }) => id !== currentUser.id)]
+          : [currentUser];
+      }
+    }
+    // fix for old version of custom buttons which were just an array
+    // @todo remove after a short time
+    if (Array.isArray(sn.customButtons)) {
+      sn.customButtons = { _replace: sn.customButtons };
+    }
+    return {
+      ...sn,
+      _autoAnnotation: localStorage.getItem("autoAnnotation") === "true",
+      _autoAcceptSuggestions: localStorage.getItem("autoAcceptSuggestions") === "true",
+    };
+  })
+  .volatile(() => ({
+    version: typeof LSF_VERSION === "string" ? LSF_VERSION : "0.0.0",
+    initialized: false,
+    // Submit/skip hotkeys are inert while false. Defaults to true so hosts that
+    // don't manage it keep hotkeys live; hosts with async task loading (DM) hold
+    // it false until the task and its annotations are fully presented.
+    hydrated: true,
+    suggestionsRequest: null,
+    onDemandCourses: [],
+    hideInstructionsForCourses: false,
+    onOpenOnDemandCourse: null,
+    // @todo should be removed along with the FF; it's used to detect FF in other parts
+    simpleInit: isFF(FF_SIMPLE_INIT),
+  }))
+  .views((self) => ({
+    get events() {
+      return getEnv(self).events;
+    },
+    get hasSegmentation() {
+      // not an object and not a classification
+      const isSegmentation = (t) => !t.getAvailableStates && !t.perRegionVisible;
+
+      return Array.from(self.annotationStore.names.values()).some(isSegmentation);
+    },
+    get canGoNextTask() {
+      const hasHistory = self.task && self.taskHistory && self.taskHistory.length > 1;
+
+      if (hasHistory) {
+        const lastTaskId = self.taskHistory[self.taskHistory.length - 1].taskId;
+
+        return self.task.id !== lastTaskId;
+      }
+      return false;
+    },
+    get canGoPrevTask() {
+      const hasHistory = self.task && self.taskHistory && self.taskHistory.length > 1;
+
+      if (hasHistory) {
+        const firstTaskId = self.taskHistory[0].taskId;
+
+        return self.task.id !== firstTaskId;
+      }
+      return false;
+    },
+    get forceAutoAnnotation() {
+      return getEnv(self).forceAutoAnnotation;
+    },
+    get forceAutoAcceptSuggestions() {
+      return getEnv(self).forceAutoAcceptSuggestions;
+    },
+    get autoAnnotation() {
+      return self.forceAutoAnnotation || self._autoAnnotation;
+    },
+    get autoAcceptSuggestions() {
+      return self.forceAutoAcceptSuggestions || self._autoAcceptSuggestions;
+    },
+  }))
+  .actions((self) => {
+    /**
+     * Update settings display state
+     */
+    function toggleSettings() {
+      self.showingSettings = !self.showingSettings;
+    }
+
+    /**
+     * Update description display state
+     */
+    function toggleDescription() {
+      self.showingDescription = !self.showingDescription;
+    }
+
+    function setFlags(flags) {
+      const names = [
+        "showingSettings",
+        "showingDescription",
+        "isLoading",
+        "isSubmitting",
+        "noTask",
+        "noAccess",
+        "overlapReached",
+        "overlapReachedMessage",
+        "labeledSuccess",
+        "awaitingSuggestions",
+      ];
+
+      for (const n of names) if (n in flags) self[n] = flags[n];
+    }
+
+    function setHydrated(value) {
+      self.hydrated = value;
+    }
+
+    /**
+     * Check for interfaces
+     * @param {string} name
+     * @returns {string | undefined}
+     */
+    function hasInterface(...names) {
+      return self.interfaces.find((i) => names.includes(i)) !== undefined;
+    }
+
+    function addInterface(name) {
+      return self.interfaces.push(name);
+    }
+
+    function toggleInterface(name, value) {
+      const index = self.interfaces.indexOf(name);
+      const newValue = value ?? index < 0;
+
+      if (newValue) {
+        if (index < 0) self.interfaces.push(name);
+      } else {
+        if (index < 0) return;
+        self.interfaces.splice(index, 1);
+      }
+    }
+
+    function setCourseBottomBar({ courses, hideInstructionsForCourses, onOpenOnDemandCourse }) {
+      self.onDemandCourses = courses;
+      self.hideInstructionsForCourses = hideInstructionsForCourses;
+      self.onOpenOnDemandCourse = onOpenOnDemandCourse;
+      toggleInterface("learning:on-demand", courses.length > 0);
+      toggleInterface("instruction", false);
+    }
+
+    function setDescription(value) {
+      self.description = value;
+    }
+
+    function toggleComments(state) {
+      return (self.showComments = state);
+    }
+
+    /**
+     * Function
+     */
+    function afterCreate() {
+      ToolsManager.setRoot(self);
+
+      // important thing to detect Area atomatically: it hasn't access to store, only via global
+      window.Htx = self;
+
+      self.attachHotkeys();
+
+      getEnv(self).events.invoke("labelStudioLoad", self);
+    }
+
+    function handleSubmitHotkey() {
+      // Stay inert until the host marks the task fully presented (hydrated):
+      // before that the selected annotation can be a blank placeholder, and
+      // submitting it would create a duplicate instead of updating the existing one.
+      if (!self.hydrated || self.isLoading || self.noTask) return;
+      const annotationStore = self.annotationStore;
+      const shouldDenyEmptyAnnotation = self.hasInterface("annotations:deny-empty");
+      const entity = annotationStore.selected;
+      const areResultsEmpty = entity.results.length === 0;
+      const isReview = self.hasInterface("review") || entity.canBeReviewed;
+      const isUpdate = !isReview && isDefined(entity.pk);
+      // no changes were made over previously submitted version — no drafts, no pending changes
+      const noChanges = !entity.history.canUndo && !entity.draftId;
+      const isUpdateDisabled = isFF(FF_REVIEWER_FLOW) && isUpdate && noChanges;
+
+      if (shouldDenyEmptyAnnotation && areResultsEmpty) return;
+      if (annotationStore.viewingAll) return;
+      if (isUpdateDisabled) return;
+      if (entity.isReadOnly()) return;
+      if (entity.hasIncompleteRegions) return;
+
+      entity?.submissionInProgress();
+
+      if (self.hasInterface("annotation:bulk")) {
+        const customButtons = self.customButtons?.get("_replace");
+        const submitButton = customButtons?.find((btn) => btn.name === "submit");
+        if (submitButton && !submitButton.disabled) {
+          self.handleCustomButton?.(submitButton);
+        }
+      } else if (isReview) {
+        self.acceptAnnotation();
+      } else if (!isUpdate && self.hasInterface("submit")) {
+        self.submitAnnotation();
+      } else if (self.hasInterface("update")) {
+        self.updateAnnotation();
+      }
+    }
+
+    function handleSkipHotkey() {
+      if (!self.hydrated || self.isLoading || self.noTask) return;
+      if (self.annotationStore.viewingAll) return;
+
+      const entity = self.annotationStore.selected;
+
+      if (self.hasInterface("review")) {
+        const configured = self.customButtons?.get("reject");
+        const rejectButtons = Array.isArray(configured) ? configured : configured ? [configured] : [];
+        const rejectMenuButtons = rejectButtons.filter((button) => typeof button !== "string" && button.menu);
+
+        if (rejectMenuButtons.length > 1) {
+          window.dispatchEvent(new CustomEvent("lsf:open-reject-menu"));
+        } else if (rejectMenuButtons.length === 1) {
+          entity?.submissionInProgress();
+          self.handleCustomButton?.(rejectMenuButtons[0]);
+        } else {
+          entity?.submissionInProgress();
+          self.rejectAnnotation();
+        }
+      } else {
+        entity?.submissionInProgress();
+        self.skipTask();
+      }
+    }
+
+    function attachHotkeys() {
+      // Unbind previous keys in case LS was re-initialized
+      hotkeys.unbindAll();
+
+      /**
+       * Hotkey for submit
+       */
+      if (self.hasInterface("submit", "update", "review")) {
+        hotkeys.addNamed("annotation:submit", self.handleSubmitHotkey);
+      }
+
+      /**
+       * Hotkey for skip task
+       */
+      if (self.hasInterface("skip", "review")) {
+        hotkeys.addNamed("annotation:skip", self.handleSkipHotkey);
+      }
+
+      /**
+       * Hotkey for delete
+       */
+      hotkeys.addNamed("region:delete-all", () => {
+        const { selected } = self.annotationStore;
+
+        if (window.confirm(getEnv(self).messages.CONFIRM_TO_DELETE_ALL_REGIONS)) {
+          selected.deleteAllRegions();
+        }
+      });
+
+      // create relation
+      hotkeys.addNamed("region:relation", () => {
+        const c = self.annotationStore.selected;
+
+        if (c && c.highlightedNode && !c.isLinkingMode) {
+          c.startLinkingMode(CREATE_RELATION_MODE, c.highlightedNode);
+        }
+      });
+
+      // Focus fist focusable perregion when region is selected
+      hotkeys.addNamed("region:focus", (e) => {
+        e.preventDefault();
+        const c = self.annotationStore.selected;
+
+        if (c && c.highlightedNode && !c.isLinkingMode) {
+          c.highlightedNode.requestPerRegionFocus();
+        }
+      });
+
+      // unselect region
+      hotkeys.addNamed("region:unselect", () => {
+        const c = self.annotationStore.selected;
+
+        if (c && !c.isLinkingMode && !c.isDrawing) {
+          self.annotationStore.history.forEach((obj) => {
+            obj.unselectAll();
+          });
+
+          c.unselectAll();
+        }
+      });
+
+      hotkeys.addNamed("region:visibility", () => {
+        const c = self.annotationStore.selected;
+
+        if (c && !c.isLinkingMode) {
+          c.hideSelectedRegions();
+        }
+      });
+
+      hotkeys.addNamed("region:lock", () => {
+        const c = self.annotationStore.selected;
+
+        if (c && !c.isLinkingMode) {
+          c.lockSelectedRegions();
+        }
+      });
+
+      hotkeys.addNamed("region:visibility-all", () => {
+        const { selected } = self.annotationStore;
+        selected.regionStore.toggleVisibility();
+      });
+
+      hotkeys.addNamed("annotation:undo", () => {
+        const annotation = self.annotationStore.selected;
+
+        // Allow undo even during drawing - the undo() method handles stopping drawing
+        // when appropriate (e.g., when vertices <= 1 for vector regions)
+        // This matches the behavior of the undo button which doesn't check isDrawing
+        annotation.undo();
+      });
+
+      // Quick toggle for Auto-Annotation so the user can temporarily drop
+      // out of SAM capture to select / edit an existing region and flip
+      // back without reaching for the bottombar switch. Mirrors the
+      // DynamicPreannotationsToggle click handler.
+      hotkeys.addNamed("annotation:toggle-auto-annotation", () => {
+        if (!self.hasInterface("auto-annotation") || self.forceAutoAnnotation) return;
+        const next = !self.autoAnnotation;
+        self.setAutoAnnotation(next);
+        if (!next) {
+          ToolsManager.allInstances().forEach((inst) => inst.selectDefault());
+        }
+      });
+
+      hotkeys.addNamed("annotation:redo", () => {
+        const annotation = self.annotationStore.selected;
+
+        // Allow redo even during drawing - matches the behavior of the redo button
+        // which doesn't check isDrawing
+        annotation.redo();
+      });
+
+      hotkeys.addNamed("region:exit", (e) => {
+        e.stopImmediatePropagation();
+
+        const c = self.annotationStore.selected;
+        const managers = ToolsManager.allInstances();
+        const tools = managers
+          .map((m) => m.findSelectedTool())
+          .filter(Boolean)
+          .filter((t) => t.isDrawing);
+        const selectedCompleteDrawingRegions =
+          c?.selectedRegions?.filter((region) => region?.isDrawing && !region.incomplete) ?? [];
+        const shouldUnselectAfterCompletingDrawing =
+          tools.some((t) => t.currentArea?.selected) || selectedCompleteDrawingRegions.length > 0;
+        const clearSelectedCompleteDrawingRegions = () => {
+          // Defer until tool completion and after-create selection have settled.
+          setTimeout(() => {
+            selectedCompleteDrawingRegions.forEach((region) => {
+              region.setDrawing(false);
+              region.notifyDrawingFinished?.();
+            });
+            c?.setIsDrawing(false);
+            c?.unselectAll();
+          });
+        };
+
+        if (tools.length > 0) {
+          tools.forEach((t) => t.complete?.());
+
+          // BROS-1451: VideoVector skeleton editing can resume drawing from an
+          // already-selected region while the user is adding a branch. In that state
+          // Esc used to only complete the tool, forcing a second Esc to unselect.
+          if (shouldUnselectAfterCompletingDrawing && c) {
+            if (selectedCompleteDrawingRegions.length > 0) {
+              clearSelectedCompleteDrawingRegions();
+            } else {
+              setTimeout(() => c.unselectAll());
+            }
+          }
+        } else if (selectedCompleteDrawingRegions.length > 0) {
+          clearSelectedCompleteDrawingRegions();
+        } else if (c && c.isLinkingMode) {
+          c.stopLinkingMode();
+        } else if (!c.isDrawing) {
+          c.unselectAll();
+        }
+      });
+
+      hotkeys.addNamed("region:delete", () => {
+        const c = self.annotationStore.selected;
+
+        if (c) {
+          for (const region of c.selectedRegions) {
+            emitRegionDeleted(c.store, c, {
+              region_id: region.id,
+              region_type: region.type ?? null,
+            });
+          }
+          c.deleteSelectedRegions();
+        }
+      });
+
+      hotkeys.addNamed("region:cycle", () => {
+        const c = self.annotationStore.selected;
+
+        c && c.regionStore.selectNext();
+      });
+
+      // duplicate selected regions
+      hotkeys.addNamed("region:duplicate", (e) => {
+        const { selected } = self.annotationStore;
+        const { serializedSelection } = selected || {};
+
+        if (!serializedSelection?.length) return;
+        e.preventDefault();
+        const results = selected.appendResults(serializedSelection);
+
+        selected.selectAreas(results);
+      });
+    }
+
+    function setTaskHistory(taskHistory) {
+      self.taskHistory = taskHistory;
+    }
+
+    /**
+     *
+     * @param {*} taskObject
+     * @param {*[]} taskHistory
+     */
+    function assignTask(taskObject) {
+      if (taskObject && !Utils.Checkers.isString(taskObject.data)) {
+        taskObject = {
+          ...taskObject,
+          data: JSON.stringify(taskObject.data),
+        };
+      }
+      self.task = Task.create(taskObject);
+
+      if (!self.taskHistory.some((x) => x.taskId === self.task.id)) {
+        self.taskHistory.push({
+          taskId: self.task.id,
+          annotationId: null,
+        });
+      }
+    }
+
+    function assignConfig(config) {
+      const cs = self.annotationStore;
+
+      self.config = config;
+      cs.initRoot(self.config);
+    }
+
+    /* eslint-disable no-unused-vars */
+    function showModal(message, type = "warning") {
+      InfoModal[type](message);
+
+      // InfoModal.warning("You need to label at least something!");
+    }
+    /* eslint-enable no-unused-vars */
+
+    function submitDraft(c, params = {}) {
+      return new Promise((resolve) => {
+        const events = getEnv(self).events;
+
+        if (!events.hasEvent("submitDraft")) return resolve();
+        const res = events.invokeFirst("submitDraft", self, c, params);
+
+        if (res && res.then) res.then(resolve);
+        else resolve(res);
+      });
+    }
+
+    function waitForDraftSubmission() {
+      return new Promise((resolve) => {
+        if (!self.annotationStore.selected.isDraftSaving) resolve();
+
+        const checkInterval = setInterval(() => {
+          if (!self.annotationStore.selected.isDraftSaving) {
+            clearInterval(checkInterval);
+            resolve();
+          }
+        }, 100);
+      });
+    }
+
+    // Set `isSubmitting` flag to block [Submit] and related buttons during request
+    // to prevent from sending duplicating requests.
+    // Better to return request's Promise from SDK to make this work perfect.
+    function handleSubmittingFlag(fn, defaultMessage = "Error during submit") {
+      if (self.isSubmitting || self.isLoading) return;
+      self.setFlags({ isSubmitting: true });
+      const res = fn();
+
+      self.commentStore.setAddedCommentThisSession(false);
+
+      // Wait for request, max 5s to not make disabled forever broken button;
+      // but block for at least 0.2s to prevent from double clicking.
+      Promise.race([Promise.all([res, delay(200)]), delay(5000)])
+        .catch((err) => {
+          showModal(err?.message || err || defaultMessage);
+          console.error(err);
+        })
+        .then(() => self.setFlags({ isSubmitting: false }));
+    }
+
+    function incrementQueuePosition(number = 1) {
+      self.queuePosition = clamp(self.queuePosition + number, 1, self.queueTotal);
+    }
+
+    function submitAnnotation() {
+      if (self.isSubmitting || self.isLoading) return;
+
+      const entity = self.annotationStore.selected;
+      const event = entity.exists ? "updateAnnotation" : "submitAnnotation";
+
+      entity.beforeSend();
+
+      if (!entity.validate()) return;
+
+      if (!isFF(FF_CUSTOM_SCRIPT)) {
+        entity.sendUserGenerate();
+      }
+      handleSubmittingFlag(async () => {
+        if (isFF(FF_CUSTOM_SCRIPT)) {
+          await self.waitForDraftSubmission();
+          const allowedToSave = await getEnv(self).events.invoke("beforeSaveAnnotation", self, entity, { event });
+          if (allowedToSave && allowedToSave.some((x) => x === false)) return;
+
+          entity.sendUserGenerate();
+        }
+        await getEnv(self).events.invoke(event, self, entity);
+        self.incrementQueuePosition();
+        if (isFF(FF_CUSTOM_SCRIPT)) {
+          entity.dropDraft();
+        }
+      });
+      if (!isFF(FF_CUSTOM_SCRIPT)) {
+        entity.dropDraft();
+      }
+    }
+
+    function updateAnnotation(extraData) {
+      if (self.isSubmitting || self.isLoading) return;
+
+      const entity = self.annotationStore.selected;
+
+      entity.beforeSend();
+
+      if (!entity.validate()) return;
+
+      handleSubmittingFlag(async () => {
+        if (isFF(FF_CUSTOM_SCRIPT)) {
+          const allowedToSave = await getEnv(self).events.invoke("beforeSaveAnnotation", self, entity, {
+            event: "updateAnnotation",
+          });
+          if (allowedToSave && allowedToSave.some((x) => x === false)) return;
+        }
+        await getEnv(self).events.invoke("updateAnnotation", self, entity, extraData);
+        self.incrementQueuePosition();
+        if (isFF(FF_CUSTOM_SCRIPT)) {
+          entity.dropDraft();
+          !entity.sentUserGenerate && entity.sendUserGenerate();
+        }
+      });
+      if (!isFF(FF_CUSTOM_SCRIPT)) {
+        entity.dropDraft();
+        !entity.sentUserGenerate && entity.sendUserGenerate();
+      }
+    }
+
+    function skipTask(extraData) {
+      if (self.isSubmitting || self.isLoading) return;
+      const isEnterprise = window.APP_SETTINGS?.billing?.enterprise;
+
+      // Manager roles that can force-skip unskippable tasks (OW=Owner, AD=Admin, MA=Manager)
+      const MANAGER_ROLES = ["OW", "AD", "MA"];
+      const task = self.task;
+      const skipDisabled = isEnterprise ? task?.allow_skip === false : false;
+      const userRole = window.APP_SETTINGS?.user?.role;
+      const hasForceSkipPermission = MANAGER_ROLES.includes(userRole);
+      const canSkip = !skipDisabled || hasForceSkipPermission;
+      if (!canSkip) {
+        console.warn("Task cannot be skipped: allow_skip is false and user lacks manager role");
+        return;
+      }
+      handleSubmittingFlag(() => {
+        getEnv(self).events.invoke("skipTask", self, extraData);
+        self.incrementQueuePosition();
+      }, "Error during skip, try again");
+    }
+
+    function unskipTask() {
+      if (self.isSubmitting || self.isLoading) return;
+      handleSubmittingFlag(() => {
+        getEnv(self).events.invoke("unskipTask", self);
+      }, "Error during cancel skipping task, try again");
+    }
+
+    function acceptAnnotation() {
+      if (self.isSubmitting || self.isLoading) return;
+
+      handleSubmittingFlag(async () => {
+        const entity = self.annotationStore.selected;
+
+        entity.beforeSend();
+        if (!entity.validate()) return;
+        if (isFF(FF_CUSTOM_SCRIPT)) {
+          const allowedToSave = await getEnv(self).events.invoke("beforeSaveAnnotation", self, entity, {
+            event: "acceptAnnotation",
+          });
+          if (allowedToSave && allowedToSave.some((x) => x === false)) return;
+        }
+
+        // changes in current sessions or saved draft should send the result along with approval
+        const isDirty = entity.history.canUndo || entity.versions.draft;
+
+        entity.dropDraft();
+        await getEnv(self).events.invoke("acceptAnnotation", self, { isDirty, entity });
+        self.incrementQueuePosition();
+      }, "Error during accept, try again");
+    }
+
+    function rejectAnnotation({ comment = null }) {
+      if (self.isSubmitting || self.isLoading) return;
+
+      handleSubmittingFlag(async () => {
+        const entity = self.annotationStore.selected;
+
+        entity.beforeSend();
+        if (!entity.validate()) return;
+        if (isFF(FF_CUSTOM_SCRIPT)) {
+          const allowedToSave = await getEnv(self).events.invoke("beforeSaveAnnotation", self, entity, {
+            event: "rejectAnnotation",
+          });
+          if (allowedToSave && allowedToSave.some((x) => x === false)) return;
+        }
+
+        const isDirty = entity.history.canUndo;
+
+        entity.dropDraft();
+        await getEnv(self).events.invoke("rejectAnnotation", self, { isDirty, entity, comment });
+        self.incrementQueuePosition(-1);
+      }, "Error during reject, try again");
+    }
+
+    function handleCustomButton(button) {
+      if (self.isSubmitting || self.isLoading) return;
+      const buttonName = button.name;
+
+      handleSubmittingFlag(async () => {
+        const entity = self.annotationStore.selected;
+
+        entity.beforeSend();
+        // @todo add needsValidation or something like that as a parameter to custom buttons
+        // if (!entity.validate()) return;
+
+        const isDirty = entity.history.canUndo;
+
+        await getEnv(self).events.invoke("customButton", self, buttonName, { isDirty, entity, button });
+        self.incrementQueuePosition();
+        entity.dropDraft();
+      }, `Error during handling ${button} button, try again`);
+    }
+
+    /**
+     * Exchange storage url for presigned url for task
+     */
+    async function presignUrlForProject(url) {
+      // Event invocation returns array of results for all handlers.
+      const urls = await self.events.invoke("presignUrlForProject", self, url);
+
+      const presignUrl = urls?.[0];
+
+      return presignUrl;
+    }
+
+    /**
+     * Reset annotation store
+     */
+    function resetState() {
+      // Tools are attached to the control and object tags
+      // and need to be recreated when we st a new task
+      ToolsManager.removeAllTools();
+
+      // Same with hotkeys
+      Hotkey.unbindAll();
+      self.attachHotkeys();
+      const oldAnnotationStore = self.annotationStore;
+
+      if (oldAnnotationStore) {
+        oldAnnotationStore.beforeReset?.();
+        if (isFF(FF_LSDV_4998)) {
+          destroySharedStore();
+        }
+        detach(oldAnnotationStore);
+        destroy(oldAnnotationStore);
+      }
+
+      // Do NOT forceClear the image cache on task switch. Destroyed ImageEntities
+      // already call releaseRef(), so old entries have refCount 0. Keeping them
+      // allows instant load when switching back to a previously viewed task.
+      // Cache evicts automatically when it exceeds maxSize (100).
+
+      self.annotationStore = AnnotationStore.create({ annotations: [] });
+      self.initialized = false;
+    }
+
+    function resetAnnotationStore() {
+      const oldAnnotationStore = self.annotationStore;
+
+      if (oldAnnotationStore) {
+        oldAnnotationStore.beforeReset?.();
+        oldAnnotationStore.resetAnnotations?.();
+      }
+    }
+
+    /**
+     * Function to initialize annotation store
+     * Given annotations and predictions
+     * `completions` is a fallback for old projects; they'll be saved as `annotations` anyway
+     */
+    function initializeStore({ annotations = [], completions = [], predictions = [], annotationHistory }) {
+      const as = self.annotationStore;
+
+      // some hacks to properly clear react and mobx structures
+      as.afterReset?.();
+
+      if (!as.initialized) {
+        as.initRoot(self.config);
+      }
+
+      // Ensure users referenced by annotations exist in the users store
+      // before annotations are created. This prevents MST reference resolution errors
+      // when annotation.user references a user ID not yet present in the store
+      // (e.g. in review stream where annotators' user data isn't pre-loaded).
+      const allItems = [...(completions ?? []), ...(annotations ?? [])];
+      const userStubs = allItems
+        .map((item) => {
+          const userRef = item.user ?? item.completed_by;
+
+          if (typeof userRef === "number") return { id: userRef };
+          if (userRef && typeof userRef === "object" && userRef.id) return userRef;
+          return null;
+        })
+        .filter(Boolean);
+
+      if (userStubs.length) {
+        self.enrichUsers(userStubs);
+      }
+
+      // goal here is to deserialize everything fast and select only first annotation
+      // no extra processes during eserialization and further processes triggered during select
+      if (self.simpleInit) {
+        window.STORE_INIT_OK = false;
+
+        // add predictions and annotations to the store;
+        // `hidden` will stop them from calling any rendering helpers;
+        // correct annotation will be selected at the end and everything will be called inside.
+        predictions.forEach((p) => {
+          const obj = as.addPrediction(p);
+          const results = p.result.map((r) => ({ ...r, origin: "prediction" }));
+
+          obj.deserializeResults(results, { hidden: true });
+        });
+
+        [...completions, ...annotations].forEach((c) => {
+          const obj = as.addAnnotation(c);
+
+          obj.deserializeResults(c.draft || c.result, { hidden: true });
+        });
+
+        window.STORE_INIT_OK = true;
+        // simple logging to detect if simple init is used on users' machines
+        console.log("LSF: deserialization is finished");
+
+        // Server payloads are appended in API order (newest first — see AnnotationStore.addAnnotation).
+        // Select the newest annotation (index 0), not the oldest (last index).
+        const current = as.annotations[0];
+        const currentPrediction = !current && as.predictions[0];
+
+        if (current) {
+          as.selectAnnotation(current.id);
+          // looks like we still need it anyway, but it's fast and harmless,
+          // and we only call it once on already visible annotation
+          current.reinitHistory();
+        } else if (currentPrediction) {
+          as.selectPrediction(currentPrediction.id);
+        }
+
+        // annotation history is set when annotation is selected,
+        // so no need to set it here
+      } else {
+        (predictions ?? []).forEach((p) => {
+          const obj = as.addPrediction(p);
+
+          as.selectPrediction(obj.id);
+          obj.deserializeResults(
+            p.result.map((r) => ({
+              ...r,
+              origin: "prediction",
+            })),
+          );
+        });
+
+        [...(completions ?? []), ...(annotations ?? [])]?.forEach((c) => {
+          const obj = as.addAnnotation(c);
+
+          as.selectAnnotation(obj.id);
+          obj.deserializeResults(c.draft || c.result);
+          obj.reinitHistory();
+        });
+
+        // Last iteration left the oldest annotation selected; select the newest (API order: index 0).
+        if (as.annotations.length) {
+          as.selectAnnotation(as.annotations[0].id);
+        } else if (as.predictions.length) {
+          as.selectPrediction(as.predictions[0].id);
+        }
+
+        const current = as.annotations[0];
+
+        if (current) current.setInitialValues();
+
+        self.setHistory(annotationHistory);
+      }
+
+      if (!self.initialized) {
+        self.initialized = true;
+        getEnv(self).events.invoke("storageInitialized", self);
+      }
+    }
+
+    function setHistory(history = []) {
+      const as = self.annotationStore;
+
+      as.clearHistory();
+
+      // always check that history is for correct and submitted annotation
+      if (!history.length || !as.selected?.pk) return;
+      if (Number(as.selected.pk) !== Number(history[0].annotation_id)) return;
+
+      (history ?? []).forEach((item) => {
+        const obj = as.addHistory(item);
+
+        obj.deserializeResults(item.result ?? [], { hidden: true });
+      });
+    }
+
+    /**
+     * Hydrate a stubbed history item with full result (FIT-720 lazy load).
+     * Called when the host fetches GET /api/annotation-history/<id>/ and passes the response.
+     */
+    function hydrateHistoryItem(historyItemId, fullItem) {
+      const as = self.annotationStore;
+      // historyItemId is the MST guid (item.id from AnnotationHistory.tsx), which is unique per
+      // history entry. We cannot match by pk because the API can return multiple history records
+      // with the same pk (e.g. "accepted" and "updated" both share pk=248 for the same review).
+      const item = as.history.find((h) => h.id === historyItemId);
+      if (!item) return;
+      item.deserializeResults(fullItem?.result ?? [], { hidden: true });
+      // Mark as no longer a stub so subsequent clicks use selectHistory() directly
+      // instead of re-invoking the async hydration callback. Without this, clicking
+      // A → B → A again re-hydrates A and area.addResult() accumulates duplicate
+      // label results per region ("Car" → "Car, Car").
+      item.is_stub = false;
+      as.selectHistory(item);
+    }
+
+    const setAutoAnnotation = (value) => {
+      self._autoAnnotation = value;
+      localStorage.setItem("autoAnnotation", value);
+    };
+
+    const setAutoAcceptSuggestions = (value) => {
+      self._autoAcceptSuggestions = value;
+      localStorage.setItem("autoAcceptSuggestions", value);
+    };
+
+    const loadSuggestions = flow(function* (request, dataParser) {
+      const requestId = guidGenerator();
+
+      self.suggestionsRequest = requestId;
+
+      self.setFlags({ awaitingSuggestions: true });
+
+      try {
+        const response = yield request;
+
+        if (requestId === self.suggestionsRequest) {
+          self.annotationStore.selected.setSuggestions(dataParser(response));
+          self.setFlags({ awaitingSuggestions: false });
+        }
+      } catch (_e) {
+        self.setFlags({ awaitingSuggestions: false });
+        // @todo handle errors + situation when task is changed
+      }
+    });
+
+    function addAnnotationToTaskHistory(annotationId) {
+      const taskIndex = self.taskHistory.findIndex(({ taskId }) => taskId === self.task.id);
+
+      if (taskIndex >= 0) {
+        self.taskHistory[taskIndex].annotationId = annotationId;
+      }
+    }
+
+    async function postponeTask() {
+      const annotation = self.annotationStore.selected;
+
+      // save draft before postponing; this can be new draft with FF_DEV_4174 off
+      // or annotation created from prediction
+      await annotation.saveDraft({ was_postponed: true });
+      await getEnv(self).events.invoke("nextTask");
+      self.incrementQueuePosition();
+    }
+
+    function nextTask() {
+      if (self.canGoNextTask) {
+        const { taskId, annotationId } =
+          self.taskHistory[self.taskHistory.findIndex((x) => x.taskId === self.task.id) + 1];
+
+        getEnv(self).events.invoke("nextTask", taskId, annotationId);
+        self.incrementQueuePosition();
+      }
+    }
+
+    function prevTask(_e, shouldGoBack = false) {
+      const length = shouldGoBack
+        ? self.taskHistory.length - 1
+        : self.taskHistory.findIndex((x) => x.taskId === self.task.id) - 1;
+
+      if (self.canGoPrevTask || shouldGoBack) {
+        const { taskId, annotationId } = self.taskHistory[length];
+
+        getEnv(self).events.invoke("prevTask", taskId, annotationId);
+        self.incrementQueuePosition(-1);
+      }
+    }
+
+    function setUsers(users) {
+      self.users.replace(users);
+    }
+
+    // @deprecated use `enrichUsers` instead (as mergeUsers will not update existing users and can lose previous data)
+    function mergeUsers(users) {
+      self.setUsers(uniqBy([...getSnapshot(self.users), ...users], "id"));
+    }
+
+    function enrichUsers(users) {
+      const oldUsers = getSnapshot(self.users);
+      const oldUsersMap = {};
+      oldUsers.forEach((user) => {
+        oldUsersMap[user.id] = user;
+      });
+      const newUsers = users.map((user) => {
+        return { ...oldUsersMap[user.id], ...user };
+      });
+      self.setUsers(uniqBy([...newUsers, ...oldUsers], "id"));
+    }
+
+    return {
+      setFlags,
+      setHydrated,
+      addInterface,
+      hasInterface,
+      toggleInterface,
+      setCourseBottomBar,
+      setDescription,
+
+      afterCreate,
+      assignTask,
+      assignConfig,
+      resetState,
+      resetAnnotationStore,
+      initializeStore,
+      setHistory,
+      hydrateHistoryItem,
+      attachHotkeys,
+      handleSubmitHotkey,
+      handleSkipHotkey,
+
+      skipTask,
+      unskipTask,
+      setTaskHistory,
+      submitDraft,
+      waitForDraftSubmission,
+      submitAnnotation,
+      updateAnnotation,
+      acceptAnnotation,
+      rejectAnnotation,
+      handleCustomButton,
+      presignUrlForProject,
+      setUsers,
+      mergeUsers,
+      enrichUsers,
+
+      showModal,
+      toggleComments,
+      toggleSettings,
+      toggleDescription,
+
+      setAutoAnnotation,
+      setAutoAcceptSuggestions,
+      loadSuggestions,
+
+      addAnnotationToTaskHistory,
+      nextTask,
+      prevTask,
+      postponeTask,
+      incrementQueuePosition,
+      beforeDestroy() {
+        ToolsManager.removeAllTools();
+      },
+
+      selfDestroy() {
+        const children = [];
+
+        walk(self, (node) => {
+          if (!isRoot(node) && getParent(node) === self) children.push(node);
+        });
+
+        let node;
+
+        while ((node = children.shift())) {
+          try {
+            destroy(node);
+          } catch (e) {
+            console.log("Problem: ", e);
+          }
+        }
+      },
+    };
+  });

@@ -1,0 +1,32 @@
+import { observer } from "mobx-react";
+import { isStarterCloudPlan } from "@humansignal/core";
+import { cn } from "../../utils/bem";
+import { Actions } from "./Actions";
+import { Controls } from "./Controls";
+import { CurrentTask } from "./CurrentTask";
+import "./BottomBar.prefix.css";
+
+export const BottomBar = observer(({ store }) => {
+  const annotationStore = store.annotationStore;
+  const entity = annotationStore?.selected;
+  const isPrediction = entity?.type === "prediction";
+
+  const isViewAll = annotationStore?.viewingAll === true;
+  const isBulkMode = !isStarterCloudPlan() && store.hasInterface("annotation:bulk");
+
+  return store && !isViewAll ? (
+    <div className={cn("bottombar").toClassName()}>
+      <div className={cn("bottombar").elem("group").toClassName()}>
+        {!isBulkMode && <CurrentTask store={store} />}
+        <Actions store={store} />
+      </div>
+      <div className={cn("bottombar").elem("group").toClassName()}>
+        {store.hasInterface("controls") && (store.hasInterface("review") || !isPrediction) && (
+          <div className={cn("bottombar").elem("section").mod({ flat: true }).toClassName()}>
+            <Controls annotation={entity} />
+          </div>
+        )}
+      </div>
+    </div>
+  ) : null;
+});

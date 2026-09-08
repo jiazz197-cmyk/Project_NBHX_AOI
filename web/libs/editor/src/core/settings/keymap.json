@@ -1,0 +1,348 @@
+{
+  "audio:back": {
+    "key": "ctrl+b",
+    "mac": "command+b",
+    "description": "Back for one second"
+  },
+  "audio:playpause": {
+    "key": "ctrl+p",
+    "mac": "command+p",
+    "description": "Play/pause"
+  },
+  "audio:step-backward": {
+    "key": "alt+a",
+    "description": "Go one step back"
+  },
+  "audio:step-forward": {
+    "key": "alt+d",
+    "description": "Go one step forward"
+  },
+  "ts:grow-left": {
+    "key": "left",
+    "description": "Increase region to the left"
+  },
+  "ts:grow-right": {
+    "key": "right",
+    "description": "Increase region to the right"
+  },
+  "ts:shrink-left": {
+    "key": "alt+left",
+    "description": "Decrease region on the left"
+  },
+  "ts:shrink-right": {
+    "key": "alt+right",
+    "description": "Decrease region on the right"
+  },
+  "ts:grow-left-large": {
+    "key": "shift+left"
+  },
+  "ts:grow-right-large": {
+    "key": "shift+right"
+  },
+  "ts:shrink-left-large": {
+    "key": "shift+alt+left"
+  },
+  "ts:shrink-right-large": {
+    "key": "shift+alt+right"
+  },
+  "ts:pan-left": {
+    "key": "left",
+    "description": "Pan time series view to the left"
+  },
+  "ts:pan-right": {
+    "key": "right",
+    "description": "Pan time series view to the right"
+  },
+  "ts:pan-left-large": {
+    "key": "shift+left",
+    "description": "Pan time series view to the left (large step)"
+  },
+  "ts:pan-right-large": {
+    "key": "shift+right",
+    "description": "Pan time series view to the right (large step)"
+  },
+  "annotation:submit": {
+    "key": "ctrl+enter",
+    "mac": "command+enter",
+    "description": "Submit annotation"
+  },
+  "annotation:skip": {
+    "key": "ctrl+space",
+    "mac": "alt+enter",
+    "description": "Skip task"
+  },
+  "annotation:undo": {
+    "key": "ctrl+z",
+    "mac": "command+z",
+    "description": "Undo"
+  },
+  "annotation:redo": {
+    "key": "ctrl+shift+z",
+    "mac": "command+shift+z",
+    "description": "Redo"
+  },
+  "polygon:undo": {
+    "key": "ctrl+z",
+    "mac": "command+z",
+    "description": "Undo"
+  },
+  "polygon:redo": {
+    "key": "ctrl+shift+z",
+    "mac": "command+shift+z",
+    "description": "Redo"
+  },
+
+  "region:delete-all": {
+    "key": "ctrl+backspace",
+    "mac": "command+backspace",
+    "description": "Delete all regions"
+  },
+  "region:focus": {
+    "key": "enter",
+    "description": "Focus first focusable region"
+  },
+  "region:relation": {
+    "key": "alt+r",
+    "description": "Create relation between regions"
+  },
+  "region:visibility": {
+    "key": "alt+h",
+    "description": "Toggle selected region visibility"
+  },
+  "region:visibility-all": {
+    "key": "ctrl+h",
+    "mac": "command+h",
+    "description": "Toggle all regions visibility"
+  },
+  "region:lock": {
+    "key": "alt+l",
+    "description": "Lock selected region"
+  },
+  "region:meta": {
+    "key": "alt+m",
+    "description": "Edit selected region meta"
+  },
+  "region:unselect": {
+    "key": "u",
+    "description": "Unselect region"
+  },
+  "region:exit": {
+    "key": "escape",
+    "description": "Exit relation mode, unselect region"
+  },
+  "region:delete": {
+    "key": "backspace",
+    "description": "Delete selected region"
+  },
+  "region:cycle": {
+    "key": "alt+.",
+    "description": "Cycle through regions"
+  },
+  "region:duplicate": {
+    "key": "ctrl+d",
+    "mac": "command+d",
+    "description": "Duplicate selected region"
+  },
+  "segment:delete": {
+    "key": "delete",
+    "description": "Delete selected region"
+  },
+  "media:playpause": {
+    "key": "ctrl+alt+space",
+    "mac": "command+alt+space",
+    "description": "Play/pause"
+  },
+  "media:step-backward": {
+    "key": "alt+left",
+    "description": "Go one step back"
+  },
+  "media:step-forward": {
+    "key": "alt+right",
+    "description": "Go one step forward"
+  },
+  "video:keyframe-backward": {
+    "key": "ctrl+alt+left",
+    "mac": "command+alt+left",
+    "description": "Go to previous keyframe"
+  },
+  "video:keyframe-forward": {
+    "key": "ctrl+alt+right",
+    "mac": "command+alt+right",
+    "description": "Go to next keyframe"
+  },
+  "video:backward": {
+    "key": "alt+left",
+    "description": "Go back"
+  },
+  "video:rewind": {
+    "key": "shift+ctrl+alt+left",
+    "mac": "shift+command+alt+left",
+    "description": "Go to first frame"
+  },
+  "video:forward": {
+    "key": "shift+alt+right",
+    "description": "Go forward"
+  },
+  "video:fastforward": {
+    "key": "shift+ctrl+alt+right",
+    "mac": "shift+command+alt+right",
+    "description": "Go to last frame"
+  },
+  "video:hop-backward": {
+    "key": "shift+alt+left",
+    "description": "Hop Backward"
+  },
+  "video:hop-forward": {
+    "key": "shift+alt+right",
+    "description": "Hop Forward"
+  },
+  "repeater:next-page": {
+    "key": "alt+right",
+    "description": "Next Page"
+  },
+  "repeater:previous-page": {
+    "key": "alt+left",
+    "description": "Previous Page"
+  },
+  "image:prev": {
+    "key": "ctrl+left",
+    "mac": "command+left",
+    "description": "Previous Image"
+  },
+  "image:next": {
+    "key": "ctrl+right",
+    "mac": "command+right",
+    "description": "Next Image"
+  },
+
+  "tool:zoom-in": {
+    "key": "ctrl+plus",
+    "mac": "command+plus",
+    "description": "Zoom in on the image"
+  },
+
+  "tool:pan-image": {
+    "key": "H",
+    "description": "Pan around the image"
+  },
+
+  "tool:zoom-to-fit": {
+    "key": "shift+1",
+    "description": "Zoom to fit the full image in view"
+  },
+
+  "tool:zoom-to-actual": {
+    "key": "shift+2",
+    "description": "Zoom to actual image size (100%)"
+  },
+
+  "tool:zoom-out": {
+    "key": "ctrl+minus",
+    "mac": "command+minus",
+    "description": "Zoom out of the image"
+  },
+
+  "tool:ellipse": {
+    "key": "O",
+    "description": "Select the ellipse tool"
+  },
+
+  "tool:eraser": {
+    "key": "E",
+    "description": "Select the eraser tool"
+  },
+
+  "tool:auto-detect": {
+    "key": "M",
+    "description": "Use the auto-detect tool to automatically suggest regions"
+  },
+
+  "tool:rect-3point": {
+    "key": "shift+R",
+    "description": "Draw a rotated rectangle using 3-point selection"
+  },
+
+  "tool:key-point": {
+    "key": "K",
+    "description": "Select the key point annotation tool"
+  },
+
+  "tool:magic-wand": {
+    "key": "W",
+    "description": "Select the magic wand tool for smart region selection"
+  },
+
+  "tool:polygon": {
+    "key": "P",
+    "description": "Select the polygon annotation tool"
+  },
+
+  "tool:vector": {
+    "key": "P",
+    "description": "Select the vector annotation tool"
+  },
+
+  "tool:rect": {
+    "key": "R",
+    "description": "Select the rectangle annotation tool"
+  },
+
+  "tool:rotate-left": {
+    "key": "alt+left",
+    "description": "Rotate the image 90° to the left"
+  },
+
+  "tool:rotate-right": {
+    "key": "alt+right",
+    "description": "Rotate the image 90° to the right"
+  },
+
+  "tool:move": {
+    "key": "V",
+    "description": "Select the move tool to reposition annotations"
+  },
+
+  "tool:brush": {
+    "key": "B",
+    "description": "Select the brush tool"
+  },
+
+  "tool:decrease-tool": {
+    "key": "[",
+    "description": "Decrease tool size"
+  },
+
+  "tool:increase-tool": {
+    "key": "]",
+    "description": "Increase tool size"
+  },
+  "phrases:next-phrase": {
+    "key": "ctrl+down",
+    "mac": "command+down",
+    "description": "Move to next phrase"
+  },
+  "phrases:previous-phrase": {
+    "key": "ctrl+up",
+    "mac": "command+up",
+    "description": "Move to previous phrase"
+  },
+  "phrases:next-region": {
+    "key": "ctrl+left",
+    "mac": "command+left",
+    "description": "Select next region in current phrase"
+  },
+  "phrases:previous-region": {
+    "key": "ctrl+right",
+    "mac": "command+right",
+    "description": "Select previous region in current phrase"
+  },
+  "phrases:select_all_annotate": {
+    "key": "ctrl+shift+a",
+    "mac": "command+shift+a",
+    "description": "Select all and annotate current phrase"
+  },
+  "annotation:toggle-auto-annotation": {
+    "key": "shift+alt+a",
+    "description": "Toggle Auto-Annotation"
+  }
+}

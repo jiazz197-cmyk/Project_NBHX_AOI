@@ -1,0 +1,103 @@
+/* eslint-disable @typescript-eslint/no-empty-function */
+/* eslint-disable @typescript-eslint/no-unused-vars */
+
+/**
+ * Callback on submit annotation
+ */
+function onSubmitAnnotation() {}
+
+/**
+ * Callback on update annotation
+ */
+function onUpdateAnnotation() {}
+/**
+ * Callback on delete annotation
+ */
+function onDeleteAnnotation() {}
+
+/**
+ * Callback on delete prediction
+ */
+function onDeletePrediction() {}
+
+/**
+ * Callback on skip task
+ */
+function onSkipTask() {}
+
+/**
+ * Callback on unskip task
+ */
+function onUnskipTask() {}
+
+/**
+ * Callback on task load
+ */
+function onTaskLoad() {}
+
+/**
+ * Callback on Label Studio load
+ */
+function onLabelStudioLoad() {}
+
+/**
+ * Callback when labeled region gets created
+ */
+function onEntityCreate() {}
+
+/**
+ * Callback when labeled region gets deleted
+ */
+function onEntityDelete() {}
+
+/**
+ * Callback when ground truth button gets pressed
+ */
+function onGroundTruth() {}
+
+/**
+ * Callback when a new annotation gets selected
+ */
+function onSelectAnnotation(_annotation, _previousAnnotation) {}
+
+/**
+ * Called when "Accept" or "Fix + Accept" is pressed
+ */
+function onAcceptAnnotation(_store, _entity) {}
+
+/**
+ * Called when "Reject" is pressed
+ */
+function onRejectAnnotation(_store, _entity) {}
+
+/**
+ * Called when storage gets initialized for the first time
+ */
+function onStorageInitialized(_ls) {}
+
+function onSubmitDraft(_entity) {}
+
+function onNextTask(_nextTaskId) {}
+
+function onPrevTask(_prevTaskId) {}
+
+export default {
+  onDeleteAnnotation,
+  onDeletePrediction,
+  onEntityCreate,
+  onEntityDelete,
+  onGroundTruth,
+  onLabelStudioLoad,
+  onSkipTask,
+  onUnskipTask,
+  onSubmitAnnotation,
+  onSubmitDraft,
+  onTaskLoad,
+  onUpdateAnnotation,
+  onSelectAnnotation,
+  onAcceptAnnotation,
+  onRejectAnnotation,
+  onStorageInitialized,
+  onNextTask,
+  onPrevTask,
+};

@@ -1,0 +1,131 @@
+import { observer } from "mobx-react";
+import { Typography } from "@humansignal/ui";
+import { isDefined } from "../../../utils/utils";
+import { FilterInput } from "../FilterInput";
+import { ListInput } from "./ListInput";
+
+const valueFilter = (value) => {
+  if (isDefined(value)) {
+    if (typeof value === "number") {
+      return value;
+    }
+    if (typeof value === "string") {
+      const cleaned = value.replace(/([^\d.,]+)/, "");
+      return cleaned ? Number(cleaned) : null;
+    }
+    return value || null;
+  }
+
+  return null;
+};
+
+const NumberInput = observer(({ onChange, ...rest }) => {
+  return <FilterInput {...rest} type="number" onChange={(value) => onChange(valueFilter(value))} />;
+});
+
+export const RangeInput = observer(({ schema, value, onChange, disabled, readOnly }) => {
+  const min = value?.min ?? null;
+  const max = value?.max ?? null;
+
+  const onValueChange = (newValue) => {
+    onChange(newValue);
+  };
+
+  const onChangeMin = (newValue) => {
+    onValueChange({ min: Number(newValue), max });
+  };
+
+  const onChangeMax = (newValue) => {
+    onValueChange({ min, max: Number(newValue) });
+  };
+
+  return (
+    <div className="flex w-full min-w-0 items-center gap-tighter">
+      <NumberInput
+        placeholder="Min"
+        value={min}
+        onChange={onChangeMin}
+        schema={schema}
+        style={{ flex: 1, minWidth: 0 }}
+        disabled={disabled}
+        readOnly={readOnly}
+      />
+      <Typography as="span" variant="body" size="smallest" className="shrink-0 text-neutral-content-subtler">
+        and
+      </Typography>
+      <NumberInput
+        placeholder="Max"
+        value={max}
+        onChange={onChangeMax}
+        schema={schema}
+        style={{ flex: 1, minWidth: 0 }}
+        disabled={disabled}
+        readOnly={readOnly}
+      />
+    </div>
+  );
+});
+
+export const NumberFilter = [
+  {
+    key: "equal",
+    label: "=",
+    valueType: "single",
+    input: (props) => <NumberInput {...props} />,
+  },
+  {
+    key: "not_equal",
+    label: "≠",
+    valueType: "single",
+    input: (props) => <NumberInput {...props} />,
+  },
+  {
+    key: "less",
+    label: "<",
+    valueType: "single",
+    input: (props) => <NumberInput {...props} />,
+  },
+  {
+    key: "greater",
+    label: ">",
+    valueType: "single",
+    input: (props) => <NumberInput {...props} />,
+  },
+  {
+    key: "less_or_equal",
+    label: "≤",
+    valueType: "single",
+    input: (props) => <NumberInput {...props} />,
+  },
+  {
+    key: "greater_or_equal",
+    label: "≥",
+    valueType: "single",
+    input: (props) => <NumberInput {...props} />,
+  },
+  {
+    key: "in",
+    label: "is between",
+    valueType: "range",
+    input: (props) => <RangeInput {...props} />,
+  },
+  {
+    key: "not_in",
+    label: "not between",
+    valueType: "range",
+    input: (props) => <RangeInput {...props} />,
+  },
+  // BROS-1203 — list membership. Gated per-column in FilterOperation.jsx.
+  {
+    key: "in_list",
+    label: "is any of",
+    valueType: "list",
+    input: (props) => <ListInput {...props} type="number" />,
+  },
+  {
+    key: "not_in_list",
+    label: "is none of",
+    valueType: "list",
+    input: (props) => <ListInput {...props} type="number" />,
+  },
+];

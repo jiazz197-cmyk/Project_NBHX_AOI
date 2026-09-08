@@ -1,0 +1,300 @@
+{
+  "projectCreation": [
+    {
+      "title": "Advanced PDF and Document AI Interface",
+      "content": "Designed for large, complex PDF documents and image OCR",
+      "closable": true,
+      "link": {
+        "label": "Learn more",
+        "url": "https://humansignal.com/blog/new-pdf-ocr-document-ai-labeling-interface/",
+        "params": {
+          "experiment": "project_creation_tip",
+          "treatment": "lse_pdf_react_live"
+        }
+      }
+    },
+    {
+      "title": "Did you know?",
+      "content": "Try Label Studio Starter Cloud, optimized for small teams and projects.",
+      "link": {
+        "label": "Learn more",
+        "url": "https://humansignal.com/pricing/",
+        "params": {
+          "experiment": "project_creation_tip",
+          "treatment": "starter_cloud_live"
+        }
+      }
+    },
+    {
+      "title": "Synchronize audio and transcript editing",
+      "content": "A New Audio Transcription UI for Speed and Quality at Scale",
+      "closable": true,
+      "link": {
+        "label": "Learn more",
+        "url": "https://humansignal.com/blog/building-a-better-ui-for-audio-transcription-at-scale/",
+        "params": {
+          "experiment": "project_creation_tip",
+          "treatment": "lse_audio_transcription_live"
+        }
+      }
+    },
+    {
+      "title": "Labeling for GenAI",
+      "content": "Label Studio has templates available for supervised LLM fine-tuning, RAG retrieval ranking, RLHF, chatbot evaluation, and more.",
+      "closable": true,
+      "link": {
+        "label": "Explore templates",
+        "url": "https://labelstud.io/templates/gallery_generative_ai",
+        "params": {
+          "experiment": "project_creation_tip",
+          "treatment": "genai_templates_live"
+        }
+      }
+    }
+  ],
+  "organizationPage": [
+    {
+      "title": "It looks like your team is growing!",
+      "content": "Assign roles to your team using Label Studio Enterprise and control access to sensitive data at the project and workspace levels.",
+      "closable": true,
+      "link": {
+        "label": "Learn more",
+        "url": "https://docs.humansignal.com/guide/manage_users#Roles-in-Label-Studio-Enterprise",
+        "params": {
+          "experiment": "organization_page_tip",
+          "treatment": "team_growing_live"
+        }
+      }
+    },
+    {
+      "title": "Want to simplify and secure logging in?",
+      "content": "Enable Single Sign-On for your team using SAML, SCIM2 or LDAP with Label Studio Enterprise.",
+      "closable": true,
+      "link": {
+        "label": "Learn more",
+        "url": "https://docs.humansignal.com/guide/auth_setup",
+        "params": {
+          "experiment": "organization_page_tip",
+          "treatment": "enable_sso_live"
+        }
+      }
+    },
+    {
+      "title": "Did you know?",
+      "content": "Label Studio now has a Starter Cloud offering optimized for small teams and projects.",
+      "link": {
+        "label": "Learn more",
+        "url": "https://humansignal.com/pricing/",
+        "params": {
+          "experiment": "organization_page_tip",
+          "treatment": "starter_cloud_live"
+        }
+      }
+    },
+    {
+      "title": "Share knowledge with the community",
+      "content": "Have questions or a tip to share with other Label Studio users? Join the community slack channel for the latest updates. ",
+      "closable": true,
+      "link": {
+        "label": "Join the community",
+        "url": "https://label-studio.slack.com",
+        "params": {
+          "experiment": "organization_page_tip",
+          "treatment": "share_knowledge_live"
+        }
+      }
+    },
+    {
+      "title": "Did you know?",
+      "content": "Label Studio supports multiple points of integration with cloud storage, machine learning models, and popular tools to automate your machine learning pipeline.",
+      "closable": true,
+      "link": {
+        "label": "Check out the integrations directory",
+        "url": "https://labelstud.io/integrations/",
+        "params": {
+          "experiment": "organization_page_tip",
+          "treatment": "integration_points_live"
+        }
+      }
+    },
+    {
+      "title": "Need Compliance?",
+      "content": "Label Studio Enterprise is fully SOC 2 and HIPAA compliant. Want more control? Deploy it On-Premises for maximum flexibility.",
+      "closable": true,
+      "link": {
+        "label": "Contact us",
+        "url": "https://humansignal.com/contact-sales/",
+        "params": {
+          "experiment": "organization_page_tip",
+          "treatment": "compliance_live"
+        }
+      }
+    }
+  ],
+  "projectSettings": [
+    {
+      "title": "Apply your AWS spend to Label Studio Enterprise",
+      "content": "Label Studio Enterprise is now available on the AWS Marketplace so you can use your committed spend to streamline data labeling workflows.",
+      "closable": true,
+      "link": {
+        "label": "Learn more",
+        "url": "https://aws.amazon.com/marketplace/pp/prodview-yanyf6wguitb2",
+        "params": {
+          "experiment": "project_settings_tip",
+          "treatment": "aws_marketplace_live"
+        }
+      }
+    },
+    {
+      "title": "Save time with Auto-Labeling",
+      "content": "Use automation to instantly label large-scale datasets without sacrificing quality in the Enterprise platform.",
+      "closable": true,
+      "link": {
+        "label": "Learn more",
+        "url": "https://docs.humansignal.com/guide/prompts_overview#Auto-labeling-with-Prompts",
+        "params": {
+          "experiment": "project_settings_tip",
+          "treatment": "auto_labeling_live"
+        }
+      }
+    },
+    {
+      "title": "Did you know?",
+      "content": "Try Label Studio Starter Cloud, optimized for small teams and projects.",
+      "closable": true,
+      "link": {
+        "label": "Learn more",
+        "url": "https://humansignal.com/pricing/",
+        "params": {
+          "experiment": "project_settings_tip",
+          "treatment": "starter_cloud_live"
+        }
+      }
+    },
+    {
+      "title": "Synchronize audio and transcript editing",
+      "content": "A New Audio Transcription UI for Speed and Quality at Scale",
+      "closable": true,
+      "link": {
+        "label": "Learn more",
+        "url": "https://humansignal.com/blog/building-a-better-ui-for-audio-transcription-at-scale/",
+        "params": {
+          "experiment": "project_settings_tip",
+          "treatment": "lse_audio_transcription_live"
+        }
+      }
+    },
+    {
+      "title": "Did you know?",
+      "content": "You can connect ML models using the backend SDK to save time with pre-labeling or active learning.",
+      "closable": true,
+      "link": {
+        "label": "Learn more",
+        "url": "https://labelstud.io/guide/ml",
+        "params": {
+          "experiment": "project_settings_tip",
+          "treatment": "connect_ml_models_live"
+        }
+      }
+    },
+    {
+      "title": "Advanced PDF and Document AI Interface",
+      "content": "Designed for large, complex PDF documents and image OCR",
+      "closable": true,
+      "link": {
+        "label": "Learn more",
+        "url": "https://humansignal.com/blog/new-pdf-ocr-document-ai-labeling-interface/",
+        "params": {
+          "experiment": "project_settings_tip",
+          "treatment": "lse_pdf_react_live"
+        }
+      }
+    }
+  ],
+  "authPage": [
+    {
+      "title": "Vibe code any interface!",
+      "description": "Build any UI with Label Studio's agent on the web or skill for local development.",
+      "link": {
+        "label": "Explore examples",
+        "url": "https://docs.humansignal.com/templates/gallery_interfaces",
+        "params": {
+          "experiment": "login_revamp",
+          "treatment": "vibe_coding_interfaces_live"
+        }
+      }
+    },
+    {
+      "title": "Need help with data annotation?",
+      "description": "HumanSignal's data services team can run your projects end-to-end, from novel data creation to annotation and evaluation.",
+      "link": {
+        "label": "Learn more",
+        "url": "https://humansignal.com/data-services/",
+        "params": {
+          "experiment": "login_revamp",
+          "treatment": "data_services_live"
+        }
+      }
+    },
+    {
+      "title": "Are you building agents?",
+      "description": "Introducing Human-in-the-Loop Evaluation for Agentic AI Observability",
+      "link": {
+        "label": "Learn more",
+        "url": "https://humansignal.com/blog/introducing-human-in-the-loop-evaluation-for-agentic-ai-observability/",
+        "params": {
+          "experiment": "login_revamp",
+          "treatment": "agentic_traces_live"
+        }
+      }
+    },
+    {
+      "title": "Auto-labeling with Prompts",
+      "description": "Use LLMs to instantly pre-label thousands of tasks with accurate predictions.",
+      "link": {
+        "label": "Learn more",
+        "url": "https://docs.humansignal.com/guide/prompts_overview",
+        "params": {
+          "experiment": "login_revamp",
+          "treatment": "prompts_auto_labeling_live"
+        }
+      }
+    },
+    {
+      "title": "Behind the benchmark",
+      "description": "Learn how Legalbenchmarks.ai built and scaled a benchmark for practical contract drafting tasks using LLM-as-a-judge and human review in Label Studio Enterprise.",
+      "link": {
+        "label": "Learn more",
+        "url": "https://humansignal.com/blog/how-legalbenchmarks-ai-built-a-domain-specific-ai-benchmark/",
+        "params": {
+          "experiment": "login_revamp",
+          "treatment": "legalbench_live"
+        }
+      }
+    },
+    {
+      "title": "Did you know?",
+      "description": "Try Label Studio Starter Cloud, optimized for small teams and projects.",
+      "link": {
+        "label": "Learn more",
+        "url": "https://humansignal.com/pricing/",
+        "params": {
+          "experiment": "login_revamp",
+          "treatment": "starter_cloud_live"
+        }
+      }
+    },
+    {
+      "title": "Did you know?",
+      "description": "There's an Enterprise version of Label Studio packed with more features and automation to label data faster while ensuring the highest quality.",
+      "link": {
+        "label": "Learn more",
+        "url": "https://humansignal.com/goenterprise/",
+        "params": {
+          "experiment": "login_revamp",
+          "treatment": "enterprise_platform_live"
+        }
+      }
+    }
+  ]
+}

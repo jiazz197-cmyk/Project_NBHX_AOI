@@ -1,0 +1,204 @@
+{% load static %}
+{% load i18n %}
+{% load rules %}
+{% load filters %}
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="author" content="Label Studio"/>
+  <meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+  <!-- Address string color -->
+  <meta name="theme-color" content="#272727"> <!-- Chrome, Firefox OS and Opera -->
+  <meta name="msapplication-navbutton-color" content="#272727">  <!-- Windows Phone -->
+  <meta name="apple-mobile-web-app-status-bar-style" content="#272727">  <!-- iOS Safari -->
+
+  <!-- CSS -->
+  {% block app-css %}
+    {% if not settings.FRONTEND_HMR %}
+      <link href="{% manifest_asset 'main.css' %}" rel="stylesheet">
+    {% endif %}
+  {% endblock %}
+
+  {% block theme_colors %}
+    {% if feature_flags.fflag_feat_front_optic_1217_theme_toggle_short %}
+    <script>
+      function handleThemeColor() {
+        let themeColor = window.localStorage.getItem("preferred-color-scheme");
+        if (themeColor === "Auto") {
+          themeColor = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "Dark" : "Light"
+        } else if (!themeColor) {
+          themeColor = "Light";
+        }
+        document.documentElement.setAttribute("data-color-scheme", themeColor.toLowerCase());
+      }
+      handleThemeColor();
+    </script>
+    {% endif %}
+  {% endblock %}
+
+  {% block app-scripts %}
+  {% endblock %}
+
+  {% if settings.FRONTEND_SENTRY_DSN %}
+    <!-- Sentry -->
+    <script
+    src="https://browser.sentry-cdn.com/5.17.0/bundle.min.js"
+    integrity="sha384-lowBFC6YTkvMIWPORr7+TERnCkZdo5ab00oH5NkFLeQUAmBTLGwJpFjF6djuxJ/5"
+    crossorigin="anonymous"></script>
+  {% endif %}
+
+  <script nonce="{{request.csp_nonce}}">
+    window.exports = () => {};
+  </script>
+
+  {% block page_labeling %}
+    <title>Label Studio</title>
+    <link href="{{settings.HOSTNAME}}{% static 'images/favicon.ico' %}" rel="shortcut icon"/>
+  {% endblock %}
+
+  {% block head %}
+  {% endblock %}
+
+  {% get_current_language as LANGUAGE_CODE %}
+  {% get_available_languages as LANGUAGES %}
+
+</head>
+
+<body{% block body_attrs %}{% endblock %}>
+
+<div class="app-wrapper"></div>
+
+<template id="main-content">
+  <main class="main">
+
+    <!-- Space & Divider -->
+    {% block divider %}
+      <div class="ui divider divider-wide"></div>
+    {% endblock %}
+
+    <!-- Content -->
+    {% block content %}
+    {% endblock %}
+
+  </main>
+</template>
+
+<template id="context-menu-left">
+  {% block context_menu_left %}{% endblock %}
+</template>
+
+<template id="context-menu-right">
+  {% block context_menu_right %}{% endblock %}
+</template>
+
+<script id="app-settings" nonce="{{request.csp_nonce}}">
+  var __customHotkeys = {{ user.custom_hotkeys|json_dumps_ensure_ascii|escape_lt_gt|safe }};
+
+  // Seed only: account customs + product editor defaults.
+  // Runtime merge is owned by effectiveHotkeys.bootstrap()/apply() in the FE bundle.
+  var defaultEditorKeymap = JSON.parse({{ settings.EDITOR_KEYMAP|safe }});
+
+  window.APP_SETTINGS = Object.assign({
+
+    user: {
+      id: {{ user.pk|json_dumps_ensure_ascii|safe }},
+      username: "{{user.username}}",
+      firstName: "{{user.first_name}}",
+      lastName: "{{user.last_name}}",
+      initials: "{{user.get_initials}}",
+	email: "{{user.email}}",
+	customHotkeys: __customHotkeys,
+
+      allow_newsletters: {% if user.allow_newsletters is None %}null{% else %}{{user.allow_newsletters|yesno:"true,false"}}{% endif %},
+      {% if user.avatar %}
+      avatar: "{{user.avatar_url|safe}}",
+      {% endif %}
+      {% block app_user_extra %}{% endblock %}
+    },
+    // Stub until effectiveHotkeys.bootstrap() wires the real lookup.
+    lookupHotkey: function () { return null; },
+    debug: {{settings.DEBUG|yesno:"true,false"}},
+    polling: {% if feature_flags.fflag_dev_disable_polling_killswitch_short %}false{% else %}true{% endif %},
+    hostname: "{{settings.HOSTNAME}}",
+    version: {{ versions|json_dumps_ensure_ascii|safe }},
+    sentry_dsn: {% if settings.FRONTEND_SENTRY_DSN %}"{{ settings.FRONTEND_SENTRY_DSN }}"{% else %}null{% endif %},
+    sentry_rate: "{{ settings.FRONTEND_SENTRY_RATE }}",
+    sentry_environment: "{{ settings.FRONTEND_SENTRY_ENVIRONMENT }}",
+    editor_keymap: defaultEditorKeymap,
+    feature_flags: {{ feature_flags|json_dumps_ensure_ascii|safe }},
+    feature_flags_default_value: {{ settings.FEATURE_FLAGS_DEFAULT_VALUE|json_dumps_ensure_ascii|safe }},
+    version_edition: "{{ settings.VERSION_EDITION }}",
+    server_id: {{ request.server_id|json_dumps_ensure_ascii|safe }},
+    collect_analytics: {{ settings.COLLECT_ANALYTICS|yesno:"true,false" }},
+    local_files_document_root: {{ settings.LOCAL_FILES_DOCUMENT_ROOT|json_dumps_ensure_ascii|safe }},
+    local_files_serving_enabled: {{ settings.LOCAL_FILES_SERVING_ENABLED|yesno:"true,false" }},
+    allowed_iframe_domains: {{ settings.ALLOWED_IFRAME_DOMAINS|json_dumps_ensure_ascii|safe }},
+
+    data_manager: {
+      max_users_to_display: {{ settings.DM_MAX_USERS_TO_DISPLAY }},
+      list_filter_max_values: {{ settings.DATA_MANAGER_LIST_FILTER_MAX_VALUES }},
+    },
+
+    {% block app_more_settings %}
+      page_title: "Label Studio",
+      flags: {
+        allow_organization_webhooks: {{settings.ALLOW_ORGANIZATION_WEBHOOKS|yesno:"true,false"}},
+        storage_persistence: {{ settings.STORAGE_PERSISTENCE|yesno:"true,false" }},
+      },
+    {% endblock %}
+
+  }, {% block frontend_settings %}{}{% endblock %});
+</script>
+
+{% block app-js %}
+  {% if settings.FRONTEND_HMR %}
+  <script type="module" nonce="{{ request.csp_nonce }}">
+    import RefreshRuntime from '{{ settings.FRONTEND_HOSTNAME }}/react-app/@react-refresh'
+    RefreshRuntime.injectIntoGlobalHook(window)
+    window.$RefreshReg$ = () => {}
+    window.$RefreshSig$ = () => (type) => type
+    window.__vite_plugin_react_preamble_installed__ = true
+  </script>
+  <script type="module" src="{{ settings.FRONTEND_HOSTNAME }}/react-app/@vite/client"></script>
+  {% endif %}
+  <script type="module" src="{% manifest_asset 'main.js' %}"></script>
+{% endblock %}
+
+{% block bottomjs %}
+  <script src="{{settings.HOSTNAME}}{% static 'js/jquery.min.js' %}"></script>
+  <script nonce="{{request.csp_nonce}}">
+
+    // CSRF
+    (function() {
+      function csrfSafeMethod(method) {
+        // these HTTP methods do not require CSRF protection
+        return (/^(GET|HEAD|OPTIONS|TRACE)$/.test(method));
+      }
+
+      // Apply CSRF token
+      var csrftoken = jQuery("[name=csrfmiddlewaretoken]").val();
+      $.ajaxSetup({
+        beforeSend: function (xhr, settings) {
+          if (!csrfSafeMethod(settings.type) && !this.crossDomain) {
+            xhr.setRequestHeader("X-CSRFToken", csrftoken);
+          }
+        }
+      });
+    })();
+
+  </script>
+{% endblock %}
+
+<div id="dynamic-content">
+
+  {% block billing-checks %}
+  {% endblock %}
+
+</div>
+
+</body>
+</html>

@@ -1,0 +1,158 @@
+import {
+  AudioView,
+  Choices,
+  LabelStudio,
+  Textarea,
+  Number,
+  ImageView,
+  Paragraphs,
+  Labels,
+  TimeSeries,
+  DateTime,
+  VideoView,
+  Table,
+  Taxonomy,
+  Ranker,
+  Collapse,
+} from "@humansignal/frontend-test/helpers/LSF";
+import { RichText } from "@humansignal/frontend-test/helpers/LSF/RichText";
+import { FF_LSDV_4583 } from "../../../../src/utils/feature-flags";
+import {
+  allTagsConfig,
+  allTagsSampleData,
+  dynamicConfig,
+  dynamicData,
+  perItemMIGConfig,
+  perRegionConfig,
+  simpleMIGData,
+} from "../../data/bulk_mode/smoke";
+
+describe("Bulk mode", () => {
+  it("should show per object classifications", () => {
+    LabelStudio.params()
+      .config(allTagsConfig)
+      .withInterface("annotation:bulk")
+      .data(allTagsSampleData)
+      .withResult([])
+      .init();
+
+    cy.log("Check that all tags visibility states are correct");
+    AudioView.root.should("not.exist");
+    Textarea.root.should("be.visible");
+    Choices.root.should("be.visible");
+    Choices.findChoice("choices_1").should("be.visible");
+    Choices.findChoice("choices_2").should("be.visible");
+    Number.root.should("be.visible");
+    Labels.root.should("not.exist");
+    ImageView.image.should("not.exist");
+    Paragraphs.root.should("not.exist");
+    RichText.root.should("not.exist");
+    TimeSeries.root.should("not.exist");
+    DateTime.root.should("be.visible");
+    VideoView.root.should("not.exist");
+    Table.root.should("not.exist");
+    Taxonomy.root.should("be.visible");
+    Ranker.root.should("not.exist");
+
+    Collapse.root.should("be.visible");
+    Collapse.findPanel("First panel").should("be.visible");
+    Collapse.findPanel("Another panel").should("be.visible");
+    // for now, it looks like that it's better to display all panels that have visible children
+    Collapse.getPanelByIdx(2).should("be.visible");
+    Collapse.getPanelByIdx(3).should("not.exist");
+
+    cy.log("fill everything we can");
+    Textarea.type("some text");
+    Choices.findChoice("choices_1").click();
+    Number.type("42");
+    DateTime.type("2021-01-01");
+    Taxonomy.open();
+    Taxonomy.findItem("taxonomy_1").click();
+    Taxonomy.close();
+
+    cy.log("get serialized data");
+    LabelStudio.serialize().then((results) => {
+      expect(results[0]?.value.choices).to.be.deep.equal(["choices_1"]);
+      expect(results[1]?.value.number).to.be.equal(42);
+      expect(results[2]?.value.datetime).to.be.equal("2021-01-01T00:00");
+      expect(results[3]?.value.taxonomy).to.be.deep.equal([["taxonomy_1"]]);
+    });
+  });
+
+  it("should not show per-region classifications", () => {
+    LabelStudio.params()
+      .config(perRegionConfig)
+      .withInterface("annotation:bulk")
+      .data(allTagsSampleData)
+      .withResult([])
+      .init();
+
+    cy.log("Check that there is nothing to render");
+    cy.get(".lsf-main-view__annotation div:eq(0)").should("be.empty");
+  });
+
+  it("should not show per-item classifications", () => {
+    LabelStudio.addFeatureFlagsOnPageLoad({
+      [FF_LSDV_4583]: true,
+    });
+
+    LabelStudio.params()
+      .config(perItemMIGConfig)
+      .withInterface("annotation:bulk")
+      .data(simpleMIGData)
+      .withResult([])
+      .init();
+
+    cy.log("Check that there is nothing to render");
+    cy.get(".lsf-main-view__annotation div:eq(0)").should("be.empty");
+  });
+
+  it("should not display dynamic things", () => {
+    LabelStudio.params().config(dynamicConfig).withInterface("annotation:bulk").data(dynamicData).withResult([]).init();
+
+    cy.log("Check that there is nothing to render");
+    cy.get(".lsf-main-view__annotation div:eq(0)").should("be.empty");
+  });
+
+  it("should show static Header and Markdown content but not data-bound ones", () => {
+    const config = `
+      <View>
+        <Header value="Static section title"/>
+        <Header value="$dynamicTitle"/>
+        <Markdown value="**Static instructions**"/>
+        <Markdown value="$dynamicMarkdown"/>
+        <Choices name="q" toName="t" choice="single">
+          <Choice value="Yes"/>
+          <Choice value="No"/>
+        </Choices>
+        <Text name="t" value="$text"/>
+      </View>
+    `;
+
+    LabelStudio.params()
+      .config(config)
+      .withInterface("annotation:bulk")
+      .data({ text: "anything", dynamicTitle: "should not appear", dynamicMarkdown: "should not appear" })
+      .withResult([])
+      .init();
+
+    cy.contains("Static section title").should("be.visible");
+    cy.contains("Static instructions").should("be.visible");
+    cy.contains("should not appear").should("not.exist");
+    Choices.findChoice("Yes").should("be.visible");
+    Choices.findChoice("No").should("be.visible");
+  });
+
+  it("should hide panels and buttons not related to the bulk mode", () => {
+    LabelStudio.params().config("<View></View>").withInterface("annotation:bulk").data({}).withResult([]).init();
+
+    cy.get(".lsf-sidepanels").should("not.exist");
+    cy.get(".lsf-sidepanels__wrapper").should("not.exist");
+
+    cy.get(".lsf-current-task").should("not.exist");
+    cy.get(`[aria-label="Compare all annotations"]`).should("not.exist");
+    cy.get(`[aria-label="Create an annotation"]`).should("not.exist");
+    cy.get(".lsf-annotations-carousel").should("not.exist");
+    cy.get(".lsf-ground-truth").should("not.exist");
+  });
+});

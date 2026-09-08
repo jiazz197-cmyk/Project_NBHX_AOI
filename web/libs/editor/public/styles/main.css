@@ -1,0 +1,134 @@
+body {
+  position: relative;
+  margin: 0;
+  padding: 0;
+
+  --sand_900: #12110d;
+  --sand_800: #262522;
+  --sand_700: #45433e;
+  --sand_600: #6b6860;
+  --sand_500: #a49f95;
+  --sand_400: #cac5b8;
+  --sand_300: #e1ded5;
+  --sand_200: #f0efeb;
+  --sand_100: #f9f8f6;
+  --sand_0: #fdfdfc;
+
+  --grape_0: #f0f3fe;
+  --grape_100: #d4dbfb;
+  --grape_500: #566fcf;
+  --grape_600: #576cc1;
+  --grape_700: #4c5fa9;
+  --grape_800: #37447a;
+
+  --kale_0: #f4f9f9;
+  --kale_400: #57b7ab;
+
+  --plum_500: #cc6fbe;
+  --plum_400: #e37bd3;
+  --plum_100: #f7d6f2;
+  --plum_0: #fbf2fc;
+
+  --persimmon_300: #ff9f89;
+  --persimmon_400: #ff7557;
+
+  --canteloupe_0: #fff6ef;
+  --canteloupe_100: #ffe4d0;
+  --canteloupe_400: #ffa663;
+  --canteloupe_500: #e69559;
+  --canteloupe_600: #cc854f;
+  --canteloupe_700: #b37445;
+
+  --red_1: #fff1f0;
+  --red_3: #ffccc7;
+  --red_7: #cf1322;
+  --red_10: #5c0011;
+
+  --primary_link: #566fcf;
+}
+
+.footer {
+  flex: none;
+  text-align: center;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
+.footer a {
+  line-height: 24px;
+  color: var(--color-primary-content);
+  text-decoration: inherit;
+}
+.footer a:hover {
+  color: var(--color-primary-content-hover);
+}
+
+#header {
+  background-color: #fff;
+  height: 48px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0px 16px;
+  z-index: 100;
+  box-shadow: 0 -1px 0 rgba(0, 0, 0, 0.1) inset;
+  width: 100%;
+}
+
+#header a {
+  color: #304455 !important;
+  text-decoration: none;
+  font-size: 1.4em;
+}
+
+#logo img {
+  vertical-align: middle;
+  height: 28px;
+}
+
+#logo {
+  display: inline-block;
+  font-size: 1.5em;
+  line-height: 40px;
+  color: #273849;
+  font-weight: 500;
+  display: flex;
+}
+
+#nav {
+  list-style-type: none;
+  margin: 0;
+  padding: 0;
+  right: 30px;
+  line-height: 40px;
+  display: flex;
+  align-items: center;
+}
+
+#nav .break {
+  display: none;
+}
+
+#nav li {
+  display: inline-block;
+  position: relative;
+  margin: 0 0.6em;
+}
+
+#nav li a {
+  font-size: 1em;
+}
+
+#ls-container {
+  flex: 1;
+}
+
+#label-studio {
+  height: 100%;
+}

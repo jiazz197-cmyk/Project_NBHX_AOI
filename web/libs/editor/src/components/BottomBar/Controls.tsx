@@ -1,0 +1,481 @@
+/**
+ * This panel is used with FF_1170 + FF_3873 in new interface,
+ * but it's also used in old interface with FF_3873, but without FF_1170.
+ * Only this component should get interface updates, other versions should be removed.
+ */
+
+import { observer } from "mobx-react";
+import type React from "react";
+import { useCallback, useEffect, useState } from "react";
+
+import { Badge, Button, ButtonGroup, type ButtonProps, Typography } from "@humansignal/ui";
+import { CaretDownIcon, IconBan, IconChevronDown } from "@humansignal/icons";
+import { Dropdown } from "@humansignal/ui";
+import type { CustomButtonType } from "../../stores/CustomButton";
+import { cn } from "../../utils/bem";
+import { FF_REVIEWER_FLOW, FF_FIT_1304_STRICT_OVERLAP, isFF } from "../../utils/feature-flags";
+import { isDefined, toArray } from "../../utils/utilities";
+import {
+  AcceptButton,
+  ButtonTooltip,
+  controlsInjector,
+  RejectButtonDefinition,
+  SkipButton,
+  UnskipButton,
+} from "./buttons";
+import { annotationActionProps, emitLabelingEvent } from "../../utils/labelingTelemetry";
+
+import "./Controls.prefix.css";
+
+// these buttons can be reused inside custom buttons or can be replaces with custom buttons
+type SupportedInternalButtons = "accept" | "reject";
+// special places for custom buttons — before, after or instead of internal buttons
+type SpecialPlaces = "_before" | "_after" | "_replace";
+// @todo should be Instance<typeof AppStore>["customButtons"] but it doesn't fit to itself
+type CustomButtonsField = Map<
+  SpecialPlaces | SupportedInternalButtons,
+  CustomButtonType | SupportedInternalButtons | Array<CustomButtonType | SupportedInternalButtons>
+>;
+type ControlButtonProps = {
+  button: CustomButtonType;
+  disabled: boolean;
+  variant?: ButtonProps["variant"];
+  look?: ButtonProps["look"];
+  onClick: (e: React.MouseEvent) => void;
+};
+
+export const EMPTY_SUBMIT_TOOLTIP = "Empty annotations denied in this project";
+export const INCOMPLETE_SUBMIT_TOOLTIP = "Complete all regions before submitting";
+export const INCOMPLETE_UPDATE_TOOLTIP = "Complete all regions before updating";
+export const INCOMPLETE_ACCEPT_TOOLTIP = "Complete all regions before accepting";
+
+/**
+ * Custom action button component, rendering buttons from store.customButtons
+ */
+const ControlButton = observer(({ button, disabled, onClick, variant, look }: ControlButtonProps) => {
+  return (
+    <Button
+      {...button.props}
+      variant={button.variant ?? variant}
+      look={button.look ?? look}
+      tooltip={button.tooltip}
+      className="w-[150px]"
+      aria-label={button.ariaLabel}
+      disabled={button.disabled || disabled}
+      onClick={onClick}
+      data-testid={`bottombar-custom-${button.name}-button`}
+    >
+      {button.title}
+    </Button>
+  );
+});
+
+export const Controls = controlsInjector<{ annotation: MSTAnnotation }>(
+  observer(({ store, history, annotation }) => {
+    const isReview = store.hasInterface("review") || annotation.canBeReviewed;
+    const isNotQuickView = store.hasInterface("topbar:prevnext");
+    const historySelected = isDefined(store.annotationStore.selectedHistory);
+    const {
+      userGenerate,
+      sentUserGenerate,
+      versions,
+      results,
+      editable: annotationEditable,
+      draftSelected,
+    } = annotation;
+    // FIT-2105: viewing the submitted snapshot while a draft exists must block review
+    // Accept/Reject (Fix+Accept from the wrong view). It must NOT disable annotator Update
+    // (BROS-1477 / QA 93973 — that worked on 2.34 when only historySelected blocked actions).
+    const viewingSubmittedWhileDraftExists = !historySelected && Boolean(versions?.draft) && !draftSelected;
+    const dropdownTrigger = cn("dropdown").elem("trigger").toClassName();
+    const customButtons: CustomButtonsField = store.customButtons;
+    const buttons: React.ReactNode[] = [];
+
+    const [isInProgress, setIsInProgress] = useState(false);
+    const [rejectMenuVisible, setRejectMenuVisible] = useState(false);
+    const disabled = !annotationEditable || store.isSubmitting || historySelected || isInProgress;
+    const reviewDisabled = disabled || viewingSubmittedWhileDraftExists;
+    const submitDisabled = store.hasInterface("annotations:deny-empty") && results.length === 0;
+    const hasIncompleteRegions = annotation.hasIncompleteRegions;
+
+    useEffect(() => {
+      const openRejectMenu = () => setRejectMenuVisible(true);
+      window.addEventListener("lsf:open-reject-menu", openRejectMenu);
+      return () => window.removeEventListener("lsf:open-reject-menu", openRejectMenu);
+    }, []);
+
+    /** Check all things related to comments and then call the action if all is good */
+    const handleActionWithComments = useCallback(
+      async (e: React.MouseEvent, callback: () => any, errorMessage: string) => {
+        const { addedCommentThisSession, currentComment, commentFormSubmit } = store.commentStore;
+        const comment = currentComment[annotation.id];
+        // accept both old and new comment formats
+        const commentText = (comment?.text ?? comment)?.trim();
+
+        if (isInProgress) return;
+        setIsInProgress(true);
+
+        const selected = store.annotationStore?.selected;
+
+        if (addedCommentThisSession) {
+          selected?.submissionInProgress();
+          callback();
+        } else if (commentText) {
+          e.preventDefault();
+          selected?.submissionInProgress();
+          await commentFormSubmit();
+          callback();
+        } else {
+          store.commentStore.setTooltipMessage(errorMessage);
+        }
+        setIsInProgress(false);
+      },
+      [
+        store.rejectAnnotation,
+        store.skipTask,
+        store.commentStore.currentComment,
+        store.commentStore.commentFormSubmit,
+        store.commentStore.addedCommentThisSession,
+        isInProgress,
+      ],
+    );
+
+    if (annotation.isNonEditableDraft) return <></>;
+
+    const buttonsBefore = customButtons.get("_before");
+    const buttonsReplacement = customButtons.get("_replace");
+    const firstToRender = buttonsReplacement ?? buttonsBefore;
+
+    // either we render _before buttons and then the rest, or we render only _replace buttons
+    if (firstToRender) {
+      const allButtons = toArray(firstToRender);
+      for (const customButton of allButtons) {
+        // @todo make a list of all internal buttons and use them here to mix custom buttons with internal ones
+        // string buttons is a way to render internal buttons
+        if (typeof customButton === "string") {
+          if (customButton === "accept") {
+            // just an example of internal button usage
+            // @todo move buttons to separate components
+            buttons.push(<AcceptButton key={customButton} disabled={reviewDisabled} history={history} store={store} />);
+          }
+        } else {
+          buttons.push(
+            <ControlButton
+              key={customButton.name}
+              disabled={disabled}
+              button={customButton}
+              onClick={() => store.handleCustomButton?.(customButton)}
+            />,
+          );
+        }
+      }
+    }
+
+    if (buttonsReplacement) {
+      return <div className={cn("controls").toClassName()}>{buttons}</div>;
+    }
+
+    if (isReview) {
+      const customRejectButtons = toArray(customButtons.get("reject"));
+      const hasCustomReject = customRejectButtons.length > 0;
+      const originalRejectButton = RejectButtonDefinition;
+
+      // @todo implement reuse of internal buttons later (they are set as strings)
+      const rejectButtons: CustomButtonType[] = hasCustomReject
+        ? customRejectButtons.filter((button) => typeof button !== "string")
+        : [originalRejectButton];
+
+      const rejectHandler = (button: CustomButtonType) => {
+        const action = hasCustomReject ? () => store.handleCustomButton?.(button) : () => store.rejectAnnotation({});
+
+        return async (e: React.MouseEvent) => {
+          const selected = store.annotationStore?.selected;
+          setRejectMenuVisible(false);
+
+          const runReject = () => {
+            const comment = store.commentStore.currentComment[annotation.id];
+            const commentText = (comment?.text ?? comment)?.trim();
+            action();
+            emitLabelingEvent(store, "annotation_rejected", {
+              ...annotationActionProps(store, selected),
+              has_comment: Boolean(commentText) || store.commentStore.addedCommentThisSession,
+            });
+          };
+
+          if (store.hasInterface("comments:reject")) {
+            handleActionWithComments(e, runReject, "Please enter a comment before rejecting");
+          } else {
+            selected?.submissionInProgress();
+            await store.commentStore.commentFormSubmit();
+            runReject();
+          }
+        };
+      };
+
+      const renderRejectAction = (button: CustomButtonType) => (
+        <ControlButton key={button.name} button={button} disabled={reviewDisabled} onClick={rejectHandler(button)} />
+      );
+
+      // Menu rows are plain buttons, not ControlButton: they carry a description and read as a
+      // menu, so button styling (and its negative/neutral variants) would fight the red-outlined
+      // trigger that owns the reject affordance.
+      const renderRejectMenuItem = (button: CustomButtonType, isDefault: boolean) => (
+        <button
+          key={button.name}
+          type="button"
+          disabled={button.disabled || reviewDisabled}
+          onClick={rejectHandler(button)}
+          className="flex w-full flex-col items-start gap-tightest rounded-smaller px-tight py-tighter text-left hover:bg-neutral-surface-hover disabled:cursor-not-allowed disabled:opacity-50"
+          aria-label={button.ariaLabel}
+          data-testid={`bottombar-custom-${button.name}-button`}
+        >
+          <div className="flex w-full items-center justify-between gap-tight">
+            <Typography variant="label" size="medium" className="text-neutral-content">
+              {button.title}
+            </Typography>
+            {isDefault && (
+              <Badge
+                variant="neutral"
+                look="outline"
+                shape="rounded"
+                size="small"
+                data-testid="reject-action-default-badge"
+              >
+                Default
+              </Badge>
+            )}
+          </div>
+          {button.description && (
+            <Typography variant="body" size="small" className="text-neutral-content-subtler">
+              {button.description}
+            </Typography>
+          )}
+        </button>
+      );
+
+      const useRejectMenu = hasCustomReject && rejectButtons.length > 1 && rejectButtons.every((button) => button.menu);
+
+      if (useRejectMenu) {
+        // The menu keeps its configured order, so the one-click action is whichever row is
+        // flagged primary rather than whichever happens to be listed first.
+        const primaryRejectButton = rejectButtons.find((button) => button.isPrimary) ?? rejectButtons[0];
+        const rejectMenuContent = (
+          <div className="flex w-[280px] flex-col gap-tightest p-tighter bg-neutral-surface">
+            {rejectButtons.map((button) => renderRejectMenuItem(button, button === primaryRejectButton))}
+          </div>
+        );
+
+        // Split button: the left half commits to the primary action, the caret opens the full menu.
+        buttons.push(
+          <ButtonGroup key="reject-menu">
+            <Button
+              variant="negative"
+              look="outlined"
+              aria-label="reject-annotation"
+              disabled={reviewDisabled}
+              tooltip={primaryRejectButton.description}
+              onClick={rejectHandler(primaryRejectButton)}
+              data-testid="bottombar-reject-button"
+            >
+              Reject
+            </Button>
+            <Dropdown.Trigger
+              alignment="top-right"
+              visible={rejectMenuVisible}
+              onToggle={setRejectMenuVisible}
+              content={rejectMenuContent}
+            >
+              <Button
+                variant="negative"
+                look="outlined"
+                disabled={reviewDisabled}
+                aria-label="More reject options"
+                data-testid="bottombar-reject-menu"
+                leading={
+                  <CaretDownIcon
+                    size={16}
+                    className={`transition-transform ${rejectMenuVisible ? "rotate-180" : ""}`}
+                  />
+                }
+              />
+            </Dropdown.Trigger>
+          </ButtonGroup>,
+        );
+      } else {
+        rejectButtons.forEach((button) => buttons.push(renderRejectAction(button)));
+      }
+      buttons.push(<AcceptButton key="review-accept" disabled={reviewDisabled} history={history} store={store} />);
+    } else if (annotation.skipped) {
+      buttons.push(
+        <div className={cn("controls").elem("skipped-info").toClassName()} key="skipped">
+          <IconBan /> Was skipped
+        </div>,
+      );
+      buttons.push(<UnskipButton key="unskip" disabled={disabled} store={store} />);
+    } else {
+      if (store.hasInterface("skip")) {
+        const onSkipWithComment = (e: React.MouseEvent, action: () => any) => {
+          handleActionWithComments(e, action, "Please enter a comment before skipping");
+        };
+
+        buttons.push(<SkipButton key="skip" disabled={disabled} store={store} onSkipWithComment={onSkipWithComment} />);
+      }
+
+      // Also disable when overlap is reached (only when feature flag is enabled)
+      const overlapDisabled = isFF(FF_FIT_1304_STRICT_OVERLAP) && store.overlapReached === true;
+      const isDisabled = disabled || submitDisabled || overlapDisabled || hasIncompleteRegions;
+
+      const useExitOption = !isDisabled && isNotQuickView;
+
+      const SubmitOption = ({ isUpdate, onClickMethod }: { isUpdate: boolean; onClickMethod: () => any }) => {
+        return (
+          <div className="p-tighter rounded">
+            <Button
+              name="submit-option"
+              look="string"
+              size="small"
+              className="w-[150px]"
+              onClick={async (event) => {
+                event.preventDefault();
+
+                const selected = store.annotationStore?.selected;
+
+                selected?.submissionInProgress();
+
+                if ("URLSearchParams" in window) {
+                  const searchParams = new URLSearchParams(window.location.search);
+
+                  searchParams.set("exitStream", "true");
+                  const newRelativePathQuery = `${window.location.pathname}?${searchParams.toString()}`;
+
+                  window.history.pushState(null, "", newRelativePathQuery);
+                }
+
+                await store.commentStore.commentFormSubmit();
+                onClickMethod();
+                const selectedAfter = store.annotationStore?.selected;
+                emitLabelingEvent(store, isUpdate ? "annotation_updated" : "annotation_submitted", {
+                  ...annotationActionProps(store, selectedAfter),
+                  and_exit: true,
+                });
+              }}
+              data-testid={`bottombar-${isUpdate ? "update" : "submit"}-and-exit-button`}
+            >
+              {`${isUpdate ? "Update" : "Submit"} and exit`}
+            </Button>
+          </div>
+        );
+      };
+
+      if (userGenerate || (store.explore && !userGenerate && store.hasInterface("submit"))) {
+        const title = hasIncompleteRegions
+          ? INCOMPLETE_SUBMIT_TOOLTIP
+          : overlapDisabled
+            ? store.overlapReachedMessage
+            : submitDisabled
+              ? EMPTY_SUBMIT_TOOLTIP
+              : "Save results: [ Ctrl+Enter ]";
+
+        buttons.push(
+          <ButtonTooltip key="submit" title={title} className="whitespace-nowrap max-w-none">
+            <div className={cn("controls").elem("tooltip-wrapper").toClassName()}>
+              <ButtonGroup>
+                <Button
+                  aria-label="Submit current annotation"
+                  name="submit"
+                  className="w-[150px]"
+                  disabled={isDisabled}
+                  onClick={async (event) => {
+                    if ((event.target as HTMLButtonElement).classList.contains(dropdownTrigger)) return;
+                    const selected = store.annotationStore?.selected;
+
+                    selected?.submissionInProgress();
+                    await store.commentStore.commentFormSubmit();
+                    store.submitAnnotation();
+                    emitLabelingEvent(store, "annotation_submitted", annotationActionProps(store, selected));
+                  }}
+                  data-testid="bottombar-submit-button"
+                >
+                  Submit
+                </Button>
+                {useExitOption ? (
+                  <Dropdown.Trigger
+                    alignment="top-right"
+                    content={
+                      <div className="p-tight bg-neutral-surface">
+                        <SubmitOption onClickMethod={store.submitAnnotation} isUpdate={false} />
+                      </div>
+                    }
+                  >
+                    <Button
+                      disabled={isDisabled}
+                      aria-label="Submit annotation"
+                      data-testid="bottombar-submit-dropdown"
+                      leading={<CaretDownIcon size={24} />}
+                    />
+                  </Dropdown.Trigger>
+                ) : null}
+              </ButtonGroup>
+            </div>
+          </ButtonTooltip>,
+        );
+      } else if ((userGenerate && sentUserGenerate) || (!userGenerate && store.hasInterface("update"))) {
+        const isUpdate = Boolean(isFF(FF_REVIEWER_FLOW) || sentUserGenerate || versions.result);
+        // no changes were made over previously submitted version — no drafts, no pending changes
+        const noChanges = isFF(FF_REVIEWER_FLOW) && !history.canUndo && !annotation.draftId;
+        const isUpdateDisabled = isDisabled || noChanges;
+        const updateTitle = hasIncompleteRegions
+          ? INCOMPLETE_UPDATE_TOOLTIP
+          : overlapDisabled
+            ? store.overlapReachedMessage
+            : noChanges
+              ? "No changes were made"
+              : "Update this task: [ Ctrl+Enter ]";
+        const button = (
+          <ButtonTooltip key="update" title={updateTitle} className="whitespace-nowrap max-w-none">
+            <div className={cn("controls").elem("tooltip-wrapper").toClassName()}>
+              <ButtonGroup>
+                <Button
+                  aria-label="submit"
+                  name="submit"
+                  className="w-[150px]"
+                  disabled={isUpdateDisabled}
+                  onClick={async (event) => {
+                    if ((event.target as HTMLButtonElement).classList.contains(dropdownTrigger)) return;
+                    const selected = store.annotationStore?.selected;
+
+                    selected?.submissionInProgress();
+                    await store.commentStore.commentFormSubmit();
+                    store.updateAnnotation();
+                    emitLabelingEvent(store, "annotation_updated", annotationActionProps(store, selected));
+                  }}
+                  data-testid="bottombar-update-button"
+                >
+                  {isUpdate ? "Update" : "Submit"}
+                </Button>
+                {useExitOption ? (
+                  <Dropdown.Trigger
+                    alignment="top-right"
+                    content={<SubmitOption onClickMethod={store.updateAnnotation} isUpdate={isUpdate} />}
+                  >
+                    <Button
+                      disabled={isUpdateDisabled}
+                      aria-label="Update annotation"
+                      data-testid="bottombar-update-dropdown"
+                    >
+                      <IconChevronDown />
+                    </Button>
+                  </Dropdown.Trigger>
+                ) : null}
+              </ButtonGroup>
+            </div>
+          </ButtonTooltip>
+        );
+
+        buttons.push(button);
+      }
+    }
+
+    return <div className={cn("controls").toClassName()}>{buttons}</div>;
+  }),
+);
