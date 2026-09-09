@@ -10,7 +10,7 @@
 
 | 项 | 结论 |
 |---|---|
-| 平台形态 | A = LS 1.x 二开（Django+DRF 主数据源，有 RBAC）；B = FastAPI + SQLite + 独立 React 前端（无 RBAC、无 Redis/Celery/MinIO） |
+| 平台形态 | A = LS 1.x 二开（Django+DRF 主数据源，账户复用 LS、**RBAC 自研**）；B = FastAPI + SQLite + 独立 React 前端（无 RBAC、无 Redis/Celery/MinIO） |
 | 复用策略 | A 侧「能用 LS 原生的绝不自己写」；B 侧「能不做的一律不做」，只保留推理/统计/日报/回传 |
 | 工时 | 3×22 = 66 人日；五条主线保留；B 前端独立开发；A 侧报告最后做、可砍 |
 | 里程碑 | M1(D8) 模型+方案下发→假图推理→错图回传→A 建复审项；M2(D14) 标注→训练→审批→下发→激活→推理→回传→复审→回流；M3(D19) 预标 + 真机 1 路 + 8 路仿真 + 日报 + 双机离线包；M4(D22) 验收 |
@@ -27,7 +27,7 @@
 ### B（平台 A：LS 二开与数据智能）
 1. **D1~3：训练域数据基座前置**——`aoi_training` 四表迁移（`train_job`/`base_model`/`model`/`preset`）+ `skillname` 枚举裁定落地 + `/api/train/base-models|models|jobs` stub；`model` 表含 `task_type`/`cover_classes`。
 2. D1~4：LS fork 仓库骨架（锁 tag、上游模块只读、`label_studio/aoi/` 二开 app、Menubar 占位）+ 契约/stub 先行（aoi API 全量 stub + OpenAPI、共享表迁移、label config 生成）+ D4~5 **前端素材更换**（公司 logo/名称/描述，去除 LS 吉祥物与登录页署名）。
-3. D4~7：RBAC 三角色（映射 LS 角色）+ 图片标注（配置 LS 项目/Review 流）+ 缺陷字典 + 导入包裹（复用 LS 上传）+ **错图接收端点 `/api/ingest/findings`**。
+3. D4~7：**自研 RBAC 三角色**（角色/权限点/授权表 + DRF 权限类；LS 原生角色框架不可用）+ 图片标注（配置 LS 项目/Review 流）+ 缺陷字典 + 导入包裹（复用 LS 上传）+ **错图接收端点 `/api/ingest/findings`**。
 4. D9~12：训练链（数据集版本/划分/红线、LS data_export 包裹、训练执行流 + 门禁 + ONNX 导出、模型注册与审批）+ **模型下发服务**（推送到 B）。
 5. D13~14：复审/回流后端（工作项/终裁/建议清单/坏图）。
 6. D15~16：预标任务 + **A 侧自实现 LS ML backend 协议**（复用 `pipeline-core` 推理）。
@@ -91,8 +91,8 @@
 
 | 平台功能 | LS 原生能力 | MVP 动作 |
 |---|---|---|
-| 登录/令牌 | token API（JWT HS256，含 `user_id`） | 零改动 |
-| 用户/组织/角色 | users + 角色框架 | aoi/core 三角色映射 |
+| 登录/令牌/账户 | LS users + token API（JWT HS256，含 `user_id`） | 零改动复用账户与登录 |
+| 角色/权限（RBAC） | LS 原生角色/组织权限框架**不可用** | **自研**：`aoi_core` 三角色 + 权限点 + 授权表 + DRF 权限类 |
 | 标注项目/任务/框标注 | projects/tasks/annotations + RectangleLabels | 零改动；label config 由字典渲染 |
 | 数据浏览 | Data Manager | 零重构 |
 | 标注审核 | Review 流 | 配置启用；aoi 只读投影 |
@@ -103,7 +103,7 @@
 
 ### 2.2 二开增量（真正要写的代码）
 
-- **`label_studio/aoi/` 九个二开 app（五个业务新域 + 四个支撑 app）**：业务新域 datasets（字典/版本/划分红线/导入包裹）、prelabel（预标 + ML backend 协议）、training（任务/门禁/注册/下发）、review（工作项/终裁/建议/坏图 + 错图接收）、plans（方案模板）；支撑 app core（RBAC/公共）、system（工位/实例）、audit（审计）、reports（可选）。
+- **`label_studio/aoi/` 九个二开 app（五个业务新域 + 四个支撑 app）**：业务新域 datasets（字典/版本/划分红线/导入包裹）、prelabel（预标 + ML backend 协议）、training（任务/门禁/注册/下发）、review（工作项/终裁/建议/坏图 + 错图接收）、plans（方案模板）；支撑 app core（**自研 RBAC**/公共）、system（工位/实例）、audit（审计）、reports（可选）。
 - **A 侧前端页面**：数据集、训练、复审、方案模板、系统（复用 LS 组件库）+ 素材更换（公司 logo/名称/描述，去除 LS 吉祥物）。
 - **workers**：Celery 训练/导入/模型下发任务。
 - **A 侧预标推理**：`pipeline-core` + ONNX Runtime，跑在 worker-gpu。
@@ -183,7 +183,7 @@
 
 | 天 | A | B | C |
 |---|---|---|---|
-| D4 | 数据整理工具；B 前端「概览」页骨架 | **RBAC 三角色（映射 LS 角色）**；LS 项目模板配置；**前端素材更换起步** | `pipeline-core` 切片/NMS 真逻辑；ONNX Runtime 适配器；B 检测记录落库 |
+| D4 | 数据整理工具；B 前端「概览」页骨架 | **自研 RBAC 三角色**（角色/权限点/授权表 + DRF 权限类；LS 角色框架不可用）；LS 项目模板配置；**前端素材更换起步** | `pipeline-core` 切片/NMS 真逻辑；ONNX Runtime 适配器；B 检测记录落库 |
 | D5 | 假数据生成（OK + 缺陷图）；B 前端「检测记录」页 | 缺陷字典 + label config 生成 + 导入包裹（复用 LS 上传）；**前端素材更换完成** | `/api/v1/inspect/image` 完整链路；单图推理 + 三档判定；B 记录查询接口 |
 | D6 | 节拍模拟器（打 B 的 `/api/v1/inspect/image`） | 标注项目创建 + Review 流配置验证；**`/api/ingest/findings` 完整实现（图片落 MinIO + fact + workitem/bad_image）** | 相机适配器壳（DirectorySource）+ 坏图登记 + outbox 回传真实打通 |
 | D7 | 双机联调 + 离线包初版；B 前端「工位与相机」页 | **模型下发 + 方案下发真实推送**（分片/续传/重试/`model_dispatch` 状态） | B 模型接收校验落盘 + 方案接收/校验/热加载；B 前端联调 |
@@ -235,6 +235,7 @@
 | A 的模型下发阻塞 B 上线 | B 侧支持「本地已有模型 + 方案」离线运行；下发失败不影响 B 继续用旧版本 |
 | 可疑图回传积压导致 B 磁盘涨 | 保留策略 + 未回传图片不清理 + 磁盘水位告警 + 人工导出兜底 |
 | B 仍是单人（C 同时做后端+推理+相机） | 公共包先行、B 端点 stub 先行、前端由 A 承担；B 的功能面按 §3 严格裁剪 |
+| 自研 RBAC 工作量与越权风险 | 权限点集中注册 + DRF 权限类统一入口；三角色矩阵与 40300 进契约测试；D4~5 完成 RBAC，D6 起页面按权限显隐 |
 | LS 复用点实测与预期不符（Review/导出等） | **D2 复用验证日**逐项实测；不符项当天定降级方案回写契约 |
 | 66 人日压缩率高，M2 闭环超时 | 复用红利转联调缓冲；回流环节允许「人工导图 + 改 source」降级；A 侧报告可砍 |
 | 预标后置导致 D15 联调紧张 | ML backend fixture 在 D2 就由 B 出具（LS 实测样例）；C 提前按 fixture 开发 |

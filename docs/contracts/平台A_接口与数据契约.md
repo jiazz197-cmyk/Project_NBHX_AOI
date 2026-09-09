@@ -19,8 +19,8 @@
 
 | 平台功能 | LS 原生能力（直接复用） | aoi 二开薄包裹 | MVP 决策 |
 |---|---|---|---|
-| 登录/令牌 | token API（JWT HS256，claims 含 `user_id`） | 无 | **复用** |
-| 用户/组织/角色 | LS users + 组织角色框架 | 三角色↔LS 角色映射 + 权限点表（`aoi/core`） | 复用+映射 |
+| 登录/令牌/账户 | LS users + token API（JWT HS256，claims 含 `user_id`） | 仅复用账户表与登录链 | **复用** |
+| 角色/权限（RBAC） | LS 原生角色/组织权限框架**不可用** | **自研**：`aoi_core` 角色/权限点/授权表 + DRF 权限类（§3.1） | **自研** |
 | 标注项目/任务 | `projects/tasks/annotations` 原生 | label config 由缺陷字典渲染注入 | **复用** |
 | 框标注交互 | 标注编辑器（RectangleLabels） | 零改动（红线） | **复用** |
 | 数据浏览 | Data Manager | 零重构（红线） | **复用** |
@@ -31,7 +31,7 @@
 | 前端框架 | web/apps 组件库/路由/auth store/i18n | Menubar 入口 + 二开页面 | 复用+加页 |
 | 审计（部分） | LS activity log | `aoi/audit` 关键操作追加写 | 复用+补充 |
 
-**结论**：账户、标注、上传、审核、预标通道、导出六块几乎零开发；B 的主战场是「字典 / 数据集版本 / 训练 / 复审 / 方案模板」五个新域 + 薄包裹 + 模型下发。
+**结论**：账户与登录、标注、上传、审核、预标通道、导出六块几乎零开发（**角色与权限除外，必须自研**）；B 的主战场是「自研 RBAC / 字典 / 数据集版本 / 训练 / 复审 / 方案模板」+ 薄包裹 + 模型下发。
 
 ---
 
@@ -82,10 +82,11 @@
 
 ### 2.4 鉴权
 
-- **前端 → A**：LS 原生 token API 签发的 JWT（HS256，`JWT_SECRET` = LS `SECRET_KEY`，claims 含 `user_id`）；权限点由 DRF 权限类判断。
+- **前端 → A**：LS 原生 token API 签发的 JWT（HS256，`JWT_SECRET` = LS `SECRET_KEY`，claims 含 `user_id`）——**只复用 LS 的账户与登录**；角色/权限由 aoi 自研 RBAC 判定（DRF 权限类查 `aoi_core`，见 §3.1）。
+- **RBAC 自研**：LS 开源版的组织/角色权限框架不可用（能力不完整且语义与 AOI 三角色不匹配），**不作为权限依据**；不修改 LS 原生 users/组织表，授权关系存 `aoi_core.user_role`（`user_id` 逻辑引用 LS users，不建外键）。
 - **B → A（回传/心跳）**：`X-Internal-Token: <INTERNAL_TOKEN>`；`X-Instance-Code` 标识 B 实例，供审计。
 - **A → B（下发）**：`X-Platform-Token`，见跨平台契约 §1.2。
-- 权限点（模块级）：`datasets.*`、`training.*`、`review.*`、`plans.*`、`system.*`；动作 `view/create/update/cancel/approve/rollback/dispatch`。
+- 权限点（模块级）：`datasets.*`、`training.*`、`review.*`、`plans.*`、`system.*`；动作 `view/create/update/cancel/approve/rollback/dispatch`；三角色 `annotator`（标注员）/ `engineer`（工程师）/ `admin`（管理员），默认权限矩阵见 §3.1。
 
 ### 2.5 公共请求约定
 
@@ -99,7 +100,63 @@
 
 > LS 原生表（projects/tasks/annotations/ml/users）**只读复用、不修改语义**（红线）；aoi 业务表独立 schema。平台 B 不直连本库。
 
-### 3.1 `aoi_datasets`
+### 3.1 `aoi_core`（自研 RBAC）
+
+> LS 原生角色/组织权限框架不可用，**不作为权限依据**；只复用 LS 账户表与登录/JWT。授权模型、权限点与判定全部在 `aoi_core`。
+
+```sql
+CREATE TABLE aoi_core.role (
+  id SERIAL PRIMARY KEY,
+  code VARCHAR(32) UNIQUE NOT NULL,          -- annotator/engineer/admin
+  name_cn VARCHAR(64) NOT NULL,
+  description TEXT, is_builtin BOOLEAN DEFAULT TRUE
+);
+
+CREATE TABLE aoi_core.permission (
+  id SERIAL PRIMARY KEY,
+  code VARCHAR(64) UNIQUE NOT NULL,          -- datasets.view / training.approve / ...
+  module VARCHAR(32) NOT NULL,               -- datasets/training/review/plans/system
+  action VARCHAR(32) NOT NULL,               -- view/create/update/cancel/approve/rollback/dispatch
+  name_cn VARCHAR(64)
+);
+
+CREATE TABLE aoi_core.role_permission (
+  role_id INT REFERENCES aoi_core.role(id) ON DELETE CASCADE,
+  permission_id INT REFERENCES aoi_core.permission(id) ON DELETE CASCADE,
+  PRIMARY KEY(role_id, permission_id)
+);
+
+CREATE TABLE aoi_core.user_role (
+  user_id INT NOT NULL,                      -- 逻辑引用 LS users.id，不建外键（上游表只读）
+  role_id INT NOT NULL REFERENCES aoi_core.role(id) ON DELETE CASCADE,
+  granted_by INT, granted_at TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY(user_id, role_id)
+);
+```
+
+- **权限点注册**：启动时由 `aoi/core/permissions.py` 的常量全量 upsert 到 `aoi_core.permission`，新增权限点无需手写数据迁移。
+- **判定入口**：DRF 权限类 `AoiPermission('training.approve')` → `user_role → role_permission → permission.code`；结果按用户缓存 5 分钟，授权变更时主动失效。
+- **默认权限矩阵**（`✅` 允许，`—` 拒绝）：
+
+| 权限点 | annotator | engineer | admin |
+|---|---|---|---|
+| `datasets.view` | ✅ | ✅ | ✅ |
+| `datasets.create` / `datasets.update` | ✅（导入/标注） | ✅ | ✅ |
+| `datasets.export` | — | ✅ | ✅ |
+| `prelabel.*` | — | ✅ | ✅ |
+| `training.view` | ✅ | ✅ | ✅ |
+| `training.create` / `cancel` / `approve` / `dispatch` | — | ✅ | ✅ |
+| `review.view` / `review.finalize` | ✅ | ✅ | ✅ |
+| `plans.view` | ✅ | ✅ | ✅ |
+| `plans.create` / `update` / `activate` / `rollback` | — | ✅ | ✅ |
+| `system.*` | — | — | ✅ |
+| `audit.view` | — | — | ✅ |
+
+- **接口**：`GET /api/core/permissions` 返回当前用户 `{user_id, roles:[...], perms:[...]}`；`admin` 可 `CRUD /api/core/roles`、`POST /api/core/users/{id}/roles` 分配角色。
+- **不共享**：RBAC 属 A 侧业务权限，**不进 `packages/`**；平台 B 无用户体系。
+- **审计**：角色/授权变更写 `aoi_audit.audit_log`。
+
+### 3.2 `aoi_datasets`
 
 ```sql
 CREATE TABLE aoi_datasets.image (
@@ -157,7 +214,7 @@ CREATE TABLE aoi_datasets.prelabel_task (
 );
 ```
 
-### 3.2 `aoi_training`
+### 3.3 `aoi_training`
 
 ```sql
 CREATE TABLE aoi_training.base_model (
@@ -218,7 +275,7 @@ CREATE TABLE aoi_training.model_dispatch (   -- 模型下发状态（A→B）
 );
 ```
 
-### 3.3 `aoi_review`
+### 3.4 `aoi_review`
 
 ```sql
 CREATE TABLE aoi_review.inspection_fact (
@@ -274,7 +331,7 @@ CREATE TABLE aoi_review.bad_image (
 );
 ```
 
-### 3.4 `aoi_plans` / `aoi_system` / `aoi_audit`
+### 3.5 `aoi_plans` / `aoi_system` / `aoi_audit`
 
 ```sql
 CREATE TABLE aoi_plans.plan (
@@ -334,7 +391,8 @@ CREATE TABLE aoi_audit.audit_log (
 
 | 方法/路径 | 权限 | 说明 |
 |---|---|---|
-| `GET /api/core/permissions` | 登录用户 | `{user_id, role, perms:[...]}`，供 A 前端控制按钮显隐（B 不调用，B 无 RBAC） |
+| `GET /api/core/permissions` | 登录用户 | `{user_id, roles:[...], perms:[...]}`，供 A 前端控制按钮显隐（B 不调用，B 无 RBAC） |
+| `CRUD /api/core/roles`、`POST /api/core/users/{id}/roles` | system.*（admin） | 角色/权限点查看、用户角色分配（写审计） |
 
 ### 4.1 数据域 `/api/datasets`
 
@@ -592,7 +650,7 @@ class RecheckBackend(ABC):
 ### 13.1 契约测试
 
 - `tests/contracts/test_pipeline_core.py`（共享包，A/B 同跑）：切片/合并/三档判定/方案校验/StubRuntimeModel。
-- `tests/contracts/test_platform_a_api.py`：信封/鉴权/权限点/导入幂等/训练状态机/方案激活/`/api/ingest/findings` 幂等。
+- `tests/contracts/test_platform_a_api.py`：信封/鉴权/**自研 RBAC（三角色矩阵、越权 40300、授权缓存失效）**/导入幂等/训练状态机/方案激活/`/api/ingest/findings` 幂等。
 - fixtures：`detect_result_sample.json`、`inspection_finding_sample.json`、`plan_template_sample.yaml`、`ml_backend_predict_sample.json`、`goldens.json`。
 - stub 原则：aoi API 在 D3 前全量 stub + OpenAPI。
 
