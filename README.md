@@ -1,59 +1,70 @@
-# Project_NBHX_AOI / Label Studio 二开仓库
+# Project_NBHX_AOI / AOI 门板检测双平台 monorepo
 
-> AOI 门板检测平台的 LS 1.x 二开仓库骨架。
-> 定位：以 **Label Studio 作为唯一主应用**，复用账户/标注/上传/审核/预标/导出等原生能力；
-> 二开增量集中在「缺陷字典/数据集版本/训练/复审/检测方案模板」以及 sidecar 计算侧。
+> **平台 A（训练与标注平台，LS 1.x 二开）** + **平台 B（推理与检测平台，独立轻量前后端）**，跨机器部署。
+> 两平台不共享数据库/对象存储/中间件，唯一公共层为 `packages/skillname` 与 `packages/pipeline-core`。
+> 文档入口：**[`docs/README.md`](docs/README.md)**（架构与拆分方案 / MVP 计划 / P0 骨架 / 三份契约）。
 
 ## 1. 仓库与上游
 
 ```bash
 git remote -v
-# origin  git@github.com:jiazz197-cmyk/Project_NBHX_AOI.git (fetch)
-# origin  git@github.com:jiazz197-cmyk/Project_NBHX_AOI.git (push)
+# origin  ssh://git@10.80.153.12:2222/Carl_Jia/project_aoi.git (fetch)
+# origin  ssh://git@10.80.153.12:2222/Carl_Jia/project_aoi.git (push)
 ```
 
-当前仓库已切换到上述新上游。若需对照上游 LS 原始代码，可另行添加：
+当前仓库已切换到上述内网 GitLab 上游（默认分支 `main`）。
+
+> **注意 SSH 端口是 2222**：`10.80.153.12` 的 22 端口是主机系统 sshd，GitLab 的 gitlab-shell 发布在
+> **2222**（见 `ss -tlnp`）。GitLab 页面展示的 `git@10.80.153.12:Carl_Jia/project_aoi.git` 走 22 会认证失败，
+> 必须使用带端口的 `ssh://` 写法。首次连接请先与运维核对主机指纹（本机已知 ED25519 指纹：
+> `SHA256:HMXcMDJQCfUdrNVCJeTxcmavry7gMcG4ce4ogqjKOMg`）。
+
+若需对照上游 LS 原始代码，可另行添加：
 
 ```bash
 git remote add upstream git@github.com:HumanSignal/label-studio.git
 ```
 
-## 2. 前后端分离结构
-
-本仓库当前是 LS 二开源码仓库，前后端物理分离但共用同一仓库：
+## 2. 仓库结构（双平台 monorepo）
 
 ```text
-label-studio/
-├── label_studio/            # Django 后端主程序
+Project_NBHX_AOI/
+├── label_studio/              # 平台A 后端：LS 1.x fork（Django + DRF），上游模块只读
 │   ├── manage.py
-│   ├── core/                # 核心配置/中间件/存储等
-│   ├── io_storages/         # 仅保留 localfiles 等本地存储
-│   ├── projects/ tasks/ data_manager/ ...
-│   └── ...
-├── web/                     # React + TS 前端（LS web）
-│   ├── apps/labelstudio/    # 主应用：页面/路由/组件
-│   ├── libs/                # editor / datamanager / ui 等前端库
-│   ├── package.json
-│   └── bun.lock
-├── deploy/                  # Docker/nginx/uwsgi 运行骨架
-├── docker-compose.yml       # PostgreSQL + LS 主服务
-├── docker-compose.minio.yml # MinIO 本地对象存储
+│   ├── core/ io_storages/ projects/ tasks/ data_manager/ ...   # 上游，只读
+│   └── aoi/                   # 二开唯一可写区（D1 起落地）
+│       ├── core/ datasets/ prelabel/ training/ review/ plans/ system/ audit/ reports/
+│       ├── workers/           # Celery：training(GPU) / default(CPU) / dispatch(下发)
+│       └── urls.py            # /api/* 二开路由此汇总
+├── web/                       # 平台A 前端：LS 1.x web（React + TS）
+│   ├── apps/labelstudio/      # 主应用：页面/路由/组件（二开页面独立路由）
+│   └── libs/                  # editor / datamanager / ui 等前端库
+├── infer-platform/            # 平台B：独立前后端（D1 起落地，当前仓库尚未包含）
+│   ├── backend/               # FastAPI + SQLite + APScheduler + ONNX Runtime
+│   ├── frontend/              # Vite + React + TS + Ant Design + ECharts（独立，不复用 LS 组件）
+│   └── deploy/                # Dockerfile / compose / systemd / 离线包
+├── packages/                  # 唯一共享层（D1 起落地，当前仓库尚未包含）
+│   ├── skillname/             # 任务类型 / 缺陷 code / model_ref / plan_id 词汇表（零依赖）
+│   └── pipeline-core/         # 切片 / NMS 合并 / 三档判定 / load_plan（numpy + pillow）
+├── tests/contracts/           # 双端契约测试 + fixtures（D2 起挂 CI）
+├── deploy/                    # 平台A 部署：Docker/nginx/uwsgi 运行骨架
+├── docker-compose.yml         # 平台A：PostgreSQL + LS 主服务
+├── docker-compose.minio.yml   # 平台A：MinIO 本地对象存储
+├── docs/                      # 架构 / MVP 计划 / P0 骨架 / 契约（先读 docs/README.md）
 ├── pyproject.toml
 ├── uv.lock
 └── CHANGES.md
 ```
 
-运行形态：
+> 落地状态：`label_studio/` 与 `web/` 已就绪；`infer-platform/`、`packages/`、`tests/contracts/`、`label_studio/aoi/` 按
+> [`docs/P0骨架设计_双平台.md`](docs/P0骨架设计_双平台.md) 从 D1 起补充，本节结构即目标形态。
 
-- **后端**：Django + DRF，负责账号、项目、任务、标注、数据管理、二开 API。
-- **前端**：React/TS，开发时通过 Vite 独立启动，代理 `/api`、`/static` 到 Django。
-- **生产/交付**：前端构建产物交给 Django/Nginx 托管，仍保持前后端分离的代码结构。
-- **后续 monorepo 演进**：可进一步拆为 `backend/label_studio` + `frontend/web`，当前阶段先保持 LS 原生仓库结构，便于锁上游 tag 和 diff。
-- **sidecar / workers / packages**：按 `docs/` 的 P0/MVP 规划后续补充；当前仓库先保留 LS 主应用源码与构建骨架。
+## 3. 平台 A：训练与标注平台（已就绪）
 
-## 3. 本地开发启动
+定位：数据资产与模型生产的唯一主数据源；复用 LS 账户/标注/上传/审核/导出能力，二开集中在
+「缺陷字典 / 数据集版本 / 预标签 / 训练与模型下发 / 复审回流 / 方案模板」。技术栈：Django + DRF、PostgreSQL、MinIO、Redis + Celery。
 
-### 3.1 后端
+### 3.1 后端本地开发
 
 要求：Python 3.10+，uv，PostgreSQL + MinIO（默认）。
 
@@ -80,8 +91,10 @@ uv run python label_studio/manage.py runserver 0.0.0.0:8080
 后端默认开发地址：`http://localhost:8080`
 
 > 本地裸跑前请确保 PostgreSQL 和 MinIO 已启动，且 MinIO 中已创建 `aoi-images` bucket。
+> 与平台 B 的联调变量（`INFER_PLATFORM_BASE_URL`、`INFER_PLATFORM_TOKEN`、`INTERNAL_TOKEN`）在骨架落地后追加到 `.env`，
+> 见 `docs/P0骨架设计_双平台.md` §6。
 
-### 3.2 前端
+### 3.2 前端本地开发
 
 要求：Bun 1.3+。
 
@@ -134,7 +147,7 @@ docker compose -f docker-compose.yml -f docker-compose.minio.yml up -d --build
 
 启用后，Label Studio 的上传文件/图片默认存储会切到 MinIO bucket `aoi-images`；用户、项目、标注等业务数据仍在 PostgreSQL。
 
-## 4. 生产构建
+### 3.4 生产构建
 
 ```bash
 # 1. 构建前端静态资源
@@ -151,20 +164,64 @@ DJANGO_SETTINGS_MODULE=core.settings.label_studio \
 docker compose build
 ```
 
-## 5. 二开新增页面的位置（LS 内）
+## 4. 平台 B：推理与检测平台（规划中，D1 起落地）
 
-按 MVP 方案，不新增独立前端，而是扩展 LS 的 Menubar：
+定位：产线侧自包含的在线推理与运行监控平台，**无 RBAC、无用户体系**；只接收平台 A 下发的 YOLO 模型与方案模板，
+按模板推理并产出错图统计、信息统计、日报与错图回传。
 
-| LS 菜单 | 路由 | 新页面/能力 |
+| 项 | 选型 |
+|---|---|
+| 后端 | FastAPI + Uvicorn（单进程）+ SQLAlchemy + SQLite（WAL）+ APScheduler |
+| 推理 | ONNX Runtime（CUDA EP / CPU）+ `pipeline-core` |
+| 存储 | 本地磁盘（图片/权重/日报），**无 MinIO/Redis/Celery 依赖** |
+| 前端 | Vite + React + TS + Ant Design 5 + ECharts（独立前端，不复用 LS 组件） |
+| 交付 | `infer-platform/deploy/` 下 Docker Compose 或 systemd |
+
+本地开发（骨架落地后）：
+
+```bash
+# 后端：默认监听 8990，SQLite 与图片落在 ./data
+cd infer-platform/backend
+uv sync
+uv run uvicorn app.main:app --reload --port 8990
+
+# 前端：Vite 开发服务器代理 /api 到 http://localhost:8990
+cd infer-platform/frontend
+bun install && bun run dev
+```
+
+平台间链路（跨机器，详见 [`docs/contracts/跨平台契约_A-B.md`](docs/contracts/跨平台契约_A-B.md)）：
+
+- **A→B**：模型下发（`POST /api/v1/ingest/model` + 分片续传 + sha256）、方案下发（`POST /api/v1/ingest/plan`）；
+- **B→A**：错图回传（`POST /api/ingest/findings`，仅可疑图/坏图，outbox 重试）、心跳与版本（`POST /api/ingest/heartbeat`）。
+
+## 5. 页面与入口
+
+### 5.1 平台 A（LS Menubar 内，复用 LS 组件）
+
+| 菜单 | 路由 | 内容 |
 |---|---|---|
-| 检测 | `/inspect` | 检测工作台：手动上传/触发工位检测、相机快照预览、结果列表与详情 |
-| 检测 > 相机/工位 | `/inspect/cameras`（建议） | 相机/工位实时快照、软触发、推理状态、不可检测提示 |
-| 系统 | `/system` | 系统管理：工位注册、用户/角色、审计等 |
-| 系统 > 工位管理 | `/system/stations`（建议） | 工位/相机参数管理、启停、健康状态 |
+| 数据集 | `/datasets` | 缺陷字典、导入、数据集版本与划分 |
+| 训练 | `/training` | 基模/训练任务/门禁/模型注册与审批/下发状态 |
+| 复审 | `/review` | 检测事实、复审工作项、终裁、建议清单、坏图 |
+| 方案 | `/plans` | 检测方案模板编辑、版本、激活（激活即推送 B） |
+| 系统 | `/system` | 工位主数据、B 实例心跳、审计 |
 
-MVP 只做 1~2fps 快照轮询预览，不接 RTSP/WebRTC 独立视频前端。
+### 5.2 平台 B（独立前端，5 页）
+
+| 页面 | 路由 | 内容 |
+|---|---|---|
+| 概览 | `/` | 检测量、三档分布、错图率、缺陷 TopN、节拍、时延、工位/模型/方案状态 |
+| 检测记录 | `/inspections` | 列表/筛选/图片与框预览；错图统计（坏图按 `error_code`、可疑图按 `object_code`） |
+| 日报 | `/reports` | 日报列表/详情/HTML+CSV 导出 |
+| 工位与相机 | `/stations` | 相机配置、启停、软触发、快照预览 |
+| 系统 | `/system` | 健康、模型/方案只读、回传队列、保留策略 |
+
+> 相机/推理不再放进 LS 工作台：平台 B 只做 1~2fps 快照与结果展示，MJPEG/RTSP/WebRTC 视频流与车间大屏属二期。
 
 ## 6. 说明
 
-- `label_studio/` 与 `web/` 是二开核心，尽量保持 LS 原生语义。
-- 详细技术规划见仓库同级 `docs/` 下的 MVP 计划与技术手册。
+- `label_studio/` 与 `web/` 是平台 A 二开核心，上游模块只读，二开集中在 `label_studio/aoi/` 与 `web/apps/labelstudio/src/pages/`。
+- `infer-platform/` 与 `packages/` 尚未落地；落地顺序、目录与 stub 行为以 `docs/P0骨架设计_双平台.md` 为准。
+- 平台间不共享数据库/对象存储/中间件；公共代码只有 `packages/skillname` 与 `packages/pipeline-core`。
+- 详细技术规划见 [`docs/README.md`](docs/README.md)：架构拆分方案、MVP 开发计划、P0 骨架设计、三份接口与数据契约。
