@@ -33,19 +33,19 @@ Project_NBHX_AOI/
 │   ├── manage.py
 │   ├── core/ io_storages/ projects/ tasks/ data_manager/ ...   # 上游，只读
 │   └── aoi/                   # 二开唯一可写区（D1 起落地）
-│       ├── core/ datasets/ prelabel/ training/ review/ plans/ system/ audit/ reports/
-│       ├── workers/           # Celery：training(GPU) / default(CPU) / dispatch(下发)
+│       ├── core/ datasets/ prelabel/ training/ review/ audit/ reports/
+│       ├── workers/           # Celery：training(GPU) / default(CPU) / publish(构建并推送模型镜像)
 │       └── urls.py            # /api/* 二开路由此汇总
 ├── web/                       # 平台A 前端：LS 1.x web（React + TS）
 │   ├── apps/labelstudio/      # 主应用：页面/路由/组件（二开页面独立路由）
 │   └── libs/                  # editor / datamanager / ui 等前端库
 ├── infer-platform/            # 平台B：独立前后端（D1 起落地，当前仓库尚未包含）
-│   ├── backend/               # FastAPI + SQLite + APScheduler + ONNX Runtime
+│   ├── backend/               # FastAPI + SQLite + APScheduler + ONNX Runtime + registry 拉取
 │   ├── frontend/              # Vite + React + TS + Ant Design + ECharts（独立，不复用 LS 组件）
 │   └── deploy/                # Dockerfile / compose / systemd / 离线包
 ├── packages/                  # 唯一共享层（D1 起落地，当前仓库尚未包含）
-│   ├── skillname/             # 任务类型 / 缺陷 code / model_ref / plan_id 词汇表（零依赖）
-│   └── pipeline-core/         # 切片 / NMS 合并 / 三档判定 / load_plan（numpy + pillow）
+│   ├── skillname/             # 任务类型 / 缺陷 code / model_ref / 镜像 tag 词汇表（零依赖）
+│   └── pipeline-core/         # 切片 / NMS 合并 / 三档判定 / load_config（numpy + pillow）
 ├── tests/contracts/           # 双端契约测试 + fixtures（D2 起挂 CI）
 ├── deploy/                    # 平台A 部署：Docker/nginx/uwsgi 运行骨架
 ├── docker-compose.yml         # 平台A：PostgreSQL + LS 主服务
@@ -62,7 +62,8 @@ Project_NBHX_AOI/
 ## 3. 平台 A：训练与标注平台（已就绪）
 
 定位：数据资产与模型生产的唯一主数据源；复用 LS 账户与登录/标注/上传/审核/导出能力（**角色与权限自研，LS 原生角色框架不可用**），二开集中在
-「缺陷字典 / 数据集版本 / 预标签 / 训练与模型下发 / 复审回流 / 方案模板」。技术栈：Django + DRF、PostgreSQL、MinIO、Redis + Celery。
+「缺陷字典 / 数据集版本 / 预标签 / 训练 / 模型发布 / 复审回流」。**不管理工位、相机、推理实例，不主动连接 B**。
+技术栈：Django + DRF、PostgreSQL、MinIO、Redis + Celery、Docker（构建并推送模型镜像）。
 
 ### 3.1 后端本地开发
 
@@ -91,7 +92,7 @@ uv run python label_studio/manage.py runserver 0.0.0.0:8080
 后端默认开发地址：`http://localhost:8080`
 
 > 本地裸跑前请确保 PostgreSQL 和 MinIO 已启动，且 MinIO 中已创建 `aoi-images` bucket。
-> 与平台 B 的联调变量（`INFER_PLATFORM_BASE_URL`、`INFER_PLATFORM_TOKEN`、`INTERNAL_TOKEN`）在骨架落地后追加到 `.env`，
+> 模型发布变量（`MODEL_REGISTRY`、`MODEL_IMAGE_REPO`、`MODEL_REGISTRY_USER`、`MODEL_REGISTRY_PASSWORD`、`INTERNAL_TOKEN`）在骨架落地后追加到 `.env`，
 > 见 `docs/P0骨架设计_双平台.md` §6。
 
 ### 3.2 前端本地开发
@@ -166,13 +167,14 @@ docker compose build
 
 ## 4. 平台 B：推理与检测平台（规划中，D1 起落地）
 
-定位：产线侧自包含的在线推理与运行监控平台，**无 RBAC、无用户体系、无登录认证**；只接收平台 A 下发的 YOLO 模型与方案模板，
-按模板推理并产出错图统计、信息统计、日报与错图回传。
+定位：产线侧自包含的在线推理与运行监控平台，**无 RBAC、无用户体系、无登录认证**；从镜像仓库拉取 A 发布的 YOLO 模型，
+**自行配置工位与工位模板（GUI）**，按模板推理并产出错图统计、信息统计、日报与错图回传。
 
 | 项 | 选型 |
 |---|---|
 | 后端 | FastAPI + Uvicorn（单进程）+ SQLAlchemy + SQLite（WAL）+ APScheduler |
 | 推理 | ONNX Runtime（CUDA EP / CPU）+ `pipeline-core` |
+| 模型获取 | OCI/Docker Registry HTTP API v2（httpx + tarfile，无需 Docker daemon） |
 | 存储 | 本地磁盘（图片/权重/日报），**无 MinIO/Redis/Celery 依赖** |
 | 前端 | Vite + React + TS + Ant Design 5 + ECharts（独立前端，不复用 LS 组件） |
 | 交付 | `infer-platform/deploy/` 下 Docker Compose 或 systemd |
@@ -192,8 +194,10 @@ bun install && bun run dev
 
 平台间链路（跨机器，详见 [`docs/contracts/跨平台契约_A-B.md`](docs/contracts/跨平台契约_A-B.md)）：
 
-- **A→B**：模型下发（`POST /api/v1/ingest/model` + 分片续传 + sha256）、方案下发（`POST /api/v1/ingest/plan`）；
-- **B→A**：错图回传（`POST /api/ingest/findings`，仅可疑图/坏图，outbox 重试）、心跳与版本（`POST /api/ingest/heartbeat`）。
+- **A → 镜像仓库**：`POST /api/train/models/{id}/publish` 构建并推送模型镜像（`/model/model.onnx` + `model.yaml` + `.sha256`）；
+- **镜像仓库 → B**：`POST /api/v1/models/pull` 拉取 manifest/层 → 解包 → sha256 校验 → 解析 `model.yaml` → 注册；
+- **B → A**：错图回传（`POST /api/ingest/findings`，仅可疑图/坏图，outbox 重试）。
+- **A 从不主动连接 B**：无实例管理、无心跳、无方案下发。
 
 ## 5. 页面与入口
 
@@ -202,20 +206,19 @@ bun install && bun run dev
 | 菜单 | 路由 | 内容 |
 |---|---|---|
 | 数据集 | `/datasets` | 缺陷字典、导入、数据集版本与划分 |
-| 训练 | `/training` | 基模/训练任务/门禁/模型注册与审批/下发状态 |
+| 训练 | `/training` | 基模/训练任务/门禁/模型注册与审批/模型发布状态 |
 | 复审 | `/review` | 检测事实、复审工作项、终裁、建议清单、坏图 |
-| 方案 | `/plans` | 检测方案模板编辑、版本、激活（激活即推送 B） |
-| 系统 | `/system` | 工位主数据、B 实例心跳、审计 |
+| 系统 | `/system` | 用户/角色（自研 RBAC）、审计 |
 
 ### 5.2 平台 B（独立前端，5 页）
 
 | 页面 | 路由 | 内容 |
 |---|---|---|
-| 概览 | `/` | 检测量、三档分布、错图率、缺陷 TopN、节拍、时延、工位/模型/方案状态 |
+| 概览 | `/` | 检测量、三档分布、错图率、缺陷 TopN、节拍、时延、工位/模型/模板状态 |
 | 检测记录 | `/inspections` | 列表/筛选/图片与框预览；错图统计（坏图按 `error_code`、可疑图按 `object_code`） |
 | 日报 | `/reports` | 日报列表/详情/HTML+CSV 导出 |
-| 工位与相机 | `/stations` | 相机配置、启停、软触发、快照预览 |
-| 系统 | `/system` | 健康、模型/方案只读、回传队列、保留策略 |
+| 工位与相机 | `/stations` | 工位增删改、相机配置、启停、软触发、快照 + **工位模板编辑** |
+| 系统 | `/system` | 健康、**模型库（拉取/离线导入/删除）**、回传队列、保留策略 |
 
 > 相机/推理不再放进 LS 工作台：平台 B 只做 1~2fps 快照与结果展示，MJPEG/RTSP/WebRTC 视频流与车间大屏属二期。
 
@@ -223,5 +226,5 @@ bun install && bun run dev
 
 - `label_studio/` 与 `web/` 是平台 A 二开核心，上游模块只读，二开集中在 `label_studio/aoi/` 与 `web/apps/labelstudio/src/pages/`。
 - `infer-platform/` 与 `packages/` 尚未落地；落地顺序、目录与 stub 行为以 `docs/P0骨架设计_双平台.md` 为准。
-- 平台间不共享数据库/对象存储/中间件；公共代码只有 `packages/skillname` 与 `packages/pipeline-core`。
+- 平台间不共享数据库/对象存储/中间件，模型只经镜像仓库传递；公共代码只有 `packages/skillname` 与 `packages/pipeline-core`。
 - 详细技术规划见 [`docs/README.md`](docs/README.md)：架构拆分方案、MVP 开发计划、P0 骨架设计、三份接口与数据契约。
