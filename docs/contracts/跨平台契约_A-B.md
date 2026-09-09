@@ -101,49 +101,182 @@
 ### 2.3 `model.yaml`（模型能力描述，**随 skillname 给出**）
 
 ```yaml
-schema_version: 1
-model_ref: 3-yolo@ds1
-skillname: ObjectDetection
-framework: yolo
-dataset_version: 1.0.0
-precision: fp32
-created_at: 2026-09-08T08:30:00Z
+# ================= 元信息 =================
+schema_version: 1                 # 必填；B 据此选择解析器（未知版本拒绝）
+model_ref: 3-yolo@ds1             # 必填
+skillname: ObjectDetection        # 必填
+framework: yolo                   # 必填
+framework_version: 8.4.1          # 可选
+dataset_version: 1.0.0            # 必填
+dict_version: 20260901-1          # 可选：缺陷字典版本
+base_model: yolov8s.pt            # 可选
+precision: fp32                   # 必填：fp32/fp16/int8
+created_at: 2026-09-08T08:30:00Z  # 必填
+published_at: 2026-09-08T09:00:00Z  # 可选
+description: 门板表面缺陷检测 v3     # 可选
+tags: [doorpanel, surface]        # 可选
+license: Apache-2.0               # 可选
+gate_status: passed               # 必填：pending/passed/failed
+lifecycle: published              # 可选
+source:                           # 可选：训练溯源
+  platform: aoi-train
+  train_job_id: 128
+  created_by: 7
+  git_commit: 59ec528
 
+# ================= ONNX 张量契约 =================
 onnx:
-  file: model.onnx
-  sha256: 9f2c...e1
-  size_bytes: 41234567
-  opset: 17
-  input:  {name: images,  shape: [1, 3, 1280, 1280], dtype: float32, layout: NCHW,
-           normalize: {scale: 0.00392156862745098, mean: [0, 0, 0], std: [1, 1, 1]}}
-  output: {name: output0, shape: [1, 6, 8400], format: yolo_v8_xywh_conf_cls}
+  file: model.onnx                # 必填
+  sha256: 9f2c...e1               # 必填
+  size_bytes: 41234567            # 必填
+  opset: 17                       # 必填
+  ir_version: 8                   # 可选
+  producer: ultralytics 8.4.1     # 可选
+  dynamic_batch: true             # 可选
+  max_batch_size: 8               # 预留
+  input:
+    name: images                  # 必填
+    shape: [1, 3, 1280, 1280]     # 必填
+    dtype: float32                # 必填
+    layout: NCHW                  # 必填
+    color_order: RGB              # 可选：RGB/BGR
+    normalize: {scale: 0.00392156862745098, mean: [0, 0, 0], std: [1, 1, 1]}   # 可选
+    resize: {mode: letterbox, interpolation: bilinear, pad_value: 114}         # 预留
+  output:
+    name: output0                 # 必填
+    shape: [1, 6, 8400]           # 必填
+    format: yolo_v8_xywh_conf_cls # 必填
+    num_classes: 2                # 可选
+    num_anchors: 8400             # 可选
+  runtime:                        # 预留：运行时建议
+    providers: [cuda, cpu]
+    fp16: true
+    threads: 4
 
-classes:                      # 索引序；class_map 与展示信息的权威来源
-  - {index: 0, code: object_fault_type_01, name_cn: 划伤, risk_level: 3,
-     recommended: {recheck_min: 0.60, auto_min: 0.90}}
-  - {index: 1, code: object_fault_type_02, name_cn: 凹坑, risk_level: 2,
-     recommended: {recheck_min: 0.55, auto_min: 0.88}}
+# ================= 类别（索引序） =================
+classes:
+  - index: 0                      # 必填
+    code: object_fault_type_01    # 必填
+    name_cn: 划伤                  # 必填（展示）
+    name_en: scratch              # 预留
+    risk_level: 3                 # 必填：3=高 2=中 1=低
+    color: "#FF4D4F"              # 预留（展示）
+    aliases: [刮伤]                # 预留
+    enabled: true                 # 预留（工位模板默认是否启用）
+    min_box_size: 4               # 预留（最小框边长 px）
+    max_boxes_per_image: 50       # 预留
+    recommended: {recheck_min: 0.60, auto_min: 0.90}   # 必填：工位模板默认值
+  - index: 1
+    code: object_fault_type_02
+    name_cn: 凹坑
+    risk_level: 2
+    recommended: {recheck_min: 0.55, auto_min: 0.88}
 
-tiling: {recommended_tile_size: 1280, overlap: 0.2}
-metrics: {map50: 0.93, per_class_recall: {object_fault_type_01: 0.99, object_fault_type_02: 0.97}}
-gate_status: passed
-requires: {skillname: ">=0.1.0", pipeline_core: ">=0.1.0"}
+# ================= 后处理（预留；B 缺省按下列值执行） =================
+postprocess:
+  conf_threshold: 0.25
+  iou_threshold: 0.50
+  max_detections: 300
+  agnostic_nms: false
+  multi_label: false
+  box_format: xyxy
+  class_agnostic: false
+
+# ================= 切片（推荐值 + 预留） =================
+tiling:
+  enabled: true
+  recommended_tile_size: 1280     # 必填（推荐值）
+  overlap: 0.2                    # 必填（推荐值）
+  min_tile_size: 640              # 预留
+  edge_handling: pad              # 预留：pad/crop/skip
+  batch_tiles: 4                  # 预留
+  max_tiles: 64                   # 预留（防超大图打爆显存）
+
+# ================= 判定策略（预留：全局默认，工位模板可覆盖） =================
+thresholds:
+  default: {recheck_min: 0.50, auto_min: 0.90}
+  high_risk_force_recheck: true
+  low_score_force_manual: 0.10
+
+# ================= 指标 =================
+metrics:
+  map50: 0.93
+  map50_95: 0.71
+  precision: 0.94
+  recall: 0.96
+  per_class_recall: {object_fault_type_01: 0.99, object_fault_type_02: 0.97}
+  per_class_precision: {object_fault_type_01: 0.95, object_fault_type_02: 0.93}
+  eval_dataset: 1.0.0-test
+  evaluated_at: 2026-09-08T08:00:00Z
+  confusion_matrix_ref: null      # 预留
+
+# ================= 性能基准（预留） =================
+benchmark:
+  device: RTX 4060
+  provider: cuda
+  precision: fp32
+  tile_size: 1280
+  batch: 4
+  latency_ms_p50: 380
+  latency_ms_p95: 520
+  throughput_fps: 9.6
+  vram_gb: 3.8
+
+# ================= 训练超参（预留，溯源用） =================
+training:
+  epochs: 100
+  imgsz: 1280
+  batch: 8
+  lr0: 0.01
+  patience: 20
+  seed: 42
+  augment: {flip: true, mosaic: true, mixup: 0.1}
+  split: {train: 0.7, val: 0.2, test: 0.1}
+
+# ================= 兼容性（预留：不满足时告警/拒绝） =================
+requires:
+  skillname: ">=0.1.0"
+  pipeline_core: ">=0.1.0"
+  schema_version: ">=1"
+  onnxruntime: ">=1.18"
+  cuda: null
+  vram_gb: 4
+
+# ================= 二期预留 =================
+signature: null                   # cosign 签名
+sbom_ref: null                    # SBOM 对象键
+golden_summary: null              # A 侧金标准摘要（不跨机传原图）
+calibration: null                 # 置信度校准参数
+quantization: null                # int8 / 动态量化信息
+extensions: {}                    # 任意扩展字段；B 原样保存、不解析
 ```
+
+**字段级别约定**：
+
+| 级别 | 含义 | B 侧行为 |
+|---|---|---|
+| **必填** | 缺失或非法 → 拒绝注册 | 解析并校验 |
+| **可选** | 缺失 → 用缺省值 | 解析；缺失不报错 |
+| **预留** | 本期不消费，但字段位先占住 | **原样存 `b_model.config_json`，不解析**；B 升级后可直接启用，无需 A 重新发布模型 |
+| **未知** | A 未来新增的字段 | 忽略 + 原样保存（向前兼容） |
 
 **B 侧校验规则**（拉取后立即执行，任一失败则拒绝注册）：
 
 | # | 校验 | 失败 |
 |---|---|---|
-| 1 | `schema_version` 已知且 B 支持 | 42200 |
-| 2 | `skillname` ∈ `skillname.SkillName` | 42200 |
-| 3 | `model_ref` 能被 `skillname.parse_model_ref` 解析 | 42200 |
-| 4 | `onnx.sha256` 与解包出的 `model.onnx` 实际 sha256 一致 | 40010 |
-| 5 | `classes[].code` 通过 `skillname.is_valid_fault_code` 且不重复 | 42200 |
-| 6 | `classes[].index` 唯一、连续、与 `onnx.output.shape` 的类别维一致 | 42200 |
-| 7 | `0 < recommended.recheck_min < recommended.auto_min < 1` | 42200 |
-| 8 | `requires.skillname` / `requires.pipeline_core` 与 B 本地版本兼容 | 告警或 42200（主版本不同则拒绝） |
+| 1 | 必填字段齐全（`schema_version`/`model_ref`/`skillname`/`framework`/`precision`/`gate_status`/`onnx.{file,sha256,size_bytes,opset,input,output}`/`classes[]`） | 42200 |
+| 2 | `schema_version` 已知且 B 支持 | 42200 |
+| 3 | `skillname` ∈ `skillname.SkillName` | 42200 |
+| 4 | `model_ref` 能被 `skillname.parse_model_ref` 解析 | 42200 |
+| 5 | `onnx.sha256` 与解包出的 `model.onnx` 实际 sha256 一致 | 40010 |
+| 6 | `classes[].code` 通过 `skillname.is_valid_fault_code` 且不重复 | 42200 |
+| 7 | `classes[].index` 唯一、连续、与 `onnx.output.shape` 的类别维一致 | 42200 |
+| 8 | `0 < recommended.recheck_min < recommended.auto_min < 1` | 42200 |
+| 9 | 可选/预留/未知字段 | 用缺省值 / 原样保存，不报错 |
+| 10 | `requires.*` 版本约束 | 主版本不兼容 → 42200；其余仅告警 |
 
 > `recommended` 只是**推荐值**：B 的工位模板可覆盖；A 不再下发方案模板。
+> **预留字段的价值**：模型发布一次后长期留在 registry，B 可能分期升级；预留字段让「B 升级即启用新能力」，不必回头重发模型。
 
 ### 2.4 发布（A → 镜像仓库）
 

@@ -71,7 +71,7 @@
 | `skillname` | 公共包：跨平台任务类型与标签词汇（`ObjectDetection`、`object_fault_type_XX`、`model_ref` 规范） |
 | `pipeline-core` | 公共包：切片/NMS 合并/类别映射/三档判定/检测配置解析（`load_config`），推理后端由调用方注入 |
 | `model_ref` | 模型注册版本号，格式 `{seq}-{framework}@ds{version}`，如 `3-yolo@ds1`；镜像 tag 由其派生（`3-yolo-ds1`） |
-| `model.yaml` | 随模型镜像发布的模型能力描述（skillname/类别/推荐阈值/张量信息） |
+| `model.yaml` | 随模型镜像发布的模型能力描述（skillname/类别/推荐阈值/张量契约 + 预留字段，B 原样保存） |
 | 工位模板 | B 本地配置（工位 → 模型 + 类别子集 + 阈值 + 切片参数），GUI 编辑，A 不感知 |
 | `station_code` | B 侧工位 code；A 只作不透明字符串存储 |
 | `verdict` | 初检判定：`auto_pass` / `recheck` / `manual` |

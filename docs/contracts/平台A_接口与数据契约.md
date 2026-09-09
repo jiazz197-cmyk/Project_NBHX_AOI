@@ -505,16 +505,23 @@ A 侧登记：LS 原生 ML 设置页 `MLBackend(url={A}/api/prelabel/{task_id})`
 - 镜像布局、命名、tag 规范、digest 固定：见 `跨平台契约_A-B.md` §2.1、§2.2；
 - 发布流程与状态机：见 `跨平台契约_A-B.md` §2.4；A 侧表 `aoi_training.model_publish`（§3.3）。
 
-A 侧生成 `model.yaml` 的数据来源：
+A 侧生成 `model.yaml` 的数据来源（字段级别见跨平台契约 §2.3）：
 
-| 字段 | 来源 |
+| 字段分组 | 来源 |
 |---|---|
-| `model_ref` / `skillname` / `framework` / `dataset_version` / `precision` | `aoi_training.model` |
-| `onnx.*`（sha256/张量名/形状/opset） | ONNX 导出结果 + `onnxruntime` 探测 |
-| `classes[].code` / `index` | `aoi_training.model.class_names`（索引序） |
-| `classes[].name_cn` / `risk_level` | `aoi_datasets.defect_class` |
-| `classes[].recommended` | 训练产物评估 + 字典风险档默认值（人工可在发布前微调） |
-| `metrics` / `gate_status` | `aoi_training.model.eval_metrics` / `gate_status` |
+| 元信息（`model_ref`/`skillname`/`framework`/`framework_version`/`dataset_version`/`dict_version`/`base_model`/`precision`/`created_at`/`license`） | `aoi_training.model` + `aoi_training.base_model` + `aoi_datasets.defect_dict_version` |
+| `source`（train_job_id/created_by/git_commit） | `aoi_training.train_job` + 发布时环境 |
+| `onnx.*`（sha256/size/opset/ir/producer/张量名/形状/动态批） | ONNX 导出结果 + `onnxruntime` 探测 |
+| `onnx.input.*`（dtype/layout/color_order/normalize/resize） | 训练/导出配置（Ultralytics 导出默认 RGB、letterbox） |
+| `classes[].code`/`index`/`enabled` | `aoi_training.model.class_names`（索引序） |
+| `classes[].name_cn`/`name_en`/`risk_level`/`color`/`aliases` | `aoi_datasets.defect_class` |
+| `classes[].recommended` | 评估结果 + 字典风险档默认值（发布前可人工微调） |
+| `postprocess`/`tiling`/`thresholds` | 训练 preset（`aoi_training.preset.params`）+ 导出默认值 |
+| `metrics`/`gate_status` | `aoi_training.model.eval_metrics` / `gate_status` |
+| `benchmark` | 发布前基准推理（可空） |
+| `training`（超参/增强/划分） | `aoi_training.train_job.preset` |
+| `requires`（skillname/pipeline_core/schema/onnxruntime） | 发布时公共包与运行时版本 |
+| 二期预留（`signature`/`sbom_ref`/`golden_summary`/`calibration`/`quantization`/`extensions`） | MVP 一律 `null`/`{}`，字段位先占住 |
 
 ---
 

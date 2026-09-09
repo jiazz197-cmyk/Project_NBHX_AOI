@@ -77,7 +77,7 @@ CREATE TABLE b_model (
   class_names TEXT NOT NULL,                 -- JSON 数组，索引序
   cover_classes TEXT NOT NULL,               -- JSON 数组
   precision TEXT NOT NULL DEFAULT 'fp32',    -- fp32/fp16
-  config_json TEXT NOT NULL,                 -- model.yaml 原文（含推荐阈值/展示名/张量信息）
+  config_json TEXT NOT NULL,                 -- model.yaml 原文（含推荐阈值/展示名/张量信息；预留字段原样保存）
   source_image TEXT,                         -- 拉取来源镜像，如 docker.io/<org>/aoi-model:3-yolo-ds1
   image_digest TEXT,                         -- sha256:...
   sha256 TEXT NOT NULL,                      -- model.onnx 的 sha256
@@ -210,7 +210,7 @@ GET /api/v1/health
 | 方法/路径 | 说明 |
 |---|---|
 | `GET /models` | 本地模型列表：`{model_ref, skillname, precision, sha256, source_image, image_digest, status, classes, received_at}` |
-| `GET /models/{model_ref}` | 详情（含 `config_json`：类别/推荐阈值/张量名与形状） |
+| `GET /models/{model_ref}` | 详情（含 `config_json` 原文：类别/推荐阈值/张量契约/预留字段；B 只解析必填字段） |
 | `POST /models/pull` | **从镜像仓库拉取**：`{image: "<registry>/<org>/aoi-model:3-yolo-ds1", digest?: "sha256:..."}` → 拉 manifest/层 → 解包 → 校验 → 注册；返回 `{model_ref, digest, status, classes}` |
 | `POST /models/import` | **离线导入**：multipart 上传 `docker save` 或层 tar → 同样校验/注册 |
 | `POST /models/{model_ref}/preload` | 预加载 ONNX 会话 |
@@ -218,7 +218,7 @@ GET /api/v1/health
 | `DELETE /models/{model_ref}` | 删除本地文件与记录（被引用时 → `40900`） |
 
 - 拉取模式：`MODEL_PULL_MODE=oci`（默认，httpx 直连 Registry v2，无需 Docker）或 `docker`（本机 `docker pull` + `docker create` + `docker cp`）。
-- 校验规则与失败语义见跨平台契约 §2.3、§2.5。
+- 校验规则与失败语义见跨平台契约 §2.3、§2.5；**可选/预留/未知字段不报错**（预留字段原样保存，B 升级后可直接启用）。
 - 模型只是「能力供给」；**启用与否由工位模板决定**（§3.3）。
 
 ### 3.3 工位、相机与工位模板（B 自管，GUI 编辑）
