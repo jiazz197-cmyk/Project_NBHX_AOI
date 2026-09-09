@@ -65,7 +65,10 @@ uv sync --frozen
 
 # 2. 准备环境变量
 cp .env.example .env
-# 按需修改 .env；默认即 PostgreSQL + MinIO
+# 仓库根目录的 .env 会被 Django 自动读取（django-environ，无需 export），
+# 真实 shell 环境变量优先；修改 .env 后需重启后端生效。
+# 默认即 PostgreSQL + MinIO，并已开启本地开发所需的 FRONTEND_HMR / DEBUG。
+# 注意：POSTGRE_NAME 必须与 PostgreSQL 容器中实际存在的库一致（默认 postgres）。
 
 # 3. 初始化数据库
 uv run python label_studio/manage.py migrate
@@ -88,14 +91,18 @@ bun install
 bun run dev
 ```
 
-前端默认开发地址：`http://localhost:8010`
+Vite 开发服务器监听 `http://localhost:8010`，但它只是**模块/HMR 服务器，不是浏览器入口**：
 
-Vite 已配置代理：
+- 后端 `.env` 中 `FRONTEND_HMR=true`（默认开启）时，Django 页面会自动从
+  `http://localhost:8010/react-app/main.tsx` 加载前端模块与样式；
+- **浏览器入口始终是后端地址 `http://localhost:8080`**，打开后即可联调；
+- **不要直接打开 `http://localhost:8010`**：该地址返回的是 Vite 的裸 `index.html`，
+  缺少 Django 注入的 `window.APP_SETTINGS` 与挂载 DOM（`.app-wrapper`/`#main-content`），
+  React 会在渲染前抛 `ReferenceError`，表现为白屏；
+- `vite.config.ts` 中的 `/api`、`/static` 代理只在“直接打开 8010”这一不受支持的场景下
+  才会被用到；正常联调时页面本身由 8080 提供，请求同源直达 Django。
 
-- `/api` → `http://localhost:8080`
-- `/static` → `http://localhost:8080`
-
-因此浏览器打开前端地址即可联调 LS API。
+前端代码改动由 Vite 自动热更新（HMR），刷新 `http://localhost:8080` 页面即可看到效果。
 
 ### 3.3 使用 PostgreSQL + MinIO（推荐接近交付形态）
 
@@ -114,6 +121,9 @@ cp .env.example .env
 #   MINIO_STORAGE_BUCKET_NAME=aoi-images
 #   MINIO_STORAGE_ACCESS_KEY=minioadmin
 #   MINIO_STORAGE_SECRET_KEY=minioadmin
+# 注意：全容器/交付形态下请关闭本地开发开关（.env 默认值）：
+#   FRONTEND_HMR=false
+#   DEBUG=false
 
 # 2. 启动 PostgreSQL + MinIO + Label Studio
 docker compose -f docker-compose.yml -f docker-compose.minio.yml up -d --build

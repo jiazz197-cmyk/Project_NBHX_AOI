@@ -14,10 +14,20 @@ import logging
 import os
 import re
 from datetime import timedelta
+from pathlib import Path
 
+import environ
 from django.core.exceptions import ImproperlyConfigured
 
 from label_studio.core.utils.params import get_bool_env, get_env, get_env_list, has_env
+
+# Load the repository-local `.env` used by the local development flow (README §3).
+# Real environment variables always take precedence (read_env overwrite=False), so
+# docker-compose / CI / exported shell variables are never shadowed. Docker images do
+# not ship this file, so this is a no-op there.
+_env_file = Path(__file__).resolve().parents[3] / '.env'
+if _env_file.exists():
+    environ.Env.read_env(_env_file)
 
 formatter = 'standard'
 JSON_LOG = get_bool_env('JSON_LOG', False)
