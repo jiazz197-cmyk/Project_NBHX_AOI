@@ -26,17 +26,20 @@
 
 ## 1. 通用约定
 
-### 1.1 访问控制（无 RBAC）
+### 1.1 访问控制（无 RBAC、无用户认证）
+
+> B **不做用户体系、不做登录、不做任何用户认证**；三角色 RBAC（操作员/管理员/超级管理员）只在平台 A 使用。
+> B 的接口仅在内网/产线网段暴露，靠**网络隔离**而非账号控制。
 
 | 调用方 | 认证 | 说明 |
 |---|---|---|
-| 平台 A（模型/方案下发） | `X-Platform-Token` | 与 A 的 `INFER_PLATFORM_TOKEN` 一致 |
-| B 前端 / 运维（查询） | 无 | 仅内网/产线网段暴露 |
-| B 前端 / 运维（写操作） | `X-Ops-Token`（可选） | 配置了 `OPS_TOKEN` 时必带；未配置时仅内网可达 |
-| 相机/模拟器 → `/inspect/image` | `X-Platform-Token` 或 `X-Ops-Token` | 由 A 的节拍模拟器或本机相机适配器调用 |
+| B 前端 / 现场运维（查询与写操作） | **无** | 打开即用；不校验用户身份，写操作只记本地操作日志 |
+| 平台 A（模型/方案下发 `/api/v1/ingest/*`） | `X-Platform-Token` | **机器对机器**共享密钥（非用户认证）；与 A 的 `INFER_PLATFORM_TOKEN` 一致 |
+| 相机/模拟器 → `/inspect/image` | **无** | 内网调用；由本机相机适配器或 A 的节拍模拟器发起 |
+| B → A（回传/心跳） | 携带 A 的 `X-Internal-Token` | 由平台 A 校验；B 只透传 |
 
-- 不记录用户身份；审计字段 `actor` 取调用来源（`platform-a` / `ops` / `camera`）。
-- 失败一律 `40100`。
+- 审计字段 `actor` 取调用来源（`platform-a` / `local` / `camera`），不关联用户。
+- 只有平台间下发接口在机器密钥错误时返回 `40100`；其余接口不因认证失败返回 401。
 
 ### 1.2 统一信封与错误码
 
@@ -55,7 +58,7 @@
 
 ### 1.3 公共请求约定
 
-- 头：`X-Request-ID`、`X-Platform-Token` / `X-Ops-Token`、`Idempotency-Key`（回传类写操作）。
+- 头：`X-Request-ID`、`Idempotency-Key`（回传类写操作）；仅 `/api/v1/ingest/*` 需 `X-Platform-Token`（机器密钥）。
 - 时间 ISO8601 UTC；分页 `?page=&page_size=`（默认 20，最大 200），响应 `{total, items}`。
 - 大图读取走 `GET /api/v1/inspections/{id}/image`（流式），不内联 base64。
 
@@ -190,7 +193,7 @@ CREATE TABLE b_audit (
 | `GET /health` | 服务/GPU/磁盘/模型/方案/相机/outbox 总览（见下） |
 | `GET /system/info` | 版本（platform/skillname/pipeline_core/schema）、配置摘要、路径、依赖版本 |
 | `GET /system/outbox` | 回传队列：`{pending, pushing, dead, items[]}` |
-| `POST /system/outbox/{id}/retry`、`POST /system/outbox/retry-all` | 手动重推（`X-Ops-Token`） |
+| `POST /system/outbox/{id}/retry`、`POST /system/outbox/retry-all` | 手动重推 |
 | `GET /system/audit` | 本地操作日志 |
 
 ```json
@@ -256,7 +259,7 @@ Content-Type: multipart/form-data
 |---|---|
 | `GET /reports/daily?from=&to=` | 日报列表 |
 | `GET /reports/daily/{day}` | 日报详情（HTML 片段 + stats_json） |
-| `POST /reports/daily/{day}/generate` | 手动重生成（`X-Ops-Token`；补跑历史日） |
+| `POST /reports/daily/{day}/generate` | 手动重生成（补跑历史日） |
 | `GET /reports/daily/{day}/export?format=html\|csv` | 导出 |
 
 ### 3.6 模型
@@ -265,9 +268,9 @@ Content-Type: multipart/form-data
 |---|---|
 | `GET /models` | 本地模型列表：`{model_ref, skillname, precision, sha256, size_bytes, status, received_at, activated_at, referenced_by_plan}` |
 | `GET /models/{model_ref}` | 详情（含张量名/形状/class_names） |
-| `POST /models/{model_ref}/preload` | 预加载 ONNX 会话（`X-Ops-Token`） |
+| `POST /models/{model_ref}/preload` | 预加载 ONNX 会话 |
 | `POST /models/{model_ref}/unload` | 卸载（被 active 方案引用时 → `40900`） |
-| `DELETE /models/{model_ref}` | 删除本地文件与记录（被引用时 → `40900`；需 `X-Ops-Token`） |
+| `DELETE /models/{model_ref}` | 删除本地文件与记录（被引用时 → `40900`） |
 
 ### 3.7 方案
 
@@ -284,9 +287,9 @@ Content-Type: multipart/form-data
 | 方法/路径 | 说明 |
 |---|---|
 | `GET /stations` | 工位列表：`{code, name, enabled, plan_id, plan_version, channel_id, status, last_capture_at, camera_config}` |
-| `PUT /stations/{code}/camera` | 相机配置（`X-Ops-Token`）：`{adapter, source, trigger, fps_limit, config}` |
-| `POST /stations/{code}/enable` / `disable` | 启停（`X-Ops-Token`） |
-| `POST /stations/{code}/capture` | 软触发一次采集+推理（`X-Ops-Token`） |
+| `PUT /stations/{code}/camera` | 相机配置：`{adapter, source, trigger, fps_limit, config}` |
+| `POST /stations/{code}/enable` / `disable` | 启停 |
+| `POST /stations/{code}/capture` | 软触发一次采集+推理 |
 | `GET /stations/{code}/snapshot` | 最近一帧快照 |
 
 > 工位主数据（code/name/plan 绑定）由 A 下发，B 只读；`camera_config` 为 B 本地配置，A 下发不覆盖。
@@ -463,7 +466,7 @@ Content-Type: multipart/form-data
 
 技术：Vite + React + TS + Ant Design 5 + ECharts；构建产物由 FastAPI `StaticFiles` 托管，SPA fallback 到 `index.html`。
 开发：Vite dev server 代理 `/api` 到 `http://localhost:8990`。
-无登录页、无用户菜单；写操作按钮在配置了 `OPS_TOKEN` 时弹出口令输入（仅前端简单校验，真正校验在服务端）。
+无登录页、无用户菜单、无口令弹窗；所有页面打开即用（靠内网/产线网段隔离，见 §1.1）。
 
 ---
 

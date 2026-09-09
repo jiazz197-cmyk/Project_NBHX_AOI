@@ -86,7 +86,7 @@
 - **RBAC 自研**：LS 开源版的组织/角色权限框架不可用（能力不完整且语义与 AOI 三角色不匹配），**不作为权限依据**；不修改 LS 原生 users/组织表，授权关系存 `aoi_core.user_role`（`user_id` 逻辑引用 LS users，不建外键）。
 - **B → A（回传/心跳）**：`X-Internal-Token: <INTERNAL_TOKEN>`；`X-Instance-Code` 标识 B 实例，供审计。
 - **A → B（下发）**：`X-Platform-Token`，见跨平台契约 §1.2。
-- 权限点（模块级）：`datasets.*`、`training.*`、`review.*`、`plans.*`、`system.*`；动作 `view/create/update/cancel/approve/rollback/dispatch`；三角色 `annotator`（标注员）/ `engineer`（工程师）/ `admin`（管理员），默认权限矩阵见 §3.1。
+- 权限点（模块级）：`datasets.*`、`training.*`、`review.*`、`plans.*`、`system.*`；动作 `view/create/update/cancel/approve/rollback/dispatch`；三角色 `operator`（操作员）/ `admin`（管理员）/ `super_admin`（超级管理员）——**仅用于平台 A**；默认权限矩阵见 §3.1。
 
 ### 2.5 公共请求约定
 
@@ -107,7 +107,7 @@
 ```sql
 CREATE TABLE aoi_core.role (
   id SERIAL PRIMARY KEY,
-  code VARCHAR(32) UNIQUE NOT NULL,          -- annotator/engineer/admin
+  code VARCHAR(32) UNIQUE NOT NULL,          -- operator/admin/super_admin
   name_cn VARCHAR(64) NOT NULL,
   description TEXT, is_builtin BOOLEAN DEFAULT TRUE
 );
@@ -136,12 +136,13 @@ CREATE TABLE aoi_core.user_role (
 
 - **权限点注册**：启动时由 `aoi/core/permissions.py` 的常量全量 upsert 到 `aoi_core.permission`，新增权限点无需手写数据迁移。
 - **判定入口**：DRF 权限类 `AoiPermission('training.approve')` → `user_role → role_permission → permission.code`；结果按用户缓存 5 分钟，授权变更时主动失效。
+- **三角色定义**：`operator`（操作员）负责日常标注与复审；`admin`（管理员）负责数据集/训练/方案/工位等业务全量操作；`super_admin`（超级管理员）在管理员之上增加角色与用户授权、审计。**三角色只在平台 A 使用**，平台 B 无 RBAC、无用户认证。
 - **默认权限矩阵**（`✅` 允许，`—` 拒绝）：
 
-| 权限点 | annotator | engineer | admin |
+| 权限点 | `operator`（操作员） | `admin`（管理员） | `super_admin`（超级管理员） |
 |---|---|---|---|
 | `datasets.view` | ✅ | ✅ | ✅ |
-| `datasets.create` / `datasets.update` | ✅（导入/标注） | ✅ | ✅ |
+| `datasets.create` / `datasets.update`（导入/标注） | ✅ | ✅ | ✅ |
 | `datasets.export` | — | ✅ | ✅ |
 | `prelabel.*` | — | ✅ | ✅ |
 | `training.view` | ✅ | ✅ | ✅ |
@@ -149,10 +150,11 @@ CREATE TABLE aoi_core.user_role (
 | `review.view` / `review.finalize` | ✅ | ✅ | ✅ |
 | `plans.view` | ✅ | ✅ | ✅ |
 | `plans.create` / `update` / `activate` / `rollback` | — | ✅ | ✅ |
-| `system.*` | — | — | ✅ |
-| `audit.view` | — | — | ✅ |
+| `system.stations` / `system.instances` | — | ✅ | ✅ |
+| `system.roles` / `system.users`（角色与授权） | — | — | ✅ |
+| `system.audit` | — | — | ✅ |
 
-- **接口**：`GET /api/core/permissions` 返回当前用户 `{user_id, roles:[...], perms:[...]}`；`admin` 可 `CRUD /api/core/roles`、`POST /api/core/users/{id}/roles` 分配角色。
+- **接口**：`GET /api/core/permissions` 返回当前用户 `{user_id, roles:[...], perms:[...]}`；`super_admin` 可 `CRUD /api/core/roles`、`POST /api/core/users/{id}/roles` 分配角色。
 - **不共享**：RBAC 属 A 侧业务权限，**不进 `packages/`**；平台 B 无用户体系。
 - **审计**：角色/授权变更写 `aoi_audit.audit_log`。
 
@@ -392,7 +394,7 @@ CREATE TABLE aoi_audit.audit_log (
 | 方法/路径 | 权限 | 说明 |
 |---|---|---|
 | `GET /api/core/permissions` | 登录用户 | `{user_id, roles:[...], perms:[...]}`，供 A 前端控制按钮显隐（B 不调用，B 无 RBAC） |
-| `CRUD /api/core/roles`、`POST /api/core/users/{id}/roles` | system.*（admin） | 角色/权限点查看、用户角色分配（写审计） |
+| `CRUD /api/core/roles`、`POST /api/core/users/{id}/roles` | system.roles / system.users（super_admin） | 角色/权限点查看、用户角色分配（写审计） |
 
 ### 4.1 数据域 `/api/datasets`
 
@@ -614,7 +616,7 @@ stations:
 ## 10. 复审 / 重标签 / 回流契约
 
 1. **标注与审核**：复用 LS 原生 Review 流（标注→审核）；aoi 只读投影统计，不建表。
-2. **推理结果复审**：B 回传 `/api/ingest/findings` → A 建 `inspection_fact` + `review_workitem`（MVP `route=vlm` 由 stub 转 manual）→ 工程师终裁（确认/驳回/改标/补框 + 必填原因）→ 落 `final_fact`。
+2. **推理结果复审**：B 回传 `/api/ingest/findings` → A 建 `inspection_fact` + `review_workitem`（MVP `route=vlm` 由 stub 转 manual）→ 复审人终裁（确认/驳回/改标/补框 + 必填原因）→ 落 `final_fact`。
 3. **回流**：R1~R4 规则 → `feedback_suggestion` → 人工确认 → 图片以 `source=reflux_review` 进数据集候选（红线：不进测试集）。
 4. **坏图**：`bad_image` 清单人工重标签/重传后置 `handled=true`。
 5. 状态枚举：`inspection_fact.status ∈ {initial, rechecking, finalized}`；`workitem.status ∈ {pending, processing, finalized, failed}`。

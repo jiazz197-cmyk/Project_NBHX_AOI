@@ -35,7 +35,7 @@
 │ 接收模型与方案 · 按模板切片推理 · 三档判定 · 相机接入 · 检测记录                  │
 │ 错图统计 · 信息统计 · 日报 · 错图回传 · 回传重试(outbox)                          │
 │ FastAPI + Uvicorn · SQLite · 本地磁盘 · APScheduler · ONNX Runtime · 独立 React 前端│
-│ 无 RBAC、无用户体系、无 Redis/Celery/MinIO 依赖                                    │
+│ 无 RBAC/无用户认证/无登录 · 无 Redis/Celery/MinIO 依赖                              │
 └──────────────────────────────────────────────────────────────────────────────────┘
                 唯一共享层：packages/skillname（词汇表） + packages/pipeline-core（推理内核）
 ```
@@ -63,7 +63,7 @@
 | 术语 | 含义 |
 |---|---|
 | 平台 A / `aoi-train` | 训练与标注平台，LS 1.x 二开，中心侧部署；账户复用 LS、**RBAC 自研** |
-| 平台 B / `aoi-infer` | 推理与检测平台，独立前后端，产线侧部署，**无 RBAC** |
+| 平台 B / `aoi-infer` | 推理与检测平台，独立前后端，产线侧部署，**无 RBAC / 无用户认证** |
 | `skillname` | 公共包：跨平台任务类型与标签词汇（`ObjectDetection`、`object_fault_type_XX`、`model_ref` 规范） |
 | `pipeline-core` | 公共包：切片/NMS 合并/类别映射/三档判定/方案模板解析，推理后端由调用方注入 |
 | `model_ref` | 模型注册版本号，格式 `{seq}-{framework}@ds{version}`，如 `3-yolo@ds1` |
