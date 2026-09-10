@@ -6,13 +6,17 @@
 
 | 文件 | 说明 |
 |---|---|
-| `conftest.py` | Django/DRF fixtures、`jpeg_bytes`、`auth_client`、`aoi.core` 进程内状态重置（含 `_NEXT_ROLE_ID`） |
+| `conftest.py` | Django/DRF fixtures、`jpeg_bytes`、`auth_client`、测试账号常量（`TEST_USER_EMAIL`/`TEST_USER_PASSWORD`）、`aoi.core` 进程内状态重置（含 `_NEXT_ROLE_ID`） |
 | `test_skillname.py` | T1.2 `packages/skillname`：枚举/code 正则（ASCII 01~99）/`model_ref`（ASCII）/镜像 tag |
-| `test_platform_a_api.py` | T2.2–T2.5/T2.9 + P0/P1 回归：信封/鉴权/全量 stub 200/OpenAPI 基线/label config golden/model.yaml/预标协议/ingest 幂等与半写补建/发布与复审状态机/权限锚点 |
+| `test_platform_a_api.py` | T2.2–T2.5/T2.9 + P0/P1 回归 + D3 认证：信封/鉴权/全量 stub 200/OpenAPI 基线/label config golden/model.yaml/预标协议/ingest 幂等与半写补建/发布与复审状态机/权限锚点；`TestAoiJwtAuth` 15 例覆盖真实 JWT 链路（登录→Bearer 打 aoi 与 LS 原生端点→刷新→登出黑名单→浏览器 session 回归→中间件移除守卫） |
 | `test_ls_reuse_smoke.py` | T2.7 LS 原生复用 smoke（`@pytest.mark.reuse`；需 `LS_REUSE_*`；写入需 `LS_REUSE_ALLOW_MUTATION=1`，结束清理自建资源） |
 | `samples.py` | fixture 唯一数据源（model.yaml/manifest/ML backend/API 路径基线） |
 | `make_fixtures.py` | 维护用：重新生成 `fixtures/`（不参与 CI 断言） |
 | `fixtures/` | B 归属 7 份：`label_config_expected.xml`、`model_yaml_sample.yaml`、`model_manifest_sample.json`、`ml_backend_predict_sample.json`、`aoi_api_paths.json`、`yolo_export_layout_sample.json`、`review_flow_sample.json`（三桶复审） |
+
+> `aoi_api_paths.json` 的 `auth` 字段取值：`jwt`（登录用户）/ `public`（匿名，如 `/api/auth/login`）/
+> `internal-token`（`X-Internal-Token`）/ `optional-internal-token`（LS ML backend 协议）。
+> 该基线同时是 OpenAPI 的「不多不少」比对源（`test_route_and_openapi_baseline`）。
 
 ## 契约点名但尚未落地的测试/ fixture（归属与延期）
 

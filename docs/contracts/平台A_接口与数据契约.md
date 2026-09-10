@@ -83,10 +83,13 @@
 
 ### 2.4 鉴权
 
-- **前端 → A**：LS 原生 token API 签发的 JWT（HS256，`JWT_SECRET` = LS `SECRET_KEY`，claims 含 `user_id`）——**只复用 LS 的账户与登录**；角色/权限由 aoi 自研 RBAC 判定（DRF 权限类查 `aoi_core`，见 §3.1）。
+- **前端/脚本 → A（D3 认证链路标准化）**：`POST /api/auth/login`（`email` + `password`，匿名可访问）签发 **access + refresh JWT**；业务接口带 `Authorization: Bearer <access>`，由 **DRF 认证类**校验（`aoi.common.authentication.AoiJWTAuthentication` → simplejwt `JWTAuthentication`，见 `REST_FRAMEWORK.DEFAULT_AUTHENTICATION_CLASSES`）。算法 HS256，签名密钥取 `settings.SECRET_KEY`（simplejwt 默认；显式配置见 `core/settings/base.py::SIMPLE_JWT`），claims 含 `user_id`、`token_type`。
+- **凭据校验只复用 LS**：与浏览器登录 `LoginForm` **同源**——先走 `settings.USER_AUTH` 钩子（LDAP 等自定义后端），再回退 Django 认证后端；账号不存在/密码错误/账号停用一律 `40100`，不区分原因。
+- **浏览器 → A**：LS 原生会话登录 `/user/login/`（`sessionid` + `session['last_login']`）**保持不变**，`SessionAuthentication` 仍是第三顺位认证类；`admin/`、密码重置、邀请等上游链路不受影响。
+- **令牌管理（上游端点，语义不变）**：`POST /api/token/` 签发 PAT（返回 refresh JWT；同一用户已有有效 token → 409）、`POST /api/token/refresh/`（refresh → access）、`POST /api/token/blacklist/`、`POST /api/token/rotate/`；`POST /api/auth/logout` 把 refresh 加入黑名单（**幂等**：无效/已吊销同样 200，`revoked=false`）。
+- **已废弃的机制（D3）**：上游 `jwt_auth.middleware.JWTAuthenticationMiddleware` 已从 `MIDDLEWARE` 移除——Bearer 不再由 Django 中间件赋值 `request.user`，因此 JWT 在 DRF 侧有完整的 `request.auth`、一致的 401 语义、可进 OpenAPI；`X-Api-Key: <jwt>` 仍由 `XApiKeySupportMiddleware` 改写为 `Authorization: Bearer` 后走同一认证类。
 - **RBAC 自研**：LS 开源版的组织/角色权限框架不可用（能力不完整且语义与 AOI 三角色不匹配），**不作为权限依据**；不修改 LS 原生 users/组织表，授权关系存 `aoi_core.user_role`（`user_id` 逻辑引用 LS users，不建外键）。
 - **B → A（错图回传）**：`X-Internal-Token: <INTERNAL_TOKEN>`；`instance_code` / `station_code` 由 B 在回传体中给出，供审计与溯源。
-- **token 使用（D2 实测）**：`POST /api/token/` 返回 **refresh JWT**（claims `token_type=refresh`、`user_id`）；业务接口需先 `POST /api/token/refresh/` 换取 **access JWT**，再 `Authorization: Bearer <access>`。同一用户已有有效 token 时 `POST /api/token/` 返回 409，可用 `/api/token/rotate/`、`/api/token/blacklist/` 管理。
 - **LS → A 预标端点（D2 实测）**：LS 调用 `aoi/prelabel/{task_id}/*` 时**不携带 `X-Internal-Token`/Authorization**，仅带 `User-Agent: heartex/...`；因此默认放行，请求若带内部头则必须正确。置 `AOI_PRELABEL_REQUIRE_INTERNAL_TOKEN=true` 可强制 40100（需配合网关注入头或 LS Basic Auth）；生产建议该端点仅在内网暴露。
 - **A → 镜像仓库（模型发布）**：`MODEL_REGISTRY_USER` / `MODEL_REGISTRY_PASSWORD`，见跨平台契约 §1.2。**A 不直接连接 B**。
 - 权限点（模块级）：`datasets.*`、`training.*`、`review.*`、`system.*`；动作 `view/create/update/cancel/approve/publish`；三角色 `operator`（操作员）/ `admin`（管理员）/ `super_admin`（超级管理员）——**仅用于平台 A**；默认权限矩阵见 §3.1。
@@ -373,11 +376,13 @@ CREATE TABLE aoi_audit.audit_log (
 
 ### 4.0 通用
 
-- 鉴权：LS JWT（§2.4）+ DRF 权限类。
+- 鉴权：Bearer JWT（§2.4）+ DRF 权限类；无凭据/凭据无效 → `40100`。
 - 所有写操作建议带 `Idempotency-Key`。
 
 | 方法/路径 | 权限 | 说明 |
 |---|---|---|
+| `POST /api/auth/login` | 匿名 | `{email, password}` → `{access, refresh, token_type, expires_in, user:{id,email}}`；凭据错误 `40100`（不区分账号/口令），字段缺失 `42200` |
+| `POST /api/auth/logout` | 登录用户 | `{refresh}` 加入黑名单 → `{revoked: bool}`；幂等（无效/已吊销 → `revoked=false`），refresh 不属于当前用户 → `40300` |
 | `GET /api/core/permissions` | 登录用户 | `{user_id, roles:[...], perms:[...]}`，供 A 前端控制按钮显隐（B 不调用，B 无 RBAC） |
 | `CRUD /api/core/roles`、`POST /api/core/users/{id}/roles` | system.roles / system.users（super_admin） | 角色/权限点查看、用户角色分配（写审计） |
 
@@ -656,5 +661,6 @@ class RecheckBackend(ABC):
 | 2026-09-10 | 排期同步（**非语义**，接口/字段/状态机不变） | §13.2 第 8 项预标日期 D15 → **D12~13**：预标开发提前到复审之前（先预标后复审），三桶人工复审 D13~15；见《MVP开发计划》§1/§5 | ① 本表 + §13.2；②③④ 无需变更（无契约语义改动） |
 
 | 2026-09-10 | D2 review P0/P1 修复（**语义变更**） | ① `model_publish` 唯一性 `UNIQUE(model_ref)` → **`UNIQUE(model_ref, tag)`**（fp16 才能单独发布）；② `prelabel_task.status` 补默认 `queued` + 枚举，状态由服务端控制（`route_bucket` 只读）；`dataset_version` 创建时 `status/phase` 一律 draft；③ RBAC 判定入口由 `AoiPermission('x')`（实例，DRF 不可用）改为 **`aoi_permission('x')` 工厂 + 视图 `aoi_perm` 锚点**；④ 明确 RBAC 三角色矩阵/40300/缓存失效为 D4 交付（§13.1 标注） | ① 本表 + §3.1/§3.2/§3.3/§4.1/§4.3/§13.1；② stub 与迁移：`aoi_training/0003`、`aoi_datasets/0003`、`aoi_review/0003`；③ fixture 无字段变化（`aoi_api_paths.json` 已含相关路径）；④ `TestTrainingPublishGuards`/`TestStateMachineInjection`/`TestPermissionAnchors`/`TestReviewStateMachine` |
+| 2026-09-10 | 认证链路标准化（D3，**语义变更**） | ① 新增 `POST /api/auth/login`（匿名，email+password → access/refresh）与 `POST /api/auth/logout`（refresh 进黑名单，幂等）；② Bearer 校验从 `jwt_auth.middleware.JWTAuthenticationMiddleware` 迁到 **DRF 认证类**（`aoi.common.authentication.AoiJWTAuthentication`），中间件已从 `MIDDLEWARE` 移除；③ 显式 `SIMPLE_JWT`（access 30 min / refresh 7 天 / 不轮换，理由见 §2.4）；④ 上游 `/api/token/*`、`/user/login/`（浏览器 session）与 `X-Internal-Token` **语义不变** | ① 本表 + §2.4/§4.0；② 实现 `label_studio/aoi/core/auth.py`、`aoi/common/authentication.py`、`core/settings/base.py`、`aoi/urls.py`；③ fixture `aoi_api_paths.json`（版本 `d3-20260910`，新增两条 auth 路径与 `auth: public`）；④ `TestAoiJwtAuth`（15 例：登录/刷新/登出黑名单/Bearer 打 aoi 与 LS 原生端点/浏览器 session 回归/中间件移除守卫） |
 
 *本契约于 D2 冻结；D9、D15 评审窗口。破坏性变更四件套：改文档 + 改 stub + 改 fixture + 双方测试过。*

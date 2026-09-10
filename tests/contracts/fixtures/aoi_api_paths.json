@@ -1,7 +1,19 @@
 {
-  "version": "d2-20260909",
-  "note": "T2.9 datasets CRUD 路径裁定为 /api/datasets + /api/datasets/{id}；旧 /api/datasets/datasets* 不存在",
+  "version": "d3-20260910",
+  "note": "T2.9 datasets CRUD 路径裁定为 /api/datasets + /api/datasets/{id}；旧 /api/datasets/datasets* 不存在；D3 新增 /api/auth/login（匿名）与 /api/auth/logout（jwt）",
   "paths": [
+    {
+      "method": "POST",
+      "path": "/api/auth/login",
+      "tag": "aoi-auth",
+      "auth": "public"
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/logout",
+      "tag": "aoi-auth",
+      "auth": "jwt"
+    },
     {
       "method": "GET",
       "path": "/api/core/permissions",

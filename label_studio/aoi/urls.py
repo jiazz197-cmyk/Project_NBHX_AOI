@@ -9,12 +9,16 @@
 """
 
 from aoi.common.urls import slash_fallback
+from aoi.core import auth as auth_views
 from django.urls import include, path, re_path
 
 #: aoi 前缀（slash_fallback 只接管这些前缀，不碰上游路由）
-AOI_PREFIXES = 'core|datasets|train|prelabel|review|system|ingest'
+AOI_PREFIXES = 'auth|core|datasets|train|prelabel|review|system|ingest'
 
 urlpatterns = [
+    # 认证端点（D3 认证链路标准化）：与上游 /api/token/*（PAT/刷新/吊销）并存
+    path('api/auth/login', auth_views.AoiLoginView.as_view(), name='aoi-auth-login'),
+    path('api/auth/logout', auth_views.AoiLogoutView.as_view(), name='aoi-auth-logout'),
     path('api/core', include('aoi.core.urls')),
     path('api/datasets', include('aoi.datasets.urls')),
     path('api/train', include('aoi.training.urls')),
