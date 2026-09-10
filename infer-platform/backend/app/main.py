@@ -10,7 +10,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 
-from .api import health
+from .api import health, inspect, models, records, reports, stations, stats, system
 from .config import get_settings
 from .db import init_db
 from .envelope import new_request_id, register_exception_handlers
@@ -34,6 +34,13 @@ def create_app() -> FastAPI:
         return response
 
     app.include_router(health.router, prefix="/api/v1")
+    app.include_router(models.router, prefix="/api/v1")
+    app.include_router(stations.router, prefix="/api/v1")
+    app.include_router(inspect.router, prefix="/api/v1")
+    app.include_router(records.router, prefix="/api/v1")
+    app.include_router(stats.router, prefix="/api/v1")
+    app.include_router(reports.router, prefix="/api/v1")
+    app.include_router(system.router, prefix="/api/v1")
     register_exception_handlers(app)
     return app
 
