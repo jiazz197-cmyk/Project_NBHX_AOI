@@ -83,18 +83,22 @@ def get_prelabel_require_internal_token() -> bool:
 
 
 def get_model_registry() -> str:
+    """制品仓库地址（跨平台契约 §2.2）。仓库承载模型**制品**，不是容器镜像。"""
     return _get('MODEL_REGISTRY', 'docker.io')
 
 
 def get_model_image_repo() -> str:
+    """制品仓库路径（`<org>/aoi-model`）。变量名 `MODEL_IMAGE_REPO` 沿用，语义为制品仓库（跨平台契约 §2.2）。"""
     return _get('MODEL_IMAGE_REPO', 'aoi/aoi-model')
 
 
 def get_model_registry_user() -> str:
+    """上传凭据用户名（A 侧读写；B 侧另有只读 token，见平台 B 契约）。"""
     return _get('MODEL_REGISTRY_USER', '')
 
 
 def get_model_registry_password() -> str:
+    """上传凭据（A 侧读写 PAT；只授予上传任务的写权限，见跨平台契约 §1.2）。"""
     return _get('MODEL_REGISTRY_PASSWORD', '')
 
 

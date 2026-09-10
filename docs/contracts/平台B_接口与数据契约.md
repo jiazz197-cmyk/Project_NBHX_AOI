@@ -1,7 +1,7 @@
 # 平台 B 接口与数据契约（推理与检测平台，轻量）
 
-> 归属：**C 主笔**；消费：B 独立前端、相机适配器、镜像仓库拉取模块。
-> 冻结基线：D2；变更窗口：D9 / D15。跨平台接口（模型镜像发布/拉取、错图回传）见 `跨平台契约_A-B.md`，不在此重复。
+> 归属：**C 主笔**；消费：B 独立前端、相机适配器、制品仓库下载模块。
+> 冻结基线：D2；变更窗口：D9 / D15。跨平台接口（模型制品上传/下载、错图回传）见 `跨平台契约_A-B.md`，不在此重复。
 > 技术栈：FastAPI + Uvicorn（单进程）、SQLite（WAL）、本地磁盘、APScheduler、ONNX Runtime、`pipeline-core` + `skillname`。
 
 ---
@@ -36,7 +36,7 @@
 |---|---|---|
 | B 前端 / 现场运维（查询与写操作） | **无** | 打开即用；不校验用户身份，写操作只记本地操作日志 |
 | 相机/模拟器 → `/inspect/image` | **无** | 内网调用；由本机相机适配器或 A 的节拍模拟器发起 |
-| B → 镜像仓库（拉模型） | registry 只读凭据 | 公开仓库可留空；与用户体系无关 |
+| B → 制品仓库（下载模型） | registry 只读凭据 | 公开仓库可留空；与用户体系无关 |
 | B → A（回传） | 携带 A 的 `X-Internal-Token` | 由平台 A 校验；B 只透传 |
 
 - 审计字段 `actor` 取调用来源（`local` / `camera` / `registry`），不关联用户。
@@ -48,7 +48,7 @@
 
 | HTTP | code | 含义 |
 |---|---|---|
-| 400 | 40010 | 坏图/镜像层解包失败/sha256 不符/参数不可读 |
+| 400 | 40010 | 坏图/制品解包失败/sha256 不符/参数不可读 |
 | 404 | 40401 / 40402 | 资源不存在 / 工位未注册未启用 |
 | 409 | 40900 | 状态冲突（同 `model_ref` 不同 digest、模板版本冲突） |
 | 422 | 42200 | 业务校验失败（`data.detail.fields`） |
@@ -78,7 +78,7 @@ CREATE TABLE b_model (
   cover_classes TEXT NOT NULL,               -- JSON 数组
   precision TEXT NOT NULL DEFAULT 'fp32',    -- fp32/fp16
   config_json TEXT NOT NULL,                 -- model.yaml 原文（含推荐阈值/展示名/张量信息；预留字段原样保存）
-  source_image TEXT,                         -- 拉取来源镜像，如 docker.io/<org>/aoi-model:3-yolo-ds1
+  source_image TEXT,                         -- 下载来源制品引用，如 docker.io/rekal1018/aoi-model:3-yolo-ds1（列名沿用，语义为制品）
   image_digest TEXT,                         -- sha256:...
   sha256 TEXT NOT NULL,                      -- model.onnx 的 sha256
   size_bytes INTEGER NOT NULL,
@@ -205,19 +205,19 @@ GET /api/v1/health
   "outbox":{"pending":3,"dead":0}}}
 ```
 
-### 3.2 模型库（从镜像仓库拉取）
+### 3.2 模型库（从制品仓库下载）
 
 | 方法/路径 | 说明 |
 |---|---|
 | `GET /models` | 本地模型列表：`{model_ref, skillname, precision, sha256, source_image, image_digest, status, classes, received_at}` |
 | `GET /models/{model_ref}` | 详情（含 `config_json` 原文：类别/推荐阈值/张量契约/预留字段；B 只解析必填字段） |
-| `POST /models/pull` | **从镜像仓库拉取**：`{image: "<registry>/<org>/aoi-model:3-yolo-ds1", digest?: "sha256:..."}` → 拉 manifest/层 → 解包 → 校验 → 注册；返回 `{model_ref, digest, status, classes}` |
-| `POST /models/import` | **离线导入**：multipart 上传 `docker save` 或层 tar → 同样校验/注册 |
+| `POST /models/pull` | **从制品仓库下载**：`{image: "<registry>/<org>/aoi-model:3-yolo-ds1", digest?: "sha256:..."}` → 取 manifest → 按媒体类型取 blobs（`model.onnx`/`.sha256`/`model.yaml`）→ 校验 → 注册；返回 `{model_ref, digest, status, classes}`（字段名 `image` 沿用，语义=制品引用） |
+| `POST /models/import` | **离线导入**：multipart 上传制品包 tar（`model.onnx` + `.sha256` + `model.yaml`，或 OCI layout tar）→ 同样校验/注册 |
 | `POST /models/{model_ref}/preload` | 预加载 ONNX 会话 |
 | `POST /models/{model_ref}/unload` | 卸载（被启用工位模板引用时 → `40900`） |
 | `DELETE /models/{model_ref}` | 删除本地文件与记录（被引用时 → `40900`） |
 
-- 拉取模式：`MODEL_PULL_MODE=oci`（默认，httpx 直连 Registry v2，无需 Docker）或 `docker`（本机 `docker pull` + `docker create` + `docker cp`）。
+- 下载模式：`MODEL_PULL_MODE=oci`（**唯一模式**：httpx 直连 Registry v2 API，无需 Docker；制品不是容器镜像，**不再支持 `docker` 模式**）。
 - 校验规则与失败语义见跨平台契约 §2.3、§2.5；**可选/预留/未知字段不报错**（预留字段原样保存，B 升级后可直接启用）。
 - 模型只是「能力供给」；**启用与否由工位模板决定**（§3.3）。
 
@@ -512,14 +512,14 @@ services:
 
 - 升级：停服 → 备份 `/data` → 替换镜像/包 → 启动（自动执行顺序 SQL 迁移）→ `/health` 自检 → 用当前启用模板空跑 1 张图。
 - 备份：`sqlite3 infer.db ".backup '/backup/infer-$(date +%F).db'"` + `rsync /data/models /data/reports`；保留 7 天。
-- 离线包：镜像 tar + `data/models` 预置权重（或 `docker save` 的模型镜像）+ `.env` 模板 + 安装脚本。
+- 离线包：B 应用镜像 tar + `data/models` 预置权重（或 **A 导出的模型制品包 tar**）+ `.env` 模板 + 安装脚本。
 - 日志：`logs/infer.log` 按天轮转，保留 30 天；不引入 ELK。
 
 ### 10.3 验收口径（M3）
 
 - 真实相机 1 路：单图端到端 ≤ 3s（采集→推理→落库→响应）。
 - 8 通道仿真：连续 2 小时不丢图、队列不溢出、P95 时延 ≤ 3s。
-- 模型拉取：从镜像仓库拉取新模型 → 校验 → 在工位模板里切换 → 生效，全程 ≤ 5min（不含大镜像下载）。
+- 模型下载：从制品仓库下载新模型 → 校验 → 在工位模板里切换 → 生效，全程 ≤ 5min（不含大制品下载）。
 - 断网演练：断开 A 后继续推理 ≥ 30min，回传积压进 outbox，恢复后 5min 内补传完成。
 - 日报：连续 7 天自动生成且数据与 `b_stats_daily` 一致。
 

@@ -70,12 +70,12 @@ bundle/
 | `criticalNgClassIds` | `ObjectSpec.critical` |
 | `acceptanceThreshold` | `auto_min` |
 | 相机点位（point） | 工位模板中的 ROI 配置 |
-| ZIP 包导入 | Docker 镜像仓库拉取 |
+| ZIP 包导入 | 制品仓库上传/下载（ONNX + `model.yaml`，OCI 制品） |
 
 ---
 
 ## 注意事项
 
-- 这些 ONNX 模型是旧平台产物，仅供测试参考。生产模型由平台 A 训练并通过镜像仓库发布。
+- 这些 ONNX 模型是旧平台产物，仅供测试参考。生产模型由平台 A 训练后以**模型制品**（ONNX + `model.yaml`）上传到制品仓库供平台 B 下载。
 - 旧平台使用 TensorRT 作为推理后端（Jetson Orin），新平台默认 ONNX Runtime，预处理参数可能需调整。
 - 旧平台类别命名（class-0/class-1）与新平台规范（object_fault_type_XX）不同，迁移时需映射。
