@@ -225,6 +225,12 @@ export const Menubar = ({ enabled, defaultOpened, defaultPinned, children, onSid
                 <Menu.Item label="Projects" to="/projects" icon={<IconFolder />} data-external exact />
                 <Menu.Item label="Organization" to="/organization" icon={<IconPeople />} data-external exact />
 
+                {/* AOI 二开入口（注入点 3，见 CHANGES.md）；仅数据驱动，不改上游组件逻辑 */}
+                <Menu.Item label="Datasets" to="/datasets" icon={<IconFolder />} data-external exact />
+                <Menu.Item label="Training" to="/training" icon={<IconTerminal />} data-external exact />
+                <Menu.Item label="Review" to="/review" icon={<IconPeople />} data-external exact />
+                <Menu.Item label="System" to="/system" icon={<IconBook />} data-external exact />
+
                 <Menu.Spacer />
 
                 <VersionNotifier showNewVersion />

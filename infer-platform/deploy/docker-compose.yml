@@ -1,0 +1,42 @@
+# ============================================================
+# 平台 B（推理检测平台）Docker Compose
+# 对齐 平台B契约 §10.1
+# 位置：infer-platform/deploy/docker-compose.yml（仓库根为 ../..）
+# ============================================================
+# 使用方式：
+#   docker compose up -d
+# 宿主机数据目录 /data/infra/data → 容器内 /data
+# ============================================================
+
+services:
+  infer:
+    build:
+      context: ../..
+      dockerfile: infer-platform/deploy/Dockerfile
+    image: aoi-infer:0.1.0
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8990}:8990"
+    environment:
+      - DB_PATH=/data/infer.db
+      - DATA_DIR=/data
+      - MODEL_REGISTRY=${MODEL_REGISTRY:-docker.io}
+      - MODEL_IMAGE_REPO=${MODEL_IMAGE_REPO:-rekal1018/aoi-model}
+      - MODEL_REGISTRY_USER=${MODEL_REGISTRY_USER:-}
+      - MODEL_REGISTRY_TOKEN=${MODEL_REGISTRY_TOKEN:-}
+      - MODEL_PULL_MODE=${MODEL_PULL_MODE:-oci}
+      - TRAIN_PLATFORM_BASE_URL=${TRAIN_PLATFORM_BASE_URL:-}
+      - INTERNAL_TOKEN=${INTERNAL_TOKEN:-}
+      - ONNX_PROVIDER=${ONNX_PROVIDER:-cuda}
+      - INSPECT_CONCURRENCY=${INSPECT_CONCURRENCY:-2}
+      - INSPECT_QUEUE_MAX=${INSPECT_QUEUE_MAX:-32}
+      - INFER_TIMEOUT_MS=${INFER_TIMEOUT_MS:-10000}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - /data/infra/data:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+              count: 1
