@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+  "config": {
+    "mediaType": "application/vnd.docker.container.image.v1+json",
+    "size": 7023,
+    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+      "size": 41234567,
+      "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ],
+  "annotations": {
+    "org.opencontainers.image.ref.name": "3-yolo-ds1",
+    "aoi.model_ref": "3-yolo@ds1",
+    "aoi.model_yaml_sha256": "ec0a47efd21f23e52653e00c4c5f59f947079677ed70309824ad251987835820",
+    "aoi.skillname": "ObjectDetection",
+    "aoi.precision": "fp32",
+    "aoi.registry": "docker.io",
+    "aoi.image": "docker.io/aoi/aoi-model"
+  }
+}

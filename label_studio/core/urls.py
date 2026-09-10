@@ -56,6 +56,8 @@ urlpatterns = [
         },
     ),
     re_path(r'^static/(?P<path>.*)$', serve, kwargs={'document_root': settings.STATIC_ROOT, 'show_indexes': True}),
+    # AOI 二开（注入点，见 CHANGES.md）：必须在 organizations.urls 之前，保证 aoi /api/* 优先匹配
+    re_path(r'^', include('aoi.urls')),
     re_path(r'^', include('organizations.urls')),
     re_path(r'^', include('projects.urls')),
     re_path(r'^', include('data_import.urls')),

@@ -24,14 +24,14 @@
 | 标注项目/任务 | `projects/tasks/annotations` 原生 | label config 由缺陷字典渲染注入 | **复用** |
 | 框标注交互 | 标注编辑器（RectangleLabels） | 零改动（红线） | **复用** |
 | 数据浏览 | Data Manager | 零重构（红线） | **复用** |
-| 标注审核 | LS Review 流（标注→审核） | aoi 只读投影统计；不满足再降级平台审核接口 | **复用** |
-| 文件上传/存储 | LS 文件存储（MinIO）+ 预签名 URL + 缩略图 | aoi 导入包裹：去重/质检/元数据登记 | 复用+包裹 |
+| 标注审核 | LS OSS 1.24 **无 Review 流程**（D2 实测） | **自研**：预标三桶判定 → 人工复审 → 终裁/回流（§10） | **自研（D2 裁定）** |
+| 文件上传/存储 | LS 文件存储（MinIO）+ `/data/` 鉴权访问；**D2 实测无服务端缩略图、默认不预签名** | aoi 导入包裹：去重/质检/元数据登记 + **缩略图 + 预签名 URL** | 复用+包裹 |
 | 预标回写 | `ml/` MLBackend 连接器 + Batch predictions | **A 侧自实现 ML backend 协议**（`aoi/prelabel`） | 复用+自实现 |
-| 数据集导出 | `data_export`（YOLO/COCO） | aoi 版本绑定 + 测试集红线 + `data.yaml` 校验 | **复用** |
+| 数据集导出 | `data_export`（YOLO/COCO）；D2 实测 YOLO 产物 `images/ + labels/ + classes.txt + notes.json`（**无 data.yaml**） | aoi 版本绑定 + 测试集红线 + `classes.txt` 顺序校验；训练包裹按需生成 `data.yaml` | **复用+包裹** |
 | 前端框架 | web/apps 组件库/路由/auth store/i18n | Menubar 入口 + 二开页面 | 复用+加页 |
 | 审计（部分） | LS activity log | `aoi/audit` 关键操作追加写 | 复用+补充 |
 
-**结论**：账户与登录、标注、上传、审核、预标通道、导出六块几乎零开发（**角色与权限除外，必须自研**）；二开的主战场是「自研 RBAC / 字典 / 数据集版本 / 预标注 / 训练 / 复审回流」+ 薄包裹 + **模型发布**。
+**结论**：账户与登录、标注、上传通道、预标通道、导出通道可直接复用（角色与权限必须自研，复审自研）；上传的缩略图/预签名、YOLO 的 `data.yaml` 由 aoi 包裹补足。二开的主战场是「自研 RBAC / 字典 / 数据集版本 / 预标注 / 训练 / 复审回流」+ 薄包裹 + **模型发布**。
 
 ---
 
@@ -51,6 +51,7 @@
 | `kind` | 回传类型：`suspicious`（可疑图）/ `bad`（坏图） |
 
 > 枚举值**不得**在 A 侧硬编码副本；统一 `from skillname import ...`。
+> `label_config` 由缺陷字典运行时渲染，结构遵循 LS 官方预设模板（`label_studio/annotation_templates/**/config.yml` 的 `View/Image/RectangleLabels/Label` 形态），控件名 `defect` 为 AOI 约定（D2 裁定保持）；产出必须通过 LS 原生 `core.label_config.validate_label_config`。
 
 ### 2.2 网络与路由
 
@@ -85,6 +86,8 @@
 - **前端 → A**：LS 原生 token API 签发的 JWT（HS256，`JWT_SECRET` = LS `SECRET_KEY`，claims 含 `user_id`）——**只复用 LS 的账户与登录**；角色/权限由 aoi 自研 RBAC 判定（DRF 权限类查 `aoi_core`，见 §3.1）。
 - **RBAC 自研**：LS 开源版的组织/角色权限框架不可用（能力不完整且语义与 AOI 三角色不匹配），**不作为权限依据**；不修改 LS 原生 users/组织表，授权关系存 `aoi_core.user_role`（`user_id` 逻辑引用 LS users，不建外键）。
 - **B → A（错图回传）**：`X-Internal-Token: <INTERNAL_TOKEN>`；`instance_code` / `station_code` 由 B 在回传体中给出，供审计与溯源。
+- **token 使用（D2 实测）**：`POST /api/token/` 返回 **refresh JWT**（claims `token_type=refresh`、`user_id`）；业务接口需先 `POST /api/token/refresh/` 换取 **access JWT**，再 `Authorization: Bearer <access>`。同一用户已有有效 token 时 `POST /api/token/` 返回 409，可用 `/api/token/rotate/`、`/api/token/blacklist/` 管理。
+- **LS → A 预标端点（D2 实测）**：LS 调用 `aoi/prelabel/{task_id}/*` 时**不携带 `X-Internal-Token`/Authorization**，仅带 `User-Agent: heartex/...`；因此默认放行，请求若带内部头则必须正确。置 `AOI_PRELABEL_REQUIRE_INTERNAL_TOKEN=true` 可强制 40100（需配合网关注入头或 LS Basic Auth）；生产建议该端点仅在内网暴露。
 - **A → 镜像仓库（模型发布）**：`MODEL_REGISTRY_USER` / `MODEL_REGISTRY_PASSWORD`，见跨平台契约 §1.2。**A 不直接连接 B**。
 - 权限点（模块级）：`datasets.*`、`training.*`、`review.*`、`system.*`；动作 `view/create/update/cancel/approve/publish`；三角色 `operator`（操作员）/ `admin`（管理员）/ `super_admin`（超级管理员）——**仅用于平台 A**；默认权限矩阵见 §3.1。
 
@@ -135,7 +138,7 @@ CREATE TABLE aoi_core.user_role (
 ```
 
 - **权限点注册**：启动时由 `aoi/core/permissions.py` 的常量全量 upsert 到 `aoi_core.permission`，新增权限点无需手写数据迁移。
-- **判定入口**：DRF 权限类 `AoiPermission('training.approve')` → `user_role → role_permission → permission.code`；结果按用户缓存 5 分钟，授权变更时主动失效。
+- **判定入口（P1 errata）**：DRF 权限类由 `aoi.common.permissions.aoi_permission('training.publish')` 生成（返回**类**，可放进 `permission_classes`；不要放实例——DRF 会无参实例化每一项）；每个 aoi 视图通过 `aoi_perm` / `aoi_perm_by_method` 声明自己的权限点，D4 只改 `AoiPermission.has_permission` 的实现。判定链 `user_role → role_permission → permission.code`；结果按用户缓存 5 分钟，授权变更时主动失效。
 - **三角色定义**：`operator`（操作员）负责日常标注与复审；`admin`（管理员）负责数据集/训练/模型发布/复审等业务全量操作；`super_admin`（超级管理员）在管理员之上增加角色与用户授权、审计。**三角色只在平台 A 使用**，平台 B 无 RBAC、无用户认证。
 - **默认权限矩阵**（`✅` 允许，`—` 拒绝）：
 
@@ -195,6 +198,7 @@ CREATE TABLE aoi_datasets.dataset_version (
   id SERIAL PRIMARY KEY,
   dataset_id INT, version VARCHAR(16) NOT NULL,
   status VARCHAR(16) DEFAULT 'draft',        -- draft/published/archived
+  phase VARCHAR(16) DEFAULT 'draft',         -- D2 三桶复审流程：draft/labeling/training/prelabeling/reviewing/published/archived
   split_seed INT, split_stats JSONB, class_dist JSONB, source_stats JSONB,
   dict_version VARCHAR(16), note TEXT, created_by INT,
   UNIQUE(dataset_id, version)
@@ -210,7 +214,9 @@ CREATE TABLE aoi_datasets.prelabel_task (
   dataset_id INT,
   backend_url VARCHAR(256),                  -- {A}/api/prelabel/{task_id}（A 自实现）
   model_ref VARCHAR(64), route_config JSONB, -- 三桶阈值（默认取自 model.yaml 的 recommended）
-  status VARCHAR(16), route_bucket JSONB, created_by INT
+  status VARCHAR(16) DEFAULT 'queued',       -- P1：queued/running/succeeded/failed/canceled，服务端控制
+  route_bucket JSONB,                        -- A 侧产出，只读（客户端不可写）
+  created_by INT
 );
 ```
 
@@ -268,12 +274,12 @@ CREATE TABLE aoi_training.model_publish (    -- 模型发布到镜像仓库（A�
   model_ref VARCHAR(64) NOT NULL,
   registry VARCHAR(128) NOT NULL,            -- docker.io / registry.corp:5000
   image VARCHAR(256) NOT NULL,               -- <org>/aoi-model
-  tag VARCHAR(128) NOT NULL,                 -- 3-yolo-ds1
+  tag VARCHAR(128) NOT NULL,                 -- 3-yolo-ds1 / 3-yolo-ds1-fp16
   digest VARCHAR(128),                       -- sha256:...
   status VARCHAR(16) DEFAULT 'queued',       -- queued/building/pushing/published/failed
   attempts INT DEFAULT 0, error_message TEXT,
   published_by INT, created_at TIMESTAMPTZ DEFAULT now(), published_at TIMESTAMPTZ,
-  UNIQUE(model_ref)
+  UNIQUE(model_ref, tag)                     -- P1 errata：按 tag 唯一，fp16 才能单独发布
 );
 ```
 
@@ -298,8 +304,18 @@ CREATE TABLE aoi_review.inspection_fact (
 
 CREATE TABLE aoi_review.review_workitem (
   id BIGSERIAL PRIMARY KEY,
-  fact_id BIGINT NOT NULL,
-  route VARCHAR(16) NOT NULL,                -- vlm/manual；MVP 中 vlm 由 stub 转 manual
+  fact_id BIGINT,                            -- source=ingest 时指向 inspection_fact；预标来源为 NULL
+  source VARCHAR(16) NOT NULL DEFAULT 'ingest',  -- ingest（B 回传）/ prelabel（A 预标三桶）
+  dataset_version_id INT,                    -- source=prelabel：数据集版本
+  image_id INT,                              -- source=prelabel：aoi_datasets.image.id
+  ls_task_id INT,                            -- source=prelabel：LS task id（打开编辑器）
+  ls_prediction_id BIGINT,                   -- source=prelabel：LS Prediction.id
+  model_ref VARCHAR(64),                     -- 产生预标的模型
+  bucket VARCHAR(8),                         -- high/medium/low（UI 三桶）
+  verdict VARCHAR(16),                       -- auto_pass/recheck/manual（pipeline-core 原始值）
+  bucket_reason JSONB,                       -- {reasons,scores,thresholds}
+  forced BOOLEAN DEFAULT FALSE,              -- 低桶强制人工重标
+  route VARCHAR(16) NOT NULL,                -- vlm/manual；MVP 统一 manual
   recheck_result JSONB,                      -- 预留：VLM 复审输出
   hv_key TEXT,                               -- 预留：高价值数据桶对象键
   status VARCHAR(16) DEFAULT 'pending',      -- pending/processing/finalized/failed
@@ -310,7 +326,12 @@ CREATE TABLE aoi_review.review_workitem (
 
 CREATE TABLE aoi_review.final_fact (
   id BIGSERIAL PRIMARY KEY,
-  fact_id BIGINT, verdict VARCHAR(32),       -- defect_confirmed/false_alarm/uncertain
+  fact_id BIGINT, workitem_id BIGINT,
+  source VARCHAR(16),                        -- ingest/prelabel
+  dataset_version_id INT, image_id INT, ls_task_id INT,
+  annotation_id BIGINT,                      -- 复审后写回的 LS Annotation.id
+  action VARCHAR(24),                        -- accepted_prediction/edited/relabeled/no_defect/unlabelable
+  verdict VARCHAR(32),                       -- defect_confirmed/false_alarm/uncertain
   class_id INT, boxes JSONB, decided_by INT, decided_at TIMESTAMPTZ
 );
 
@@ -368,7 +389,7 @@ CREATE TABLE aoi_audit.audit_log (
 | `GET /import/{job_id}` | datasets.view | `{status, total, ok, dup, bad, bad_items:[{filename, reason}]}` |
 | `GET /images`、`GET /images/{id}/download` | datasets.view | 筛选/预签名下载 |
 | `GET/POST/PUT /defects`、`POST /defects/publish` | datasets.* | 字典 CRUD；发布 → 渲染 label config（RectangleLabels，code=`object_fault_type_XX`）+ 版本快照 |
-| `CRUD /datasets`、`POST /datasets/{id}/versions` | datasets.* | 数据集/版本；发布触发划分 + **测试集红线**（违反 → 42200） |
+| `GET/POST /datasets`、`GET/PUT/DELETE /datasets/{id}`、`POST /datasets/{id}/versions` | datasets.* | 数据集/版本；发布触发划分 + **测试集红线**（违反 → 42200） |
 | `GET /datasets/{id}/versions/{v}/export` | datasets.view | **复用 LS data_export（YOLO）** → zip 落 MinIO `datasets/exports/` |
 | `GET /annotation-stats` | datasets.view | LS 标注/审核状态只读投影（不建表） |
 
@@ -413,21 +434,25 @@ A 侧登记：LS 原生 ML 设置页 `MLBackend(url={A}/api/prelabel/{task_id})`
 {"tasks":[{"id":101,"data":{"image":"http://ls-backend:8080/data/upload/1/abc.jpg"}}]}
 // predict 响应（LS 1.x）
 {"results":[{"id":101,"model_version":"3-yolo@ds1","result":[
-  {"from_name":"defect","to_name":"doorpanel","type":"rectanglelabels",
+  {"from_name":"defect","to_name":"image","type":"rectanglelabels",
    "score":0.72,"value":{"x":10.5,"y":12.3,"width":8.2,"height":5.6,"rotation":0,
    "rectanglelabels":["object_fault_type_01"]}}]}]}
 ```
 
-- 取图：A 用 LS 存储/预签名拉取 `data.image`。
+- 取图：A 用 LS `/data/`（鉴权）或自建预签名拉取 `data.image`（D2 实测 `/data/...` 需鉴权；LS 默认不预签名）。
 - 推理：`pipeline-core.run` + `OnnxRuntimeModel`（worker-gpu）；模型来自注册表 `lifecycle=approved`。
 - 回写：走 LS 官方 predictions 回传；A 负责预标任务状态与三桶路由统计。
+- **批量语义（D2 实测）**：LS 可能在一个 `predict` 请求中携带多个 `tasks`；A 必须**按请求顺序、按数量**返回同形 `results`，否则 LS 会降级为逐条重试或丢弃整批。
+- 鉴权：见 §2.4；`aoi/prelabel` 默认放行 LS 调用，可选强制内部头。
+- **预标范围（D2 确认）**：MVP 固定只对**未标注图片**推理（`scope=unlabeled_only`）；已有人工标注的图片不参与本轮预标。
+- **三桶阈值优先级（D2 确认）**：`model.yaml` 的 `classes[].recommended` / `thresholds.default` → `prelabel_task.route_config` 覆盖（预设或人工微调）。
 - 其余 A 业务接口见下表：预标任务 CRUD `/api/prelabel/tasks`（`prelabel.*`）。
 
 ### 4.4 复审域 `/api/review`
 
 | 方法/路径 | 权限 | 说明 |
 |---|---|---|
-| `GET /workitems` / `POST /workitems/{id}/claim` / `POST /workitems/{id}/finalize` | review.* | 队列/认领/终裁 `{verdict, boxes?, final_reason, note}`（原因必填） |
+| `GET /workitems` / `POST /workitems/{id}/claim` / `POST /workitems/{id}/finalize` | review.* | 队列（支持 `source`/`dataset_version_id`/`bucket`/`status` 过滤）/认领/终裁；item 含 `bucket`（high/medium/low）+ 颜色 + `forced`；终裁 `{verdict, boxes?, final_reason, note, action, annotation?}`（原因必填；低桶/`forced` 必须带 `action ∈ {relabeled,no_defect,unlabelable}` 或 `annotation`） |
 | `GET /suggestions` / `POST /suggestions/batch-confirm` | review.view/update | 建议清单/确认回流 |
 | `GET /bad-images` / `POST /bad-images/{id}/handle` | review.* | 错误图片清单（人工重标签/重传入口） |
 
@@ -493,6 +518,7 @@ A 侧登记：LS 原生 ML 设置页 `MLBackend(url={A}/api/prelabel/{task_id})`
 | `hv-data/` | 高价值数据桶（二期） | 二期 | 二期 |
 | `tmp/` | 中转 | A | A |
 
+> **D2 实测**：LS 原生上传落 MinIO 私有桶；`/data/...` 需鉴权访问，`AWS_QUERYSTRING_AUTH=False` 时 LS 默认不生成预签名 URL；LS 后端无缩略图端点。预签名 URL 与缩略图由 aoi 导入/下载包裹（D4）补足。
 > 平台 B **不读 A 的 MinIO**：模型由 A 打成镜像推送到 registry，B 从 registry 拉取；图片由 B 回传后由 A 写入 MinIO。
 
 ---
@@ -542,8 +568,9 @@ A 侧生成 `model.yaml` 的数据来源（字段级别见跨平台契约 §2.3�
 
 ## 9. 训练数据导出契约（复用 LS data_export）
 
-- MVP 用 **LS 原生 YOLO 导出**：标注批次（project）导出 YOLO zip（`images/`、`labels/`、`data.yaml`，classes 按 label config 顺序）。
-- aoi 包裹职责：数据集版本 ↔ LS project 绑定；导出前执行**测试集红线**（test 子集含非 `manual_real` → 42200 拒绝）；导出后校验 `data.yaml` 的 names 与字典发布版本一致，zip 落 `datasets/exports/`。
+- MVP 用 **LS 原生 YOLO 导出**：D2 实测 LS 1.24 产物为 `images/`、`labels/`、`classes.txt`、`notes.json`；**没有 `data.yaml`**。`classes.txt` 的行顺序即 label config / 字典快照顺序（以 `classes.txt` 为 names 权威来源）。
+- aoi 包裹职责：数据集版本 ↔ LS project 绑定；导出前执行**测试集红线**（test 子集含非 `manual_real` → 42200 拒绝）；导出后校验 `classes.txt` 的 names 与字典发布版本一致，zip 落 `datasets/exports/`。
+- `data.yaml` 是 Ultralytics 训练配置，不是 LS 导出产物：由 aoi 训练包裹（D9）在训练时按需生成，**不作为导出 zip 的必备项**（D2 裁定，见变更记录）。
 - `code ↔ 索引` 映射随字典快照同步，并写入模型 `model.yaml` 的 `classes[].index`（B 侧工位模板据此构建 `class_map`）。
 - 自研 zip 导出仅作二期兜底。
 
@@ -551,11 +578,19 @@ A 侧生成 `model.yaml` 的数据来源（字段级别见跨平台契约 §2.3�
 
 ## 10. 复审 / 重标签 / 回流契约
 
-1. **标注与审核**：复用 LS 原生 Review 流（标注→审核）；aoi 只读投影统计，不建表。
-2. **推理结果复审**：B 回传 `/api/ingest/findings` → A 建 `inspection_fact` + `review_workitem`（MVP `route=vlm` 由 stub 转 manual）→ 复审人终裁（确认/驳回/改标/补框 + 必填原因）→ 落 `final_fact`。
-3. **回流**：R1~R4 规则 → `feedback_suggestion` → 人工确认 → 图片以 `source=reflux_review` 进数据集候选（红线：不进测试集）。
-4. **坏图**：`bad_image` 清单人工重标签/重传后置 `handled=true`。
-5. 状态枚举：`inspection_fact.status ∈ {initial, rechecking, finalized}`；`workitem.status ∈ {pending, processing, finalized, failed}`。
+1. **复审自研（D2 裁定）**：LS OSS 无 Review 流，**不复用 LS Review**；复审由 `aoi/review` 自研接口承担（`workitems/claim/finalize`、`suggestions`、`bad-images`）。
+2. **首轮训练 → 预标签 → 三桶复审（主流程，D2 确认）**：用户在少量已标注图片上做**首轮训练**（不是外部预训练）；训练出的模型对**剩余未标注图片**做预标签（`scope=unlabeled_only`），写入 LS predictions 并由 `pipeline-core` 输出 `verdict ∈ {auto_pass, recheck, manual}` → 三桶：
+   - 高/`auto_pass`/绿：系统**自动转 annotation**，写 auto-finalized 复审记录（`final_fact.action=accepted_prediction`）；
+   - 中/`recheck`/黄：生成 `review_workitem`（`route=manual`），建议人工确认/微调；
+   - 低/`manual`/红：生成 `review_workitem`（`route=manual`, `forced=true`），**强制人工重标**后才能 finalize；
+   - B 回传 suspicious 仍落 `review_workitem`，与预标三桶共用同一队列；
+   - 全部 workitem finalized 后，**人工确认 + 系统校验**（低桶已重标、校验通过）→ `dataset_version.phase=published` 落版，供后续训练使用。
+3. **B 回传复审**：B 回传 `/api/ingest/findings` → A 建 `inspection_fact` + `review_workitem`（`route=manual`）→ 同样走人工终裁；与预标三桶共用同一复审队列。
+4. **回流**：R1~R4 规则 → `feedback_suggestion` → 人工确认 → 图片以 `source=reflux_review` 进数据集候选（红线：不进测试集）。
+5. **坏图**：`bad_image` 清单人工重标签/重传后置 `handled=true`。
+6. 状态枚举：`inspection_fact.status ∈ {initial, rechecking, finalized}`；`workitem.status ∈ {pending, processing, finalized, failed}`。
+
+> **预标三桶复审的完整数据流向与待确认 schema**（`review_workitem` 扩展、`dataset_version` 过程状态、低/中/高桶动作语义）见 `docs/设计_预标三桶复审流程.md`；确认后回写 §3.4/§4.4 与本文。
 
 ---
 
@@ -588,7 +623,8 @@ class RecheckBackend(ABC):
 ### 13.1 契约测试
 
 - `tests/contracts/test_pipeline_core.py`（共享包，A/B 同跑）：切片/合并/三档判定/`load_config`/StubRuntimeModel。
-- `tests/contracts/test_platform_a_api.py`：信封/鉴权/**自研 RBAC（三角色矩阵、越权 40300、授权缓存失效）**/导入幂等/训练状态机/**模型发布（model.yaml 生成 + 镜像 tag 规范）**/`/api/ingest/findings` 幂等。
+- `tests/contracts/test_platform_a_api.py`：信封/鉴权/**权限锚点（每视图声明权限点；D2 恒放行，见下）**/导入幂等/训练状态机（approve/publish 门禁与 40401）/**模型发布（model.yaml 生成 + 镜像 tag 规范 + `(model_ref, tag)` 唯一）**/`/api/ingest/findings` 幂等（含半写补建）/复审状态机（claim/finalize 并发与低桶强制）。
+  - **RBAC 覆盖延期（P1 标注）**：三角色矩阵、越权 `40300`、授权缓存失效属 **D4** 交付（`AoiPermission.has_permission` 目前仅要求登录）；D2 只测试"权限锚点已声明 + 匿名 40100"，避免文档声称了不存在的覆盖。
 - fixtures：`detect_result_sample.json`、`findings_ingest_sample.json`、`model_yaml_sample.yaml`、`ml_backend_predict_sample.json`、`goldens.json`。
 - stub 原则：aoi API 在 D3 前全量 stub + OpenAPI。
 
@@ -601,8 +637,24 @@ class RecheckBackend(ABC):
 5. Review 流（标注→审核→通过/驳回）。
 6. data_export YOLO 导出（`images/labels/data.yaml` 布局实测记录）。
 7. ML 设置页登记 `MLBackend(url={A}/api/prelabel/{task_id})` → `/{task_id}/health` 连通。
-8. Batch predictions 对 A 的预标端点发起（D15 预标用）。
+8. Batch predictions 对 A 的预标端点发起（D12~13 预标用）。
 
 ---
+
+## 变更记录
+
+> 破坏性变更一律走四件套：**改文档 + 改 stub + 改 fixture + 双方契约测试过**。
+
+| 日期 | 条目 | 变更 | 四件套证据 |
+|---|---|---|---|
+| 2026-09-09 | datasets CRUD 路径（T2.9） | §4.1 字面 `CRUD /datasets`（落库为 `/api/datasets/datasets`）**修正**为 `GET/POST /api/datasets` + `GET/PUT/DELETE /api/datasets/{id}`；旧路径 `/api/datasets/datasets*` 不再存在 | ① 本文档 §4.1 与本表；② stub 路由 `label_studio/aoi/datasets/urls.py`（`path('', …)` + `path('/<int:id>', …)`）；③ fixture `tests/contracts/fixtures/aoi_api_paths.json`（含 `/api/datasets/{id}`）；④ `tests/contracts/test_platform_a_api.py::test_datasets_path_contract`（`/api/datasets/{id}` 200、`/api/datasets/datasets` 404） |
+| 2026-09-09 | 上传/存储表述修正（T2.7） | §1/§6 明确：D2 实测 LS 无服务端缩略图、`/data/` 需鉴权且默认不预签名；缩略图/预签名由 aoi 导入/下载包裹（D4）补足，LS 原生通道仍复用 | ① 本表 + §1/§6；② stub `ImageDownloadView`（URL 返回，D4 接预签名）；③ fixture `aoi_api_paths.json`；④ `TestAllStubs`/`test_ls_reuse_smoke.py::test_03` |
+| 2026-09-09 | YOLO 导出布局修正（T2.7/T2.9） | §9 由 `data.yaml` 修正为 LS 原生 `images/ + labels/ + classes.txt + notes.json`；names 顺序以 `classes.txt` 为准；`data.yaml` 由训练包裹（D9）按需生成，不作导出必备项 | ① 本表 + §9；② stub `DatasetExportView`（`classes_source=classes.txt`、`data_yaml=null`）；③ fixture `yolo_export_layout_sample.json`；④ `TestExportContract::test_yolo_export_layout_contract` |
+| 2026-09-09 | 复审流程明确（T2.7） | §1/§10 由「复用 LS Review」修正为「自研 aoi 复审」；主流程为预标三桶（`auto_pass/recheck/manual`）→ `recheck/manual` 进人工复审 → `final_fact`；B 回传 findings 共用同一队列 | ① 本表 + §1/§10；② stub `aoi/review/*`（workitems/claim/finalize）；③ fixture `aoi_api_paths.json`；④ `TestAllStubs` + `test_review_finalize_requires_reason` |
+| 2026-09-09 | JWT/ML backend 鉴权说明（T2.7） | §2.4/§4.3 补充：`/api/token/` 为 refresh，业务接口用 access + Bearer；LS 调预标端点不携带内部头，默认放行、可选强制 40100；批量 predict 按序等量返回 | ① 本表 + §2.4/§4.3；② stub `aoi/prelabel/views.py`（可选内部头）；③ fixture `ml_backend_predict_sample.json`（`observed_request_headers`）；④ `TestPrelabelProtocol`（含 batch 顺序/数量） |
+| 2026-09-09 | 预标三桶复审数据形状（D2） | 确认：MVP 先矩形；首轮训练→预标签（仅未标注图）→三桶（高 auto_pass/绿自动标注、中 recheck/黄建议人工、低 manual/红强制人工）→人工确认+系统校验后落版；`review_workitem` 采用方案 A 扩展；`dataset_version` 新增 `phase`；阈值 model.yaml recommended → prelabel_task.route_config | ① 本表 + §3.2/§3.4/§4.3/§4.4/§10；② `aoi_review` 0002/`aoi_datasets` 0002 迁移 + stub；③ fixture `review_flow_sample.json`；④ `TestReviewFlowContract` |
+| 2026-09-10 | 排期同步（**非语义**，接口/字段/状态机不变） | §13.2 第 8 项预标日期 D15 → **D12~13**：预标开发提前到复审之前（先预标后复审），三桶人工复审 D13~15；见《MVP开发计划》§1/§5 | ① 本表 + §13.2；②③④ 无需变更（无契约语义改动） |
+
+| 2026-09-10 | D2 review P0/P1 修复（**语义变更**） | ① `model_publish` 唯一性 `UNIQUE(model_ref)` → **`UNIQUE(model_ref, tag)`**（fp16 才能单独发布）；② `prelabel_task.status` 补默认 `queued` + 枚举，状态由服务端控制（`route_bucket` 只读）；`dataset_version` 创建时 `status/phase` 一律 draft；③ RBAC 判定入口由 `AoiPermission('x')`（实例，DRF 不可用）改为 **`aoi_permission('x')` 工厂 + 视图 `aoi_perm` 锚点**；④ 明确 RBAC 三角色矩阵/40300/缓存失效为 D4 交付（§13.1 标注） | ① 本表 + §3.1/§3.2/§3.3/§4.1/§4.3/§13.1；② stub 与迁移：`aoi_training/0003`、`aoi_datasets/0003`、`aoi_review/0003`；③ fixture 无字段变化（`aoi_api_paths.json` 已含相关路径）；④ `TestTrainingPublishGuards`/`TestStateMachineInjection`/`TestPermissionAnchors`/`TestReviewStateMachine` |
 
 *本契约于 D2 冻结；D9、D15 评审窗口。破坏性变更四件套：改文档 + 改 stub + 改 fixture + 双方测试过。*
