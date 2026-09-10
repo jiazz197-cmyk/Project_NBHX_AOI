@@ -11,6 +11,10 @@ ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS_DIR = Path(__file__).resolve().parent
 FIXTURES_DIR = CONTRACTS_DIR / 'fixtures'
 
+#: 契约测试账号（``test_user`` 与 ``/api/auth/login`` 用例共用，避免两处漂移）
+TEST_USER_EMAIL = 'aoi-tester@example.com'
+TEST_USER_PASSWORD = 'test-pass-123'
+
 for path in (ROOT / 'label_studio', CONTRACTS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
@@ -61,7 +65,7 @@ def test_user(db):
     from django.contrib.auth import get_user_model
 
     User = get_user_model()
-    return User.objects.create_user(email='aoi-tester@example.com', password='test-pass-123')
+    return User.objects.create_user(email=TEST_USER_EMAIL, password=TEST_USER_PASSWORD)
 
 
 @pytest.fixture

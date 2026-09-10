@@ -287,7 +287,9 @@ MIDDLEWARE = [
     'core.middleware.ContextLogMiddleware',
     'core.middleware.DatabaseIsLockedRetryMiddleware',
     'core.current_request.ThreadLocalMiddleware',
-    'jwt_auth.middleware.JWTAuthenticationMiddleware',
+    # AOI 二开（认证链路标准化，见 CHANGES.md「认证链路」）：
+    # 上游的 'jwt_auth.middleware.JWTAuthenticationMiddleware' 已移除——Bearer JWT 由
+    # REST_FRAMEWORK.DEFAULT_AUTHENTICATION_CLASSES 中的 JWTAuthentication 负责（标准 DRF 认证链）。
 ]
 
 # Extension points for downstream apps (e.g. enterprise features) to contribute extra noindex URL
@@ -298,7 +300,13 @@ ADDITIONAL_CONTEXTLOG_SECURED_VIEWS = ()
 
 REST_FRAMEWORK = {
     'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'],
+    # AOI 二开（认证链路标准化，见 CHANGES.md「认证链路」）：
+    # Bearer JWT 走 DRF 标准认证类（第一个匹配成功者生效），而非 Django 中间件赋值 request.user。
+    # 顺序：JWT（Bearer）→ 旧版 Token/X-Api-Key（Token）→ 浏览器会话（sessionid）。
+    # 注：这里用 aoi 的薄代理而不是 simplejwt 原生类——settings 导入期 rest_framework.schemas 会立即
+    # import 本列表，而 simplejwt 认证类在模块级 import django.contrib.auth.models（AppRegistryNotReady）。
     'DEFAULT_AUTHENTICATION_CLASSES': (
+        'aoi.common.authentication.AoiJWTAuthentication',
         'jwt_auth.auth.TokenAuthenticationPhaseout',
         'rest_framework.authentication.SessionAuthentication',
     ),
@@ -312,6 +320,26 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 100,
 }
 SILENCED_SYSTEM_CHECKS += ['rest_framework.W001']
+
+# simplejwt 显式配置（AOI 二开，见 CHANGES.md「认证链路」）。
+#
+# 为什么不写 SIGNING_KEY：simplejwt 默认取 ``settings.SECRET_KEY``（由
+# ``core/settings/label_studio.py`` 的 generate_secret_key_if_missing 生成）。本文件在子模块
+# ``from core.settings.base import *`` 之前执行，此处拿不到 SECRET_KEY；显式写死反而会在
+# 轮换 SECRET_KEY 时静默失效（旧令牌仍用旧密钥验签）。
+#
+# ROTATE_REFRESH_TOKENS / BLACKLIST_AFTER_ROTATION 刻意保持关闭：
+# ``/api/token/`` 签发的 PAT（``jwt_auth.models.LSAPIToken``，200 年 refresh）被用户长期保存，
+# 一旦开启轮换，用户手里保存的 refresh 会在首次刷新后立即进黑名单（详见契约 §2.4）。
+SIMPLE_JWT = {
+    'ALGORITHM': 'HS256',
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': False,
+    'BLACKLIST_AFTER_ROTATION': False,
+    'UPDATE_LAST_LOGIN': True,
+}
 
 # CORS & Host settings
 INTERNAL_IPS = [  # django debug toolbar for django==2.2 requirement
@@ -443,6 +471,9 @@ SPECTACULAR_SETTINGS = {
     },
     'AUTHENTICATION_WHITELIST': [
         'jwt_auth.auth.TokenAuthenticationPhaseout',
+        # AOI 二开（D3）：Bearer JWT 的 securityScheme 由
+        # aoi.common.schema.AoiBearerAuthScheme 提供（在 AoiCommonConfig.ready() 注册）
+        'aoi.common.authentication.AoiJWTAuthentication',
     ],
     'SERVERS': [
         {

@@ -49,7 +49,7 @@
 
 | # | 文件 | 改动 | 说明 |
 |---|---|---|---|
-| 1 | `label_studio/core/settings/base.py` | `INSTALLED_APPS += [8 个 aoi.* AppConfig]` | 带注释「AOI 二开（注入点，见 CHANGES.md）」 |
+| 1 | `label_studio/core/settings/base.py` | ① `INSTALLED_APPS += [8 个 aoi.* AppConfig]`；② `REST_FRAMEWORK.DEFAULT_AUTHENTICATION_CLASSES` 增加 `aoi.common.authentication.AoiJWTAuthentication`（D3）；③ `MIDDLEWARE` 移除 `jwt_auth.middleware.JWTAuthenticationMiddleware`（D3）；④ 新增 `SIMPLE_JWT` 显式配置（D3） | 带注释「AOI 二开（注入点，见 CHANGES.md）」；D3 认证链路详见下方「认证链路标准化」 |
 | 2 | `label_studio/core/urls.py` | `re_path(r'^', include('aoi.urls'))` | 放在 `organizations.urls` **之前**，保证 aoi `/api/*` 优先匹配 |
 | 3 | `web/apps/labelstudio/src/components/Menubar/Menubar.jsx` | 新增 4 个菜单入口（Datasets/Training/Review/System） | 仅数据驱动，不改上游组件逻辑 |
 | 4 | `web/apps/labelstudio/src/pages/index.js` | 注册 4 个二开页面路由 | 一行一页，页面空壳在 `pages/<Page>/` |
@@ -142,3 +142,34 @@ git diff --name-only 30a7f330d -- \
 - `tests/contracts/conftest.py` 重置 `_NEXT_ROLE_ID`；`reuse` marker 注册进 `pyproject.toml`。
 
 **P3**：不阻塞提交的工程卫生项已外挂到 `docs/D3_工程卫生清单.md`（30 项，D3 处理）。
+
+---
+
+## 认证链路标准化（D3，2026-09-10）
+
+**问题**：上游把 Bearer JWT 的校验放在 Django 中间件 `jwt_auth.middleware.JWTAuthenticationMiddleware`
+里直接赋值 `request.user`，DRF 侧实际靠 `SessionAuthentication` 读 `request._request.user` 才拿到用户。
+后果：① 认证不经过 DRF 认证链，`request.auth` 为空、OpenAPI 不认；② 鉴权失败只 log 不抛，
+无法区分「令牌过期/签名错/组织开关关/旗标没开」，排查靠猜；③ 依赖 DRF 内部实现细节；
+④ 没有「账号密码换 token」的登录端点（`/api/token/` 要求先有 session）；⑤ 鉴权路径上挂了
+LaunchDarkly 旗标；⑥ 没有 `SIMPLE_JWT` 配置，access 生命周期/签名密钥全靠默认值。
+
+**改动**（仅动注入点内文件 + `aoi/` 可写区，上游 `jwt_auth/` 一行未改）：
+
+| 文件 | 改动 |
+|---|---|
+| `label_studio/core/settings/base.py` | ① `DEFAULT_AUTHENTICATION_CLASSES` 改为 `AoiJWTAuthentication` → `TokenAuthenticationPhaseout` → `SessionAuthentication`；② `MIDDLEWARE` 移除上游 JWT 中间件；③ 新增显式 `SIMPLE_JWT`（HS256、access 30 min、refresh 7 天、**不轮换**） |
+| `label_studio/aoi/common/authentication.py`（新增） | `AoiJWTAuthentication`：延迟导入 simplejwt 的薄代理。**必要**——`core/settings/label_studio.py` 在 settings 导入期就 import `core.utils.common` → `rest_framework.views` → `rest_framework.schemas`，后者立即 import 认证类列表；simplejwt 认证类在模块级 import `django.contrib.auth.models`，此时 app registry 未 ready（`AppRegistryNotReady`） |
+| `label_studio/aoi/core/auth.py`（新增） | `POST /api/auth/login`（匿名，email+password → access/refresh；凭据校验与浏览器登录同源：`USER_AUTH` 钩子 → Django 后端）、`POST /api/auth/logout`（refresh 进黑名单，幂等，非本人令牌 40300） |
+| `label_studio/aoi/urls.py` | 挂载两条 auth 路由；`AOI_PREFIXES` 增加 `auth`（尾斜杠兜底） |
+
+**为什么 refresh 不开启轮换**：`/api/token/` 签发的 PAT（`jwt_auth.models.LSAPIToken`，200 年 refresh）
+是用户长期保存的凭据，一旦开启 `ROTATE_REFRESH_TOKENS`，用户手里那份会在首次刷新后立即进黑名单。
+
+**不变的部分**：浏览器会话登录 `/user/login/`（sessionid）、上游 `/api/token/*`（PAT/刷新/吊销/轮换）、
+`X-Api-Key` 头改写、`X-Internal-Token`（B→A 回传）、`admin/` 与密码重置链路。
+
+**验证**：`tests/contracts/test_platform_a_api.py::TestAoiJwtAuth`（15 例，含真实 Bearer 打
+aoi 端点与 LS 原生 `/api/current-user/whoami`、登出黑名单、浏览器 session 回归、中间件移除守卫）；
+契约文档 §2.4/§4.0 与 fixture `aoi_api_paths.json`（`d3-20260910`）同步更新。
+`tests/contracts/test_ls_reuse_smoke.py`（需真实 LS 实例）覆盖 `/data/upload` 的 Bearer 下载回归。

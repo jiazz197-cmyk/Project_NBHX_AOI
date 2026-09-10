@@ -116,7 +116,12 @@ class AoiAPIView(APIView):
         if isinstance(exc, exceptions.NotAuthenticated):
             return AoiError(CODE_UNAUTHORIZED, 'authentication credentials were not provided')
         if isinstance(exc, exceptions.AuthenticationFailed):
-            return AoiError(CODE_UNAUTHORIZED, str(exc.detail))
+            # simplejwt 的 InvalidToken 把 detail 放成嵌套 dict（token_class/token_type/message），
+            # 直接 str() 会把 Python repr 泄漏到 message 里；这里取人类可读的那一层。
+            detail = exc.detail
+            if isinstance(detail, dict):
+                detail = detail.get('detail') or detail.get('message') or 'authentication failed'
+            return AoiError(CODE_UNAUTHORIZED, str(detail))
         if isinstance(exc, exceptions.PermissionDenied):
             return AoiError(CODE_FORBIDDEN, str(exc.detail))
         if isinstance(exc, exceptions.NotFound):

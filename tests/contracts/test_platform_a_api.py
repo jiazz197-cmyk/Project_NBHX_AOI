@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import json
 from pathlib import Path
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 from aoi.common.settings import get_internal_token
+from conftest import TEST_USER_EMAIL, TEST_USER_PASSWORD
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import Resolver404, resolve
 from rest_framework.test import APIClient
@@ -122,6 +124,183 @@ class TestEnvelopeAndAuth:
         assert_envelope(response)
 
 
+# ------------------------------------------------------------------- auth (D3 认证链路)
+def decode_jwt_payload(token: str) -> dict:
+    """只解 claims，不验签（测试用；与 LS 复用 smoke 的 `_decode_claims` 同源）。"""
+    payload = token.split('.')[1]
+    payload += '=' * (-len(payload) % 4)
+    return json.loads(base64.urlsafe_b64decode(payload))
+
+
+@pytest.mark.django_db
+class TestAoiJwtAuth:
+    """D3：Bearer JWT 由 DRF 认证类承担（``jwt_auth`` 中间件已移除），登录/登出为 aoi 自有端点。"""
+
+    @staticmethod
+    def _login(client, email=TEST_USER_EMAIL, password=TEST_USER_PASSWORD):
+        return client.post('/api/auth/login', {'email': email, 'password': password}, format='json')
+
+    def test_login_issues_access_and_refresh(self, api_client, test_user):
+        response = self._login(api_client)
+        assert response.status_code == 200, response.content[:300]
+        data = assert_envelope(response)['data']
+        assert data['token_type'] == 'Bearer'
+        assert data['expires_in'] > 0
+        assert data['user'] == {'id': test_user.id, 'email': test_user.email}
+
+        access_claims = decode_jwt_payload(data['access'])
+        assert access_claims['token_type'] == 'access'
+        assert int(access_claims['user_id']) == test_user.id  # simplejwt 的 user_id claim 是字符串
+        refresh_claims = decode_jwt_payload(data['refresh'])
+        assert refresh_claims['token_type'] == 'refresh'
+        assert int(refresh_claims['user_id']) == test_user.id
+
+    def test_bearer_authenticates_aoi_endpoint(self, api_client, test_user):
+        """不加 force_authenticate：走真实 DRF 认证类（这是本改动的核心断言）。"""
+        access = assert_envelope(self._login(api_client))['data']['access']
+        client = APIClient()
+        response = client.get('/api/core/permissions', HTTP_AUTHORIZATION=f'Bearer {access}')
+        assert response.status_code == 200, response.content[:300]
+        assert assert_envelope(response)['data']['user_id'] == test_user.id
+
+    def test_bearer_authenticates_ls_native_endpoint(self, api_client, test_user):
+        """LS 原生 DRF 端点同样识别 Bearer（与 /data/upload 同一认证链）。"""
+        access = assert_envelope(self._login(api_client))['data']['access']
+        client = APIClient()
+        response = client.get('/api/current-user/whoami', HTTP_AUTHORIZATION=f'Bearer {access}')
+        assert response.status_code == 200, response.content[:300]
+        assert response.json()['email'] == test_user.email
+
+    def test_browser_session_login_still_works(self, api_client, test_user):
+        """浏览器链路不受影响：走 LS 原生 ``/user/login/``（sessionid + ``session['last_login']``）。
+
+        注：不能用 Django 测试客户端的 ``client.login()`` 代替——它绕过 LS 的登录包装
+        （``users/functions/common.py::login`` 会写 ``session['last_login']``），
+        会被 ``InactivitySessionTimeoutMiddleWare`` 当成长时间未活动立即登出。
+        """
+        from organizations.models import Organization
+
+        Organization.create_organization(created_by=test_user, title='AOI Session Contract')
+        page = api_client.get('/user/login/')
+        assert page.status_code == 200
+        csrf = api_client.cookies['csrftoken'].value
+        response = api_client.post(
+            '/user/login/',
+            {'email': TEST_USER_EMAIL, 'password': TEST_USER_PASSWORD},
+            HTTP_X_CSRFTOKEN=csrf,
+        )
+        assert response.status_code in (200, 302), response.content[:200]
+
+        permissions = api_client.get('/api/core/permissions')
+        assert permissions.status_code == 200, permissions.content[:200]
+        assert assert_envelope(permissions)['data']['user_id'] == test_user.id
+
+    def test_invalid_bearer_is_40100(self, api_client):
+        client = APIClient()
+        response = client.get('/api/core/permissions', HTTP_AUTHORIZATION='Bearer not-a-jwt')
+        assert response.status_code == 401
+        body = assert_envelope(response, code=40100)
+        # message 必须是人类可读文案，不能是 simplejwt 嵌套 detail 的 Python repr
+        assert '{' not in body['message'] and body['message']
+
+    def test_expired_or_foreign_signature_bearer_is_40100(self, api_client, test_user):
+        """签名不匹配的 Bearer：DRF 认证类直接拒绝（不再静默降级为匿名）。"""
+        from rest_framework_simplejwt.tokens import AccessToken
+
+        token = AccessToken.for_user(test_user)
+        # 篡改签名段，保持结构合法
+        forged = '.'.join(token.__str__().split('.')[:2] + ['x' * 43])
+        response = api_client.get('/api/core/permissions', HTTP_AUTHORIZATION=f'Bearer {forged}')
+        assert response.status_code == 401
+        assert_envelope(response, code=40100)
+
+    def test_refresh_exchanges_for_access(self, api_client, test_user):
+        refresh = assert_envelope(self._login(api_client))['data']['refresh']
+        response = api_client.post('/api/token/refresh/', {'refresh': refresh}, format='json')
+        assert response.status_code == 200, response.content[:300]
+        assert decode_jwt_payload(response.json()['access'])['token_type'] == 'access'
+
+    def test_wrong_password_is_40100(self, api_client, test_user):
+        response = self._login(api_client, password='wrong-password')
+        assert response.status_code == 401
+        assert_envelope(response, code=40100)
+
+    def test_unknown_email_is_40100(self, api_client, db):
+        response = self._login(api_client, email='nobody@example.com')
+        assert response.status_code == 401
+        assert_envelope(response, code=40100)
+
+    def test_missing_password_is_42200(self, api_client, db):
+        response = api_client.post('/api/auth/login', {'email': TEST_USER_EMAIL}, format='json')
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'password' in body['data']['detail']['fields']
+
+    def test_logout_blacklists_refresh(self, api_client, test_user):
+        login = assert_envelope(self._login(api_client))['data']
+        client = APIClient()
+        response = client.post(
+            '/api/auth/logout',
+            {'refresh': login['refresh']},
+            format='json',
+            HTTP_AUTHORIZATION=f'Bearer {login["access"]}',
+        )
+        assert response.status_code == 200, response.content[:300]
+        assert assert_envelope(response)['data'] == {'revoked': True}
+
+        # 已吊销的 refresh 不能再换 access（上游端点，错误响应不走 aoi 信封）
+        assert client.post('/api/token/refresh/', {'refresh': login['refresh']}, format='json').status_code == 401
+
+    def test_logout_is_idempotent(self, api_client, test_user):
+        login = assert_envelope(self._login(api_client))['data']
+        headers = {'HTTP_AUTHORIZATION': f'Bearer {login["access"]}'}
+        first = api_client.post('/api/auth/logout', {'refresh': login['refresh']}, format='json', **headers)
+        assert assert_envelope(first)['data'] == {'revoked': True}
+        second = api_client.post('/api/auth/logout', {'refresh': login['refresh']}, format='json', **headers)
+        assert second.status_code == 200
+        assert assert_envelope(second)['data'] == {'revoked': False}
+
+    def test_logout_without_refresh_is_noop(self, auth_client):
+        response = auth_client.post('/api/auth/logout', {}, format='json')
+        assert response.status_code == 200
+        assert assert_envelope(response)['data'] == {'revoked': False}
+
+    def test_logout_requires_authentication(self, api_client):
+        response = api_client.post('/api/auth/logout', {}, format='json')
+        assert response.status_code == 401
+        assert_envelope(response, code=40100)
+
+    def test_logout_rejects_foreign_refresh(self, api_client, test_user, db):
+        """不能拿别人的 refresh 做吊销。"""
+        from django.contrib.auth import get_user_model
+
+        other = get_user_model().objects.create_user(email='other@example.com', password='other-pass-123')
+        other_refresh = assert_envelope(self._login(api_client, email=other.email, password='other-pass-123'))['data'][
+            'refresh'
+        ]
+        mine = assert_envelope(self._login(api_client))['data']
+        response = api_client.post(
+            '/api/auth/logout',
+            {'refresh': other_refresh},
+            format='json',
+            HTTP_AUTHORIZATION=f'Bearer {mine["access"]}',
+        )
+        assert response.status_code == 403
+        assert_envelope(response, code=40300)
+        assert other.is_active
+
+    def test_jwt_middleware_removed_auth_classes_configured(self):
+        """回归守卫：认证不再依赖 Django 中间件。"""
+        from django.conf import settings
+
+        assert 'jwt_auth.middleware.JWTAuthenticationMiddleware' not in settings.MIDDLEWARE
+        assert (
+            'aoi.common.authentication.AoiJWTAuthentication'
+            in settings.REST_FRAMEWORK['DEFAULT_AUTHENTICATION_CLASSES']
+        )
+        assert settings.SIMPLE_JWT['AUTH_HEADER_TYPES'] == ('Bearer',)
+
+
 # ----------------------------------------------------------------------------- paths
 @pytest.mark.django_db
 class TestPathContract:
@@ -159,7 +338,11 @@ class TestPathContract:
             )
 
         # 基线 == OpenAPI aoi 路径集合（不多不少），方法集合也一致
+        # 注：/api/auth 下上游还有 /api/auth/export/（@extend_schema(exclude=True)，不进 schema），
+        # 因此按"精确路径"而不是前缀纳入基线。
         prefixes = (
+            '/api/auth/login',
+            '/api/auth/logout',
             '/api/core',
             '/api/datasets',
             '/api/train',
@@ -327,6 +510,18 @@ class TestAllStubs:
                     },
                     format='multipart',
                     HTTP_X_INTERNAL_TOKEN=get_internal_token(),
+                )
+                assert response.status_code == 200, (method, path, response.content[:200])
+                assert_envelope(response)
+                continue
+
+            if path == '/api/auth/login':
+                # 匿名端点：真实凭据换取令牌（凭证来自 conftest，与 test_user 同源）
+                client.force_authenticate(user=None)
+                response = client.post(
+                    url,
+                    {'email': TEST_USER_EMAIL, 'password': TEST_USER_PASSWORD},
+                    format='json',
                 )
                 assert response.status_code == 200, (method, path, response.content[:200])
                 assert_envelope(response)
