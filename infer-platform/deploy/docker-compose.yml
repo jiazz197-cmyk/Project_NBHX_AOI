@@ -21,6 +21,7 @@ services:
       - DB_PATH=/data/infer.db
       - DATA_DIR=/data
       - MODEL_REGISTRY=${MODEL_REGISTRY:-docker.io}
+      - MODEL_IMAGE_REPO=${MODEL_IMAGE_REPO:-rekal1018/aoi-model}
       - MODEL_REGISTRY_USER=${MODEL_REGISTRY_USER:-}
       - MODEL_REGISTRY_TOKEN=${MODEL_REGISTRY_TOKEN:-}
       - MODEL_PULL_MODE=${MODEL_PULL_MODE:-oci}
