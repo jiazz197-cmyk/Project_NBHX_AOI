@@ -155,3 +155,19 @@ export interface BadImage {
   pushed_at?: string;
   created_at: string;
 }
+
+// ============ 远端模型列表 (§3.2 /models/remote，一键拉取数据源) ============
+export interface RemoteModelItem {
+  tag: string;
+  model_ref: string | null;
+  precision: string;
+  image: string;
+  local: boolean;
+  local_status?: string | null;
+}
+
+export interface RemoteModelsData {
+  registry: string;
+  repository: string;
+  items: RemoteModelItem[];
+}
