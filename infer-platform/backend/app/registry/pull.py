@@ -15,6 +15,7 @@ import json
 import os
 import re
 import tarfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -266,6 +267,100 @@ def _download_layer(client: httpx.Client, api_registry: str, repo: str, layer_di
     if resp.status_code >= 400:
         raise BizError(400, CODE_BAD_PAYLOAD, f"下载层失败 HTTP {resp.status_code}")
     return resp.content
+
+
+# ---------- 远端 tag 列表（一键拉取数据源，契约 §2.5） ----------
+
+_REMOTE_TAGS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_REMOTE_TAGS_TTL = 60.0  # 短缓存（秒）
+
+
+def list_remote_tags(repo: str | None = None, refresh: bool = False) -> dict[str, Any]:
+    """远端可用模型列表：带只读凭据调 Registry v2 ``GET /tags/list``。
+
+    返回 ``{registry, repository, items:[{tag, model_ref, precision, image, local, local_status}]}``。
+    短缓存 60s；``refresh=True`` 强制刷新；仓库不可达 → 50300。
+    """
+    settings = get_settings()
+    repository = repo or settings.MODEL_IMAGE_REPO
+    if not repository:
+        raise BizError(400, CODE_BAD_PAYLOAD, "缺少镜像仓库名（MODEL_IMAGE_REPO）")
+    registry = settings.MODEL_REGISTRY
+
+    cache_key = f"{registry}/{repository}"
+    if not refresh:
+        cached = _REMOTE_TAGS_CACHE.get(cache_key)
+        if cached and time.time() - cached[0] < _REMOTE_TAGS_TTL:
+            return cached[1]
+
+    api_registry = _api_registry(registry)
+    auth = (
+        (settings.MODEL_REGISTRY_USER, settings.MODEL_REGISTRY_TOKEN)
+        if settings.MODEL_REGISTRY_USER else None
+    )
+    try:
+        with httpx.Client(follow_redirects=True, timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=30.0)) as client:
+            tags = _fetch_tags(client, api_registry, repository, auth)
+    except httpx.HTTPError as exc:
+        raise BizError(503, CODE_NOT_READY, f"仓库不可达：{exc}") from exc
+
+    local_by_ref = {m["model_ref"]: m for m in store_models.list_models()}
+    items: list[dict[str, Any]] = []
+    for tag in sorted(tags):
+        precision = _tag_precision(tag)
+        model_ref = _tag_to_model_ref(tag)
+        local = bool(model_ref and model_ref in local_by_ref)
+        items.append({
+            "tag": tag,
+            "model_ref": model_ref,
+            "precision": precision,
+            "image": f"{registry}/{repository}:{tag}",
+            "local": local,
+            "local_status": local_by_ref[model_ref]["status"] if local else None,
+        })
+    result = {"registry": registry, "repository": repository, "items": items}
+    _REMOTE_TAGS_CACHE[cache_key] = (time.time(), result)
+    return result
+
+
+def _fetch_tags(client: httpx.Client, api_registry: str, repository: str, auth: Any) -> list[str]:
+    """GET /v2/{repo}/tags/list；401 时带 token 重试。"""
+    url = f"{_registry_base(api_registry)}/v2/{repository}/tags/list"
+    resp = client.get(url)
+    if resp.status_code == 401:
+        token = _get_token(client, api_registry, repository, auth)
+        if token:
+            resp = client.get(url, headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code == 404:
+        raise BizError(404, CODE_NOT_FOUND, "镜像仓库不存在")
+    if resp.status_code == 401:
+        raise BizError(401, CODE_REGISTRY_UNAUTHORIZED, "registry 鉴权失败")
+    if resp.status_code >= 400:
+        raise BizError(400, CODE_BAD_PAYLOAD, f"获取 tag 列表失败 HTTP {resp.status_code}")
+    try:
+        return resp.json().get("tags") or []
+    except ValueError as exc:
+        raise BizError(400, CODE_BAD_PAYLOAD, "tag 列表解析失败") from exc
+
+
+def _tag_to_model_ref(tag: str) -> str | None:
+    """镜像 tag → model_ref：``9-fake-ds9`` → ``9-fake@ds9``；``9-fake-ds9-fp16`` → ``9-fake@ds9``。"""
+    base = tag
+    for suffix in ("-fp16", "-int8"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+    match = re.match(r"^(.+)-ds([0-9]+)$", base)
+    if not match:
+        return None
+    return f"{match.group(1)}@ds{match.group(2)}"
+
+
+def _tag_precision(tag: str) -> str:
+    if tag.endswith("-fp16"):
+        return "fp16"
+    if tag.endswith("-int8"):
+        return "int8"
+    return "fp32"
 
 
 def _build_layer(files: dict[str, bytes]) -> bytes:

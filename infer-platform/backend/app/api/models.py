@@ -21,6 +21,13 @@ def list_models(request_id: str = Depends(get_request_id)) -> dict[str, Any]:
     return ok(items, request_id)
 
 
+@router.get("/models/remote")
+def remote_models(repo: str = "", refresh: int = 0, request_id: str = Depends(get_request_id)) -> dict[str, Any]:
+    """远端可用模型列表（一键拉取数据源，契约 §2.5 / 平台B契约 §3.2）。"""
+    result = registry_pull.list_remote_tags(repo or None, refresh=bool(refresh))
+    return ok(result, request_id)
+
+
 @router.get("/models/{model_ref}")
 def get_model(model_ref: str, request_id: str = Depends(get_request_id)) -> dict[str, Any]:
     row = store_models.get_model(model_ref)
