@@ -1,0 +1,53 @@
+[
+  {
+    "kind": "suspicious",
+    "instance_code": "B01",
+    "station_code": "ST01",
+    "station_name": "1号线-左门板",
+    "seq": 1042,
+    "captured_at": "2026-09-08T08:31:00Z",
+    "received_at": "2026-09-08T08:31:02Z",
+    "template_version": 3,
+    "model_refs": ["3-yolo@ds1"],
+    "verdict": "recheck",
+    "verdict_reasons": ["mid_score"],
+    "boxes": [
+      {
+        "object_code": "object_fault_type_01",
+        "score": 0.72,
+        "model_ref": "3-yolo@ds1",
+        "xyxy": [100, 200, 180, 260]
+      }
+    ],
+    "tiling_meta": {"tile_size": 1280, "overlap": 0.2, "tiles": 12, "ms": 1400},
+    "latency_ms": 1400,
+    "image": {
+      "md5": "ab12cd34ef5678901234567890abcdef",
+      "ext": "jpg",
+      "width": 2448,
+      "height": 2048,
+      "size_bytes": 834211
+    },
+    "error_code": null,
+    "versions": {"platform": "0.1.0", "skillname": "0.1.0", "pipeline_core": "0.1.0"}
+  },
+  {
+    "kind": "bad",
+    "instance_code": "B01",
+    "station_code": "ST02",
+    "station_name": "2号线-右门板",
+    "seq": 2099,
+    "captured_at": "2026-09-08T09:10:00Z",
+    "received_at": "2026-09-08T09:10:01Z",
+    "template_version": 3,
+    "model_refs": [],
+    "verdict": null,
+    "verdict_reasons": [],
+    "boxes": [],
+    "tiling_meta": {},
+    "latency_ms": null,
+    "image": null,
+    "error_code": "decode_failed",
+    "versions": {"platform": "0.1.0", "skillname": "0.1.0", "pipeline_core": "0.1.0"}
+  }
+]

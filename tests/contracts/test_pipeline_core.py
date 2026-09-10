@@ -173,3 +173,14 @@ def test_run_with_stub():
 
 def test_stub_model_ref_valid():
     assert parse_model_ref(StubRuntimeModel()._model_ref).framework == "stub"
+
+
+def test_load_config_from_fixture(fixtures_dir):
+    """inspect_config_sample.yaml 必须能被 load_config 解析（fixture 与实现互相锁定）。"""
+    cfg = load_config((fixtures_dir / "inspect_config_sample.yaml").read_text(encoding="utf-8"))
+    assert cfg.tile_size == 1280
+    assert cfg.overlap == 0.2
+    assert len(cfg.objects) == 2
+    assert cfg.objects[0].code == "object_fault_type_01"
+    assert cfg.objects[0].risk_level == 3
+    assert cfg.objects[0].class_map == {0: "object_fault_type_01"}
