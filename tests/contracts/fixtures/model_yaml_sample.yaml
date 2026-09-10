@@ -1,0 +1,173 @@
+schema_version: 1
+model_ref: 3-yolo@ds1
+skillname: ObjectDetection
+framework: yolo
+framework_version: 8.4.1
+dataset_version: 1.0.0
+dict_version: 20260901-1
+base_model: yolov8s.pt
+precision: fp32
+created_at: '2026-09-08T08:30:00Z'
+published_at: '2026-09-08T09:00:00Z'
+description: 门板表面缺陷检测 v3
+tags:
+- doorpanel
+- surface
+license: Apache-2.0
+gate_status: passed
+lifecycle: published
+source:
+  platform: aoi-train
+  train_job_id: 128
+  created_by: 7
+  git_commit: 59ec528
+onnx:
+  file: model.onnx
+  sha256: 9f2c0000000000000000000000000000000000000000000000000000000000e1
+  size_bytes: 41234567
+  opset: 17
+  ir_version: 8
+  producer: ultralytics 8.4.1
+  dynamic_batch: true
+  max_batch_size: 8
+  input:
+    name: images
+    shape:
+    - 1
+    - 3
+    - 1280
+    - 1280
+    dtype: float32
+    layout: NCHW
+    color_order: RGB
+    normalize:
+      scale: 0.00392156862745098
+      mean:
+      - 0
+      - 0
+      - 0
+      std:
+      - 1
+      - 1
+      - 1
+    resize:
+      mode: letterbox
+      interpolation: bilinear
+      pad_value: 114
+  output:
+    name: output0
+    shape:
+    - 1
+    - 6
+    - 8400
+    format: yolo_v8_xywh_conf_cls
+    num_classes: 2
+    num_anchors: 8400
+  runtime:
+    providers:
+    - cuda
+    - cpu
+    fp16: false
+    threads: 4
+classes:
+- index: 0
+  code: object_fault_type_01
+  name_cn: 划伤
+  name_en: scratch
+  risk_level: 3
+  color: '#FF4D4F'
+  aliases:
+  - 刮伤
+  enabled: true
+  min_box_size: 4
+  max_boxes_per_image: 50
+  recommended:
+    recheck_min: 0.6
+    auto_min: 0.9
+- index: 1
+  code: object_fault_type_02
+  name_cn: 凹坑
+  name_en: null
+  risk_level: 2
+  color: '#FA8C16'
+  aliases: []
+  enabled: true
+  min_box_size: null
+  max_boxes_per_image: null
+  recommended:
+    recheck_min: 0.55
+    auto_min: 0.88
+postprocess:
+  conf_threshold: 0.25
+  iou_threshold: 0.5
+  max_detections: 300
+  agnostic_nms: false
+  multi_label: false
+  box_format: xyxy
+  class_agnostic: false
+tiling:
+  enabled: true
+  recommended_tile_size: 1280
+  overlap: 0.2
+  min_tile_size: 640
+  edge_handling: pad
+  batch_tiles: 4
+  max_tiles: 64
+thresholds:
+  default:
+    recheck_min: 0.5
+    auto_min: 0.9
+  high_risk_force_recheck: true
+  low_score_force_manual: 0.1
+metrics:
+  map50: 0.93
+  map50_95: 0.71
+  precision: 0.94
+  recall: 0.96
+  per_class_recall:
+    object_fault_type_01: 0.99
+    object_fault_type_02: 0.97
+  per_class_precision:
+    object_fault_type_01: 0.95
+    object_fault_type_02: 0.93
+  eval_dataset: 1.0.0-test
+  evaluated_at: '2026-09-08T08:00:00Z'
+  confusion_matrix_ref: null
+benchmark:
+  device: RTX 4060
+  provider: cuda
+  precision: fp32
+  tile_size: 1280
+  batch: 4
+  latency_ms_p50: 380
+  latency_ms_p95: 520
+  throughput_fps: 9.6
+  vram_gb: 3.8
+training:
+  epochs: 100
+  imgsz: 1280
+  batch: 8
+  lr0: 0.01
+  patience: 20
+  seed: 42
+  augment:
+    flip: true
+    mosaic: true
+    mixup: 0.1
+  split:
+    train: 0.7
+    val: 0.2
+    test: 0.1
+requires:
+  skillname: '>=0.1.0'
+  pipeline_core: '>=0.1.0'
+  schema_version: '>=1'
+  onnxruntime: '>=1.18'
+  cuda: null
+  vram_gb: 4
+signature: null
+sbom_ref: null
+golden_summary: null
+calibration: null
+quantization: null
+extensions: {}

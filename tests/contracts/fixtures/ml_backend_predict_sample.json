@@ -1,0 +1,80 @@
+{
+  "description": "LS 1.x ML backend 协议样例（健康/初始化/预测/校验）",
+  "source": "LS 1.24.0.dev0 label_studio/ml/api_connector.py + D2 实测（docs/复用验证_D2.md §2.7）",
+  "observed_request_headers": {
+    "User-Agent": "heartex/<git-sha>",
+    "X-Internal-Token": null,
+    "Authorization": null
+  },
+  "endpoints": {
+    "health": {
+      "method": "GET",
+      "path": "/api/prelabel/{task_id}/health",
+      "request": {},
+      "response": {
+        "status": "UP",
+        "model_version": "3-yolo@ds1"
+      }
+    },
+    "setup": {
+      "method": "POST",
+      "path": "/api/prelabel/{task_id}/setup",
+      "request": {},
+      "response": {
+        "model_version": "3-yolo@ds1",
+        "model_classes": {
+          "object_fault_type_01": 0,
+          "object_fault_type_02": 1
+        }
+      }
+    },
+    "predict": {
+      "method": "POST",
+      "path": "/api/prelabel/{task_id}/predict",
+      "request": {
+        "tasks": [
+          {
+            "id": 101,
+            "data": {
+              "image": "http://ls-backend:8080/data/upload/1/abc.jpg"
+            }
+          }
+        ]
+      },
+      "response": {
+        "results": [
+          {
+            "id": 101,
+            "model_version": "3-yolo@ds1",
+            "result": [
+              {
+                "from_name": "defect",
+                "to_name": "image",
+                "type": "rectanglelabels",
+                "score": 0.72,
+                "value": {
+                  "x": 10.5,
+                  "y": 12.3,
+                  "width": 8.2,
+                  "height": 5.6,
+                  "rotation": 0,
+                  "rectanglelabels": [
+                    "object_fault_type_01"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "validate": {
+      "method": "POST",
+      "path": "/api/prelabel/{task_id}/validate",
+      "request": {},
+      "response": {
+        "errors": []
+      }
+    }
+  }
+}

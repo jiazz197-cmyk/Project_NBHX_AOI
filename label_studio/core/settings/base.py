@@ -258,6 +258,18 @@ INSTALLED_APPS = [
     'session_policy',
 ]
 
+# AOI 二开（注入点，见 CHANGES.md）
+INSTALLED_APPS += [
+    'aoi.common.apps.AoiCommonConfig',
+    'aoi.core.apps.AoiCoreConfig',
+    'aoi.datasets.apps.AoiDatasetsConfig',
+    'aoi.prelabel.apps.AoiPrelabelConfig',
+    'aoi.training.apps.AoiTrainingConfig',
+    'aoi.review.apps.AoiReviewConfig',
+    'aoi.audit.apps.AoiAuditConfig',
+    'aoi.reports.apps.AoiReportsConfig',
+]
+
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',

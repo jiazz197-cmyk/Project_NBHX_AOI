@@ -36,9 +36,13 @@ services:
       - db
     environment:
       - DJANGO_DB=default
-      - POSTGRE_NAME=postgres
-      - POSTGRE_USER=postgres
-      - POSTGRE_PASSWORD=
+      # 与仓库根目录 .env 共用同一组 POSTGRE_* 变量（单一来源），
+      # 避免容器内硬编码的账号密码与宿主机裸跑不一致。
+      - POSTGRE_NAME=${POSTGRE_NAME:-postgres}
+      - POSTGRE_USER=${POSTGRE_USER:-postgres}
+      - POSTGRE_PASSWORD=${POSTGRE_PASSWORD:-postgres}
+      # 容器内固定走 compose 网络里的 db:5432；
+      # .env 的 POSTGRE_HOST=localhost 只用于宿主机裸跑，不在此处生效。
       - POSTGRE_PORT=5432
       - POSTGRE_HOST=db
       - LABEL_STUDIO_HOST=${LABEL_STUDIO_HOST:-}
@@ -49,6 +53,16 @@ services:
       - MINIO_STORAGE_ACCESS_KEY=${MINIO_STORAGE_ACCESS_KEY:-}
       - MINIO_STORAGE_SECRET_KEY=${MINIO_STORAGE_SECRET_KEY:-}
       - MINIO_SKIP=${MINIO_SKIP:-false}
+      # AOI 二开（平台 A）：B→A 错图回传令牌。生产必须显式配置（未配置时 fail closed → 40100）；
+      # DEBUG=true 时才允许回落到开发默认值。生成：python -c "import secrets;print(secrets.token_urlsafe(32))"
+      - INTERNAL_TOKEN=${INTERNAL_TOKEN:-}
+      - AOI_PRELABEL_REQUIRE_INTERNAL_TOKEN=${AOI_PRELABEL_REQUIRE_INTERNAL_TOKEN:-false}
+      - MODEL_REGISTRY=${MODEL_REGISTRY:-docker.io}
+      - MODEL_IMAGE_REPO=${MODEL_IMAGE_REPO:-aoi/aoi-model}
+      - MODEL_REGISTRY_USER=${MODEL_REGISTRY_USER:-}
+      - MODEL_REGISTRY_PASSWORD=${MODEL_REGISTRY_PASSWORD:-}
+      - PUBLISH_RETRY=${PUBLISH_RETRY:-3}
+      - DEBUG=${DEBUG:-false}
     #      - LOG_LEVEL=DEBUG
     volumes:
       - ./mydata:/label-studio/data:rw
@@ -66,8 +80,11 @@ services:
     #      -c ssl_cert_file=/var/lib/postgresql/certs/server.crt
     #      -c ssl_key_file=/var/lib/postgresql/certs/server.key
     environment:
-      - POSTGRES_HOST_AUTH_METHOD=trust
-      - POSTGRES_USER=postgres
+      # postgres 官方镜像只认 POSTGRES_*，这里从 .env 的 POSTGRE_* 映射过来，
+      # 保证 db 容器与应用容器使用同一套凭据。
+      - POSTGRES_USER=${POSTGRE_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRE_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRE_NAME:-postgres}
     volumes:
       - ${POSTGRES_DATA_DIR:-./postgres-data}:/var/lib/postgresql/data
       - ./deploy/pgsql/certs:/var/lib/postgresql/certs:ro

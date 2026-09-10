@@ -26,3 +26,119 @@
 - `deploy/`、`Dockerfile`、`docker-compose.yml`、`docker-compose.minio.yml`：本地/交付构建与运行骨架（PostgreSQL + MinIO）
 - `pyproject.toml`、`uv.lock`、`web/package.json`、`web/bun.lock`：依赖锁定
 - `LICENSE`、`NOTICE`、`licenses/`：Apache-2.0 署名与第三方许可
+
+---
+
+## 上游基线锁定（D1）
+
+| 项 | 值 |
+|---|---|
+| 上游版本 | `label-studio 1.24.0.dev0` |
+| fork HEAD | `30a7f330d6fa7d9bfab641a57ef63ff5fbb6c029`（`git rev-parse HEAD`） |
+| 锁定日期 | 2026-09-09 |
+| 数据库基线 | 仅 PostgreSQL（`DJANGO_DB=default`）；SQLite 不作为 aoi 开发库 |
+
+**上游只读目录清单**（红线：除下表注入点外不得写入业务代码）：
+
+`label_studio/core/`、`label_studio/users/`、`label_studio/projects/`、`label_studio/tasks/`、
+`label_studio/data_export/`、`label_studio/data_import/`、`label_studio/data_manager/`、
+`label_studio/ml/`、`label_studio/ml_models/`、`label_studio/organizations/`、`label_studio/io_storages/`、
+`label_studio/webhooks/`、`label_studio/labels_manager/`、`label_studio/jwt_auth/`、`label_studio/session_policy/`。
+
+**注入点（4 处，与 `docs/P0骨架设计_双平台.md` §2.2 一一对应）**：
+
+| # | 文件 | 改动 | 说明 |
+|---|---|---|---|
+| 1 | `label_studio/core/settings/base.py` | `INSTALLED_APPS += [8 个 aoi.* AppConfig]` | 带注释「AOI 二开（注入点，见 CHANGES.md）」 |
+| 2 | `label_studio/core/urls.py` | `re_path(r'^', include('aoi.urls'))` | 放在 `organizations.urls` **之前**，保证 aoi `/api/*` 优先匹配 |
+| 3 | `web/apps/labelstudio/src/components/Menubar/Menubar.jsx` | 新增 4 个菜单入口（Datasets/Training/Review/System） | 仅数据驱动，不改上游组件逻辑 |
+| 4 | `web/apps/labelstudio/src/pages/index.js` | 注册 4 个二开页面路由 | 一行一页，页面空壳在 `pages/<Page>/` |
+
+**授权例外（第 5 处上游改动，2026-09-09 授权；见下方「缺陷修复」）**：
+
+| # | 文件 | 改动 | 说明 |
+|---|---|---|---|
+| 5 | `label_studio/data_manager/managers.py` | `annotate_storage_filename` 兼容 0/1 个 import link name | 清理云存储 provider 后的 `Concat` 500 修复；有回归测试 `TestTaskDetailConcatRegression` |
+
+**自检命令**（应只出现上述 5 个文件；超出的都是违规改动）：
+
+```bash
+git diff --name-only 30a7f330d -- \
+  label_studio/core label_studio/users label_studio/projects label_studio/tasks \
+  label_studio/data_manager label_studio/data_export label_studio/data_import \
+  label_studio/ml label_studio/ml_models label_studio/organizations label_studio/io_storages \
+  label_studio/webhooks label_studio/labels_manager label_studio/jwt_auth label_studio/session_policy
+# 期望输出：label_studio/core/settings/base.py、label_studio/core/urls.py、label_studio/data_manager/managers.py
+```
+
+### 枚举裁定（T1.2）
+
+- MVP 唯一 `task_type = skillname.SkillName.OBJECT_DETECTION`（`ObjectDetection`）→ LS 控件 `RectangleLabels`；
+- `aoi_training.*.task_type` 一律取 `skillname.SkillName.OBJECT_DETECTION`；
+- **禁止** import 上游 `ml_models.SkillNames`（上游仅 `TextClassification`/`NER`，见 `label_studio/ml_models/models.py`）；
+- `model_ref` 严格格式 `^([0-9]+)-([a-z0-9._-]+)@ds([0-9]+)$`（ASCII；`\d` 的 Unicode 语义禁止）；镜像 tag 由 `skillname.image_tag_from_model_ref` 生成；
+- 缺陷 code `^object_fault_type_(0[1-9]|[1-9][0-9])$`（01~99，ASCII），8 色调色板由 `skillname.color_for_index` 提供。
+
+---
+
+## 缺陷修复（D2）
+
+### 任务详情 `GET /api/tasks/{id}/` 500（`Concat`）
+
+- **背景**：清理云存储 provider 后 `settings.IO_STORAGES_IMPORT_LINK_NAMES` 仅剩 1 项
+  （`io_storages_localfilesimportstoragelink`）；上游 `data_manager/managers.py::annotate_storage_filename`
+  使用 `Concat(*intersperse(...))`，在 0/1 个 link name 时位置表达式不足 2 个，抛
+  `ValueError: Concat must take at least two expressions`。
+  任务详情走 `all_fields=True`，必然命中；与 MinIO 自身存储无关（MinIO 走 `S3Boto3Storage`）。
+- **修复**（`label_studio/data_manager/managers.py`，2026-09-09 授权）：
+  - 0 个 link name → `Value(None, output_field=TextField())`；
+  - 1 个 → `Coalesce(key, Value(None, output_field=TextField()))`；
+  - ≥2 个 → 原 `Concat(*intersperse(...))` 不变。
+- **验证**：`PYTHONPATH=label_studio .venv/bin/python -m pytest tests/contracts/test_platform_a_api.py::TestTaskDetailConcatRegression -q` → **5 passed**
+  （0/1/2 link name、`all_fields=True`、`GET /api/tasks/{id}/` 200）。
+- **记录**：`docs/已知问题_任务详情500.md`、`docs/复用验证_D2.md` §2.9。
+
+---
+
+## D2 review 修复（2026-09-10，P0/P1/P2）
+
+对 `feat/d2-aoi-skeleton` 未提交改动的完整 review（5 个独立审查分区 + 复核）后落地的修复：
+
+**P0（安全 / 数据一致性 / 共享词汇表）**
+
+- `INTERNAL_TOKEN` **fail closed**：未配置时仅 `DEBUG=true` 才回落开发默认值，否则抛 `ImproperlyConfigured`，
+  错图回传端点一律 40100；`.env.example` 与 `docker-compose.yml` 补齐 `INTERNAL_TOKEN` 等 AOI 变量
+  （`aoi/common/settings.py`、`aoi/review/ingest.py`、`aoi/prelabel/views.py`）。
+- ingest 每个分支 `transaction.atomic()` 写入；并发重复请求撞唯一约束时按幂等返回；
+  fact 已存在但 workitem 缺失（半写/崩溃）时**补建**，不再返回 `workitem_id=null`。
+- ingest 元数据全量校验（类型/枚举/长度/图片字段）→ 42200 + `detail.fields`；单图 >100MB → 40010（不读入内存）。
+- `skillname` 词汇表：`object_fault_type_XX` 限定 ASCII 01~99（`00`、全角/阿拉伯数字一律非法）；
+  `model_ref`/镜像 tag 只接受 ASCII 数字。
+
+**P1（冻结面上的守卫与状态机）**
+
+- 异常 → 错误码映射补齐：`Http404→40401`、限流 `429→42900`、503→50300、405/415→40010（`aoi/common/errors.py`、`views.py`）。
+- RBAC 判定入口改为 `aoi.common.permissions.aoi_permission('training.publish')` 工厂（DRF 可实例化），
+  每个 aoi 视图声明 `aoi_perm` / `aoi_perm_by_method`。
+- `/api/train/models/{id}/publish`：未知模型 40401、未 approved → 40900、`model.version` 非 `model_ref` → 42200、
+  GET 无记录 → 40401、响应标 `stub: true`；`model_publish` 唯一性改为 `(model_ref, tag)`（fp16 可单独发布）。
+- `/api/train/models/{id}/approve`：decision 白名单、未知模型 40401、门禁未通过不得 approved。
+- 复审：claim 条件更新（重复认领 40900）、finalize 状态机（重复终裁 40900、终裁单条唯一）、
+  低桶（`bucket=low` 或 `forced`）必须带 action/annotation、`final_reason` 白名单，
+  终裁落库 `annotation_id/class_id/boxes/note` 并推进 `inspection_fact.status`。
+- `/api/core/roles*`：code 唯一（40900）、内置角色不可删（40900）、未知角色/用户拒绝（42200/40401）、角色变更写审计。
+- 状态机收口：`dataset_version` 创建时 `status/phase` 服务端控制（客户端传其他值 42200）；
+  `prelabel_task` 默认 `queued` + 迁移白名单 + `model_ref`/`route_config` 校验 + `route_bucket` 只读；
+  字典 `risk_level` 必填、`aliases` 类型校验。
+- 字典快照 index 改用**列表位置**（0..n-1 连续），与 `classes.txt` / `model.yaml.classes[].index` 对齐。
+
+**P2（测试可信度与卫生）**
+
+- prelabel 协议测试改为比对磁盘 fixture（并新增 fixture ↔ protocol 常量一致性测试）；
+  model.yaml 测试钉死契约字面量并补 `schema_version`/`skillname` 负例；manifest 的 yaml sha256 由 fixture 字节计算。
+- 契约 §13.1 标注 RBAC（三角色矩阵/40300/缓存失效）为 D4 交付；`tests/contracts/README.md` 增补测试模块/ fixture 归属与延期表。
+- `TestAllStubs` 起真实 Model/WorkItem 种子，不再依赖伪造响应；workitem 列表空队列返回空列表。
+- LS reuse smoke：写入需 `LS_REUSE_ALLOW_MUTATION=1`，模块结束清理自建 project/MLBackend，凭据被拒不再 skip 成绿灯。
+- `tests/contracts/conftest.py` 重置 `_NEXT_ROLE_ID`；`reuse` marker 注册进 `pyproject.toml`。
+
+**P3**：不阻塞提交的工程卫生项已外挂到 `docs/D3_工程卫生清单.md`（30 项，D3 处理）。
