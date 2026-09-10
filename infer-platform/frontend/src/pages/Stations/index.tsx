@@ -14,7 +14,7 @@ import {
   PlusOutlined, EditOutlined, CameraOutlined, ThunderboltOutlined,
   WifiOutlined, SwapOutlined,
 } from '@ant-design/icons';
-import { mockStations, mockModels, mockStationTemplates } from '../../api/mock';
+import { mockStations, mockModels } from '../../api/mock';
 import type { StationInfo, StationTemplate, TemplateObject } from '../../api/types';
 
 const statusColors: Record<string, string> = {
@@ -113,7 +113,7 @@ export default function Stations() {
         </Form>
       </Modal>
 
-      <TemplateDrawer open={templateDrawer} onClose={() => setTemplateDrawer(null)} models={mockModels} stationTemplates={mockStationTemplates} />
+      <TemplateDrawer open={templateDrawer} onClose={() => setTemplateDrawer(null)} models={mockModels} stationTemplates={{}} />
     </div>
   );
 }

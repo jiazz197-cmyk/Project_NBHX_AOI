@@ -13,7 +13,7 @@
  *   - §3.7 日报: GET /reports/daily
  */
 
-import type { HealthData, ModelInfo, StationInfo, StationTemplate, InspectionRecord, StatsSummary, TrendPoint, ErrorStats, DailyReport, OutboxItem, BadImage } from './types';
+import type { HealthData, ModelInfo, StationInfo, InspectionRecord, StatsSummary, TrendPoint, ErrorStats, DailyReport, OutboxItem, BadImage } from './types';
 
 // ============ 健康检查 (§3.1) ============
 export const mockHealth: HealthData = {
@@ -62,36 +62,6 @@ export const mockStations: StationInfo[] = [
   { code: 'ST06', name: '3号线-右门板', enabled: true, channel_id: 'ch06', status: 'online', last_capture_at: '2026-09-08T08:30:45Z', template_version: 3 },
   { code: 'ST07', name: '4号线-左门板', enabled: false, channel_id: 'ch07', status: 'offline', template_version: 0 },
   { code: 'ST08', name: '4号线-右门板', enabled: false, channel_id: 'ch08', status: 'offline', template_version: 0 },
-];
-
-// ============ '2026-09-01T10:00:00Z',
-  },
-  {
-    id: 'tpl-interior',
-    name: '内饰件-通用检测',
-    model_ref: '3-yolo@ds1',
-    skillname: 'ObjectDetection',
-    tile_size: 1024,
-    overlap: 0.25,
-    objects: [
-      { code: 'object_fault_type_01', class_map: { '0': 'object_fault_type_01' }, thresholds: { recheck_min: 0.50, auto_min: 0.85 }, risk_level: 3 },
-      { code: 'object_fault_type_02', class_map: { '1': 'object_fault_type_02' }, thresholds: { recheck_min: 0.50, auto_min: 0.85 }, risk_level: 2 },
-    ],
-    updated_at: '2026-09-05T14:00:00Z',
-  },
-  {
-    id: 'tpl-highp',
-    name: '高精度复检模板',
-    model_ref: '3-yolo@ds1',
-    skillname: 'ObjectDetection',
-    tile_size: 1920,
-    overlap: 0.3,
-    objects: [
-      { code: 'object_fault_type_01', class_map: { '0': 'object_fault_type_01' }, thresholds: { recheck_min: 0.75, auto_min: 0.95 }, risk_level: 3 },
-      { code: 'object_fault_type_02', class_map: { '1': 'object_fault_type_02' }, thresholds: { recheck_min: 0.70, auto_min: 0.93 }, risk_level: 2 },
-    ],
-    updated_at: '2026-09-07T16:00:00Z',
-  },
 ];
 
 // ============ 检测记录 (§3.5) ============
