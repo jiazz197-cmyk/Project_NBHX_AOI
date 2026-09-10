@@ -87,3 +87,8 @@ web/coverage-chunks
 .cache
 
 .dsh/
+
+#test and env cache
+.pytest_cache/
+.ruff_cache
+.uv-cache
