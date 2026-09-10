@@ -1,0 +1,429 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "AOI 推理检测平台 API（平台B）",
+    "version": "0.1.0",
+    "description": "平台B（aoi-infer）全部接口定义。对齐 docs/contracts/平台B_接口与数据契约.md，D2冻结。\n\n平台B不做用户认证，所有接口直接放行。统一信封：{code:0, message:\"ok\", request_id:\"req-...\", data:{...}}"
+  },
+  "servers": [
+    { "url": "http://localhost:8990/api/v1", "description": "本地开发" },
+    { "url": "http://127.0.0.1:4523/mock/aoi-infer/api/v1", "description": "Apifox Mock" }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["健康与系统"],
+        "summary": "服务健康检查",
+        "description": "返回服务/GPU/磁盘/模型/工位/outbox 总览。对齐契约§3.1",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Envelope" },
+                "example": {
+                  "code": 0, "message": "ok", "request_id": "req-001",
+                  "data": {
+                    "status": "UP",
+                    "gpu": { "device": 0, "mem_used_gb": 3.2, "mem_total_gb": 23.7 },
+                    "disk": { "free_gb": 120.4, "used_pct": 62 },
+                    "models": [{ "model_ref": "3-yolo@ds1", "precision": "fp32", "loaded": true, "vram_gb": 3.8 }],
+                    "stations": { "total": 8, "enabled": 8, "online": 7, "with_template": 8 },
+                    "inspect": { "queue": 0, "concurrency": 2 },
+                    "outbox": { "pending": 3, "dead": 0 }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/system/info": {
+      "get": {
+        "tags": ["健康与系统"],
+        "summary": "版本信息",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Envelope" },
+                "example": {
+                  "code": 0, "data": {
+                    "platform": "0.1.0", "skillname": "0.1.0",
+                    "pipeline_core": "0.1.0", "onnxruntime": "1.18.0"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/system/outbox": {
+      "get": {
+        "tags": ["健康与系统"],
+        "summary": "回传队列状态",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Envelope" },
+                "example": {
+                  "code": 0, "data": {
+                    "pending": 3, "pushing": 0, "dead": 0,
+                    "items": [
+                      { "id": 1, "kind": "suspicious", "ref_id": 98765, "status": "pending", "attempts": 0 }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models": {
+      "get": {
+        "tags": ["模型库"],
+        "summary": "本地模型列表",
+        "description": "对齐契约§3.2",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Envelope" },
+                "example": {
+                  "code": 0, "data": {
+                    "total": 2, "items": [
+                      { "model_ref": "3-yolo@ds1", "skillname": "ObjectDetection", "precision": "fp32", "status": "ready", "classes": ["object_fault_type_01","object_fault_type_02"], "received_at": "2026-09-08T09:00:00Z" },
+                      { "model_ref": "2-yolo@ds1", "skillname": "ObjectDetection", "precision": "fp32", "status": "ready", "classes": ["object_fault_type_01"], "received_at": "2026-09-01T10:00:00Z" }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models/pull": {
+      "post": {
+        "tags": ["模型库"],
+        "summary": "从镜像仓库拉取模型",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["image"],
+                "properties": {
+                  "image": { "type": "string", "example": "docker.io/corp/aoi-model:3-yolo-ds1" },
+                  "digest": { "type": "string", "example": "sha256:abc123..." }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "拉取成功/已存在",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Envelope" },
+                "example": { "code": 0, "data": { "model_ref": "3-yolo@ds1", "digest": "sha256:abc...", "status": "ready", "classes": 2 } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stations": {
+      "get": {
+        "tags": ["工位与相机"],
+        "summary": "工位列表",
+        "description": "对齐契约§3.3",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Envelope" },
+                "example": {
+                  "code": 0, "data": {
+                    "items": [
+                      { "code": "ST01", "name": "1号线-左门板", "enabled": true, "status": "online", "template_version": 3, "last_capture_at": "2026-09-08T08:31:00Z" },
+                      { "code": "ST02", "name": "1号线-右门板", "enabled": true, "status": "online", "template_version": 3, "last_capture_at": "2026-09-08T08:30:58Z" },
+                      { "code": "ST07", "name": "4号线-左门板", "enabled": false, "status": "offline", "template_version": 0 }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": ["工位与相机"],
+        "summary": "新增工位",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["code", "name"],
+                "properties": {
+                  "code": { "type": "string", "example": "ST09" },
+                  "name": { "type": "string", "example": "5号线-左门板" },
+                  "channel_id": { "type": "string", "example": "ch09" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "创建成功" }
+        }
+      }
+    },
+    "/stations/{code}": {
+      "put": {
+        "tags": ["工位与相机"],
+        "summary": "编辑工位",
+        "parameters": [{ "name": "code", "in": "path", "required": true, "schema": { "type": "string" }, "example": "ST01" }],
+        "responses": { "200": { "description": "更新成功" } }
+      },
+      "delete": {
+        "tags": ["工位与相机"],
+        "summary": "删除工位",
+        "parameters": [{ "name": "code", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "删除成功" } }
+      }
+    },
+    "/stations/{code}/template": {
+      "get": {
+        "tags": ["工位与相机"],
+        "summary": "读取工位模板",
+        "parameters": [{ "name": "code", "in": "path", "required": true, "schema": { "type": "string" }, "example": "ST01" }],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Envelope" },
+                "example": {
+                  "code": 0, "data": {
+                    "template_version": 3, "model_ref": "3-yolo@ds1", "skillname": "ObjectDetection",
+                    "tile_size": 1280, "overlap": 0.2,
+                    "objects": [
+                      { "code": "object_fault_type_01", "class_map": {"0": "object_fault_type_01"}, "thresholds": { "recheck_min": 0.60, "auto_min": 0.90 }, "risk_level": 3 },
+                      { "code": "object_fault_type_02", "class_map": {"1": "object_fault_type_02"}, "thresholds": { "recheck_min": 0.55, "auto_min": 0.88 }, "risk_level": 2 }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": ["工位与相机"],
+        "summary": "保存工位模板",
+        "parameters": [{ "name": "code", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "保存成功" } }
+      }
+    },
+    "/stations/{code}/template/validate": {
+      "post": {
+        "tags": ["工位与相机"],
+        "summary": "校验工位模板（不保存）",
+        "parameters": [{ "name": "code", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "校验通过" } }
+      }
+    },
+    "/inspect/image": {
+      "post": {
+        "tags": ["推理"],
+        "summary": "单图推理",
+        "description": "对齐契约§3.4。multipart上传图片+元数据",
+        "responses": {
+          "200": {
+            "description": "推理完成",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Envelope" },
+                "example": {
+                  "code": 0, "data": {
+                    "inspection_id": 98765, "station_code": "ST01", "seq": 42,
+                    "template_version": 3, "verdict": "recheck", "verdict_reasons": ["mid_score"],
+                    "boxes": [{ "object_code": "object_fault_type_01", "score": 0.72, "model_ref": "3-yolo@ds1", "xyxy": [100,200,180,260] }],
+                    "tiling_meta": { "tile_size": 1280, "overlap": 0.2, "tiles": 12, "ms": 1400 },
+                    "latency_ms": 1400, "pushed": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/inspections": {
+      "get": {
+        "tags": ["检测记录"],
+        "summary": "检测记录列表",
+        "description": "对齐契约§3.5。支持筛选：station_code, verdict, from, to, pushed_status",
+        "parameters": [
+          { "name": "station_code", "in": "query", "schema": { "type": "string" } },
+          { "name": "verdict", "in": "query", "schema": { "type": "string", "enum": ["auto_pass", "recheck", "manual"] } },
+          { "name": "from", "in": "query", "schema": { "type": "string", "format": "date-time" } },
+          { "name": "to", "in": "query", "schema": { "type": "string", "format": "date-time" } },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "page_size", "in": "query", "schema": { "type": "integer", "default": 20 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Envelope" },
+                "example": {
+                  "code": 0, "data": {
+                    "total": 12480, "items": [
+                      { "id": 98765, "station_code": "ST01", "seq": 1042, "captured_at": "2026-09-08T08:31:00Z", "verdict": "recheck", "verdict_reasons": ["mid_score"], "boxes": [{ "object_code": "object_fault_type_01", "score": 0.72, "model_ref": "3-yolo@ds1", "xyxy": [100,200,180,260] }], "latency_ms": 1400, "template_version": 3, "pushed_status": "pushed" }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/inspections/{id}": {
+      "get": {
+        "tags": ["检测记录"],
+        "summary": "检测记录详情",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "成功" } }
+      }
+    },
+    "/stats/summary": {
+      "get": {
+        "tags": ["统计"],
+        "summary": "信息统计卡片",
+        "description": "对齐契约§3.6",
+        "parameters": [
+          { "name": "range", "in": "query", "schema": { "type": "string", "enum": ["today", "7d", "30d"], "default": "today" } },
+          { "name": "station_code", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Envelope" },
+                "example": {
+                  "code": 0, "data": {
+                    "total": 12480, "auto_pass": 11232, "recheck": 936, "manual": 312, "bad_count": 45,
+                    "pass_rate": 90.0, "avg_latency_ms": 1350, "p95_latency_ms": 2100,
+                    "stations_online": 6, "stations_total": 8,
+                    "defect_topn": [
+                      { "code": "object_fault_type_01", "name_cn": "划伤", "count": 520, "image_count": 380 },
+                      { "code": "object_fault_type_02", "name_cn": "凹坑", "count": 416, "image_count": 290 }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stats/trend": {
+      "get": {
+        "tags": ["统计"],
+        "summary": "检测趋势",
+        "parameters": [
+          { "name": "from", "in": "query", "schema": { "type": "string" } },
+          { "name": "to", "in": "query", "schema": { "type": "string" } },
+          { "name": "bucket", "in": "query", "schema": { "type": "string", "enum": ["hour", "day"], "default": "hour" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Envelope" },
+                "example": {
+                  "code": 0, "data": [
+                    { "time": "08:00", "total": 520, "auto_pass": 460, "recheck": 45, "manual": 15, "avg_latency_ms": 1300 }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stats/errors": {
+      "get": {
+        "tags": ["统计"],
+        "summary": "错图统计",
+        "responses": { "200": { "description": "成功" } }
+      }
+    },
+    "/reports/daily": {
+      "get": {
+        "tags": ["日报"],
+        "summary": "日报列表",
+        "description": "对齐契约§3.7",
+        "parameters": [
+          { "name": "from", "in": "query", "schema": { "type": "string", "example": "2026-09-01" } },
+          { "name": "to", "in": "query", "schema": { "type": "string", "example": "2026-09-08" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Envelope" },
+                "example": {
+                  "code": 0, "data": [
+                    { "day": "2026-09-08", "total": 12480, "auto_pass": 11232, "recheck": 936, "manual": 312, "bad_count": 45, "html_path": "/data/reports/2026-09-08.html", "csv_path": "/data/reports/2026-09-08.csv" }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/reports/daily/{day}": {
+      "get": {
+        "tags": ["日报"],
+        "summary": "日报详情",
+        "parameters": [{ "name": "day", "in": "path", "required": true, "schema": { "type": "string" }, "example": "2026-09-08" }],
+        "responses": { "200": { "description": "成功" } }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Envelope": {
+        "type": "object",
+        "description": "统一信封。成功 code=0，失败 code=4xxxx。对齐契约§1.2",
+        "properties": {
+          "code": { "type": "integer", "example": 0 },
+          "message": { "type": "string", "example": "ok" },
+          "request_id": { "type": "string", "example": "req-001" },
+          "data": { "type": "object" }
+        }
+      }
+    }
+  }
+}
