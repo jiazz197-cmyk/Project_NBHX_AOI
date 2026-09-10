@@ -19,24 +19,26 @@
 const BASE_URL = '/api/v1';
 
 /** 统一信封返回 */
-interface Envelope<T = unknown> {
+export interface Envelope<T = unknown> {
   code: number;
   message: string;
   request_id: string;
   data: T;
 }
 
-/** 业务校验失败详情 */
+/** 业务校验失败详情：42200 为 {字段:消息}；40010 参数错误为 pydantic 校验对象数组 */
+export type FieldErrors = Record<string, string> | unknown[];
+
 interface FieldError {
-  detail?: { fields?: Record<string, string> };
+  detail?: { fields?: FieldErrors };
 }
 
 class ApiError extends Error {
   code: number;
   requestId: string;
-  fields?: Record<string, string>;
+  fields?: FieldErrors;
 
-  constructor(code: number, message: string, requestId: string, fields?: Record<string, string>) {
+  constructor(code: number, message: string, requestId: string, fields?: FieldErrors) {
     super(message);
     this.code = code;
     this.requestId = requestId;
@@ -44,24 +46,38 @@ class ApiError extends Error {
   }
 }
 
+/** 生成请求链路 ID（契约 §1.3 X-Request-ID） */
+function genRequestId(): string {
+  return `req-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${BASE_URL}${path}`;
+  const requestId = genRequestId();
+
   const res = await fetch(url, {
     headers: {
       'Content-Type': 'application/json',
+      'X-Request-ID': requestId,
       ...options?.headers,
     },
     ...options,
   });
 
-  const envelope: Envelope<T & FieldError> = await res.json();
+  // 解析信封；后端可能返回非 JSON（如框架默认 404），做容错
+  let envelope: Envelope<T & FieldError> | null = null;
+  try {
+    envelope = (await res.json()) as Envelope<T & FieldError>;
+  } catch {
+    envelope = null;
+  }
 
-  if (envelope.code !== 0) {
+  if (!res.ok || envelope === null || envelope.code !== 0) {
     throw new ApiError(
-      envelope.code,
-      envelope.message,
-      envelope.request_id,
-      envelope.data?.detail?.fields
+      envelope?.code ?? res.status,
+      envelope?.message ?? `HTTP ${res.status}`,
+      envelope?.request_id ?? requestId,
+      envelope?.data?.detail?.fields,
     );
   }
 
@@ -96,4 +112,3 @@ export async function del<T>(path: string): Promise<T> {
 }
 
 export { ApiError };
-export type { Envelope, FieldError };
