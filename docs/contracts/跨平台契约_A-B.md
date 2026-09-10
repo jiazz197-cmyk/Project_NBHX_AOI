@@ -1,7 +1,7 @@
 # 跨平台契约：平台 A ↔ 平台 B
 
 > 归属：**B 定义契约与 A 侧实现；C 实现 B 侧**；冻结：D2；变更窗口：D9 / D15。
-> 覆盖：模型制品上传与下载（经制品仓库）、模型能力描述 `model.yaml`、错图回传、版本兼容、认证、幂等/重试。
+> 覆盖：模型发布与拉取（经镜像仓库）、模型能力描述 `model.yaml`、错图回传、版本兼容、认证、幂等/重试。
 > 不覆盖：平台各自内部接口（见 `平台A_接口与数据契约.md`、`平台B_接口与数据契约.md`）、`packages/` 内部签名（见 `P0骨架设计_双平台.md` §4）。
 
 ---
@@ -10,15 +10,14 @@
 
 | 链路 | 方向 | 机制 | 频度 | 载荷量级 |
 |---|---|---|---|---|
-| 模型上传 | A → 制品仓库 | Registry HTTP API v2 推送 **OCI 制品**（**不构建 Docker 镜像**） | 每次人工选定一个已审批模型 | 10~500MB |
-| 模型下载 | 制品仓库 → B | Registry HTTP API v2 取 manifest + blobs（无 Docker 依赖） | 按需（新模型/回滚） | 同 |
+| 模型发布 | A → 镜像仓库 | `docker build` + `docker push` | 每次模型审批通过 | 10~500MB |
+| 模型拉取 | 镜像仓库 → B | OCI/Docker Registry HTTP API v2（或 `docker pull`） | 按需（新模型/回滚） | 同 |
 | 错图回传 | B → A | HTTP multipart | 每张可疑/坏图 | 0.1~10MB/条 |
 
 **关键约束**：
 
 - **A 从不主动连接 B**：没有实例注册、没有心跳、没有方案下发、没有分片上传。
-- 模型是 A→B 唯一的**信息载体**：一次上传的**制品**里除 ONNX 权重外，还带 `model.yaml`（模型能力描述，含 skillname、类别、推荐阈值）。
-- **上传由 A 侧人工选择**：在 A 的「训练 → 模型库」中选定某个已训练、已审批的模型后上传（§2.4），不做全量自动发布。
+- 模型是 A→B 唯一的**信息载体**：镜像里除 ONNX 权重外，还带 `model.yaml`（模型能力描述，含 skillname、类别、推荐阈值）。
 - **B 拥有工位与工位模板**：模板由 B 在自己的 GUI 里配置，A 不感知；A 只在 `model.yaml` 里给推荐阈值作为默认值。
 - B→A 只有 `POST /api/ingest/findings` 一个端点（错图回传）；B 无用户认证。
 
@@ -30,19 +29,19 @@
 
 | 项 | 约定 |
 |---|---|
-| 协议 | 制品仓库 HTTPS（Registry API v2）；回传 HTTP/1.1（推荐 HTTPS，内网 CA/自签 + 指纹校验） |
+| 协议 | 镜像仓库 HTTPS；回传 HTTP/1.1（推荐 HTTPS，内网 CA/自签 + 指纹校验） |
 | 编码 | UTF-8；时间 ISO8601 UTC（`2026-09-08T08:30:00Z`） |
 | 请求头 | `X-Request-ID`（发起方生成，贯穿双方日志）、`Content-Type`、`Idempotency-Key`（回传写操作） |
-| 超时 | 建连 5s；回传 60s；制品 blob 上传/下载 600s（大文件流式） |
+| 超时 | 建连 5s；回传 60s；镜像层下载 600s（大文件流式） |
 | 时钟 | 双方强制 NTP；跨平台数据同时携带 `captured_at`（B 采集时钟）与 `received_at`（A 接收时钟） |
-| 大小限制 | 单模型制品 ≤ 2GB；回传单条图片 ≤ 100MB |
+| 大小限制 | 单模型镜像 ≤ 2GB；回传单条图片 ≤ 100MB |
 
 ### 1.2 认证
 
 | 链路 | 凭据 | 说明 |
 |---|---|---|
-| A → 制品仓库（上传） | `MODEL_REGISTRY_USER` / `MODEL_REGISTRY_PASSWORD` | 只授予上传任务的写权限 |
-| B ← 制品仓库（下载） | `MODEL_REGISTRY_USER` / `MODEL_REGISTRY_TOKEN` | **只读**；公开仓库可留空（注意 Docker Hub 匿名限流） |
+| A → 镜像仓库（推送） | `MODEL_REGISTRY_USER` / `MODEL_REGISTRY_PASSWORD` | 只授予发布任务的写权限 |
+| B ← 镜像仓库（拉取） | `MODEL_REGISTRY_USER` / `MODEL_REGISTRY_TOKEN` | **只读**；公开仓库可留空（注意 Docker Hub 匿名限流） |
 | B → A（回传） | `X-Internal-Token: <INTERNAL_TOKEN>` | 由 A 校验；B 只透传 |
 | B 的前端与业务接口 | **无认证** | B 无用户体系、无登录；靠内网隔离（见平台 B 契约 §1.1） |
 
@@ -63,9 +62,9 @@
 
 | HTTP | code | 含义 | 产生方 |
 |---|---|---|---|
-| 400 | 40010 | 载荷不可读/制品解包失败/sha256 校验失败/图片解码失败 | B、A |
+| 400 | 40010 | 载荷不可读/镜像层解包失败/sha256 校验失败/图片解码失败 | B、A |
 | 401 | 40100 | registry 鉴权失败；回传令牌缺失或错误 | B、A |
-| 404 | 40401 | 制品/标签/manifest 不存在；回传中的资源不存在 | B、A |
+| 404 | 40401 | 镜像/标签/清单不存在；回传中的资源不存在 | B、A |
 | 409 | 40900 | 幂等冲突（同 `model_ref` 不同 digest；同 `(station,seq,kind)` 内容不一致） | B、A |
 | 422 | 42200 | `model.yaml`/回传元数据校验失败（`detail.fields`） | B、A |
 | 429 | 42900 | registry 限流（可重试） | 仓库 |
@@ -74,47 +73,30 @@
 
 ---
 
-## 2. 模型制品与仓库规范
+## 2. 模型产物与镜像规范
 
-### 2.1 制品内容（固定）
+### 2.1 镜像内布局（固定）
 
 ```
-model.onnx               # 推理权重（FP32；FP16 另发一个 tag）
-model.onnx.sha256        # 权重 sha256（十六进制，无文件名后缀）
-model.yaml               # 模型能力描述（§2.3，A/B 双方的唯一元数据来源）
-NOTICE                   # 许可与来源信息（可选）
+/model/
+├── model.onnx               # 推理权重（FP32；FP16 另发一个 tag）
+├── model.onnx.sha256        # 权重 sha256（十六进制，无文件名后缀）
+├── model.yaml               # 模型能力描述（§2.3，A/B 双方的唯一元数据来源）
+└── NOTICE                   # 许可与来源信息（可选）
 ```
 
-- 制品以 **OCI 制品**形式上传到 `<registry>/<org>/aoi-model:<tag>`（Registry HTTP API v2；`oras` 等兼容客户端即可）。
-- **不构建 Docker 镜像**：不使用 Dockerfile、不执行 `docker build` / `docker push` 镜像、不产生镜像层；B 侧同样**不执行 `docker pull`**，直接用 HTTP API 取 manifest 与 blobs。
-- 权重与 `model.yaml` **必须放在同一制品一起上传**，不得分开发布（**不得只传 `model.yaml`**）。
-- 上传对象由 A 侧操作员在「模型库」中**选定**（§2.4）；同一 `model_ref` 的不同精度是两次独立上传（`-fp16` tag）。
+- 镜像以 `FROM scratch` 构建（仅文件，无 shell），层数固定为 1，便于 B 用 registry API 直接解包。
+- 权重与 `model.yaml` **必须同版本发布**，不得分开发布。
 
-### 2.1.1 制品 manifest 与媒体类型（基线；D7 与 B 一次性冻结）
-
-| 组成 | 媒体类型（基线） | 说明 |
-|---|---|---|
-| manifest | `application/vnd.oci.image.manifest.v1+json` | `artifactType = application/vnd.aoi.model.v1`；manifest digest 即 A 记录的制品 digest |
-| config（小 JSON blob） | `application/vnd.aoi.model.config.v1+json` | `{model_ref, skillname, precision, created_at}`，便于仓库侧检索 |
-| blob | `application/vnd.aoi.model.onnx` | `model.onnx`（annotation `org.opencontainers.image.title=model.onnx`） |
-| blob | `application/vnd.aoi.model.sha256` | `model.onnx.sha256` |
-| blob | `application/vnd.aoi.model.yaml.v1+yaml` | `model.yaml` |
-| blob（可选） | `application/vnd.aoi.model.notice` | `NOTICE` |
-
-> B 必须按**媒体类型 + 文件名**定位 blob，**不得依赖 blob 顺序**。
-> 本表是基线；若 D7 联调时调整媒体类型，按「破坏性变更四件套」执行（改文档 + 改 stub + 改 fixture + 双方契约测试过）。
-
-### 2.2 制品命名与标签
+### 2.2 镜像命名与标签
 
 | 项 | 约定 |
 |---|---|
-| 仓库路径 | `<registry>/<org>/aoi-model`，如 `docker.io/rekal1018/aoi-model`、`registry.corp:5000/aoi/aoi-model` |
+| 镜像名 | `<registry>/<org>/aoi-model`，如 `docker.io/<org>/aoi-model`、`registry.corp:5000/aoi/aoi-model` |
 | 标签 | `skillname.image_tag_from_model_ref(model_ref)`，如 `3-yolo@ds1` → `3-yolo-ds1` |
 | 精度 | 同 `model_ref` 的不同精度用后缀：`3-yolo-ds1-fp16` |
-| 不可变 | **B 按 digest 记录**；生产使用建议按 `<repo>@sha256:...` 固定 |
-| 冲突 | 同一 tag 已存在且 digest 不同 → A 侧上传前必须换 `model_ref`（版本号递增），不得覆盖 |
-
-> **命名沿用说明**：`skillname.image_tag_from_model_ref`（共享包函数名）、A 侧 `MODEL_IMAGE_REPO`（env 变量名）、`model_publish.image`（A 侧列名）、`b_model.source_image`（B 侧列名）均为既有标识符，语义一律为**制品**的 tag / 仓库路径 / 来源引用；本期不改名，避免破坏共享包签名与既有配置（D7 若清理命名，按变更窗口执行）。
+| 不可变 | **B 按 digest 记录**；生产使用建议按 `image@sha256:...` 固定，`latest` 仅作便利别名 |
+| 冲突 | 同一 tag 已存在且 digest 不同 → A 侧发布前必须换 `model_ref`（版本号递增），不得覆盖 |
 
 ### 2.3 `model.yaml`（模型能力描述，**随 skillname 给出**）
 
@@ -286,7 +268,7 @@ extensions: {}                    # 任意扩展字段；B 原样保存、不解
 | 2 | `schema_version` 已知且 B 支持 | 42200 |
 | 3 | `skillname` ∈ `skillname.SkillName` | 42200 |
 | 4 | `model_ref` 能被 `skillname.parse_model_ref` 解析 | 42200 |
-| 5 | `onnx.sha256` 与下载到的 `model.onnx` 实际 sha256 一致 | 40010 |
+| 5 | `onnx.sha256` 与解包出的 `model.onnx` 实际 sha256 一致 | 40010 |
 | 6 | `classes[].code` 通过 `skillname.is_valid_fault_code` 且不重复 | 42200 |
 | 7 | `classes[].index` 唯一、连续、与 `onnx.output.shape` 的类别维一致 | 42200 |
 | 8 | `0 < recommended.recheck_min < recommended.auto_min < 1` | 42200 |
@@ -296,42 +278,38 @@ extensions: {}                    # 任意扩展字段；B 原样保存、不解
 > `recommended` 只是**推荐值**：B 的工位模板可覆盖；A 不再下发方案模板。
 > **预留字段的价值**：模型发布一次后长期留在 registry，B 可能分期升级；预留字段让「B 升级即启用新能力」，不必回头重发模型。
 
-### 2.4 上传（A → 制品仓库）
-
-**入口：A 侧「训练 → 模型库」人工选择要上传的模型**（前端与后端都必须支持该选择；接口见平台 A 契约 §4.2）：
+### 2.4 发布（A → 镜像仓库）
 
 ```
-1. 操作员在模型库列表中选定一个模型（lifecycle=approved 且 gate_status=passed），可选精度（fp32/fp16）
-2. POST /api/train/models/{id}/publish  {"precision"?: "fp32"}  → Celery publish 任务 → {publish_id}
-3. 收集/导出产物：models/{model_ref}/{precision}/model.onnx(+.sha256)，生成 model.yaml（§2.3，含 onnx.sha256）
-4. 组装 OCI 制品（§2.1.1）→ Registry HTTP API v2 上传到 <registry>/<org>/aoi-model:<tag>
-   （不 docker build、不 docker push 镜像）
-5. 取制品 digest（manifest digest）
-6. 写 aoi_training.model_publish{registry, repository/image, tag, digest, status=published}
-7. model.lifecycle → published
+1. 模型 lifecycle=approved 且金标准回归通过
+2. POST /api/train/models/{id}/publish  → Celery publish 任务
+3. 生成 model.yaml（含 onnx.sha256）→ 构建镜像（FROM scratch + COPY /model/*）
+4. docker build -t <registry>/<org>/aoi-model:<tag> .
+5. docker push
+6. 取 digest：docker inspect --format '{{index .RepoDigests 0}}'
+7. 写 aoi_training.model_publish{image, tag, digest, status=published}
+8. model.lifecycle → published
 ```
 
-- **未选定模型 / 模型未审批 / 门禁未通过 → `42200`**（`detail.fields`），不产生上传任务。
-- 上传失败（网络/鉴权/仓库限流）：`model_publish.status=failed` + `error_message`，指数退避重试 3 次（30s / 2m / 10m），可在模型库页人工重推。
-- A 侧记录 digest；B 下载后回报的 digest 若不一致，视为仓库被篡改并告警。
+- 发布失败（网络/鉴权/磁盘）：`model_publish.status=failed` + `error_message`，指数退避重试 3 次（30s / 2m / 10m），可人工重推。
+- A 侧记录 digest；B 拉取后回报的 digest 若不一致，视为仓库被篡改并告警。
 
-### 2.5 下载（制品仓库 → B）
+### 2.5 拉取（镜像仓库 → B）
 
 ```
-1. 运维在 B 的「系统 → 模型库」选择或输入制品引用
-2. POST {B}/api/v1/models/pull {"image": "<registry>/<org>/aoi-model:3-yolo-ds1", "digest"?: "sha256:..."}
+1. 运维在 B 的「系统 → 模型库」输入镜像地址（或从 tag 列表选择）
+2. POST {B}/api/v1/models/pull {"image": "<registry>/<org>/aoi-model:3-yolo-ds1", "digest": "sha256:..."}
 3. B 取 registry token（若需要）→ GET manifest → 校验 digest（若给定）
-4. GET 各 blob（按媒体类型取 model.onnx / model.onnx.sha256 / model.yaml）
-5. 校验 model.onnx sha256（§2.3 规则 5）→ 解析 model.yaml → 执行 §2.3 全部校验
+4. GET 层 blob → gunzip + untar → 提取 /model/*
+5. 校验 model.onnx sha256（§2.3 规则 4）→ 解析 model.yaml → 执行 §2.3 全部校验
 6. 落盘 /data/models/{model_ref}/{precision}/ → 注册 b_model + 刷新 b_defect_class
 7. → {"code":0,"data":{"model_ref":"3-yolo@ds1","digest":"sha256:...","status":"ready","classes":2}}
 ```
 
 - **幂等**：同 `model_ref` + 同 digest → 直接返回 `ready`（不重复下载）；同 `model_ref` 不同 digest → `40900`（需先删除旧版本）。
 - **失败**：不写半成品（临时目录 + 原子 rename）；已有模型不受影响；错误与重试次数记录在模型库页。
-- **无 Docker 依赖**：`MODEL_PULL_MODE=oci` 为**唯一模式**（httpx 直连 Registry v2 API）；制品不是容器镜像，**不再支持 `docker pull` 模式**。
-- **离线导入**：A 侧导出制品包 tar（`model.onnx` + `.sha256` + `model.yaml`，或 OCI layout tar）→ B 的 `POST /api/v1/models/import`（multipart 上传 tar）→ 走同样的校验/注册流程。
-- 请求字段名 `image` 为沿用写法，语义是**制品引用**（§2.2 命名沿用说明）。
+- **无 Docker 依赖**：默认 `MODEL_PULL_MODE=oci`，用 httpx 直接走 Registry v2 API；本机有 Docker 时可切 `docker` 模式（`docker pull` + `docker create` + `docker cp`）。
+- **离线导入**：A 侧 `docker save` 或层 tar → B 的 `POST /api/v1/models/import`（multipart 上传 tar）→ 走同样的校验/注册流程。
 
 ### 2.6 版本兼容
 
@@ -425,16 +403,16 @@ pending → pushing → pushed
 
 | 操作 | 幂等键 |
 |---|---|
-| 模型上传（发布） | `model_ref` + tag（同 tag 不同内容禁止覆盖） |
-| 模型下载 | `model_ref` + `digest` |
+| 模型发布 | `model_ref` + tag（同 tag 不同内容禁止覆盖） |
+| 模型拉取 | `model_ref` + `digest` |
 | 错图回传 | `(station_code, seq)`（按 `kind` 落不同表）；HTTP 头 `Idempotency-Key: {station}-{seq}-{kind}` |
 
 ### 4.2 重试策略
 
 | 链路 | 重试 | 退避 | 终止 |
 |---|---|---|---|
-| A 上传制品 | 3 次 | 30s / 2m / 10m | `failed`，人工重推 |
-| B 下载制品 | 3 次 | 30s / 2m / 10m | 模型库页显示失败，人工重试 |
+| A 发布镜像 | 3 次 | 30s / 2m / 10m | `failed`，人工重推 |
+| B 拉取镜像 | 3 次 | 30s / 2m / 10m | 模型库页显示失败，人工重试 |
 | B→A 回传 | 无限（受时限） | 1m / 5m / 15m / 1h / 6h | 24h 后 `dead`，人工处理 |
 
 仅对 `42900` / `5xx` / 网络错误重试；`4xx` 业务错误不重试。
@@ -443,7 +421,7 @@ pending → pushing → pushed
 
 | 场景 | A 侧 | B 侧 |
 |---|---|---|
-| 制品仓库不可用 | 上传任务失败并可重推 | 用本地已有模型继续推理，模型库页提示 |
+| 镜像仓库不可用 | 发布任务失败并可重推 | 用本地已有模型继续推理，模型库页提示 |
 | A 不可用 | — | 推理/统计/日报照常；回传积压进 outbox |
 | B 不可用 | 无感知（A 不依赖 B） | — |
 
@@ -451,17 +429,18 @@ pending → pushing → pushed
 
 ## 5. 时序图
 
-### 5.1 模型上传 → 下载
+### 5.1 模型发布 → 拉取
 
 ```
-A（训练平台）                制品仓库                    B（推理平台）
-   │ 模型库中选定模型 + 审批通过     │                          │
-   │──上传 OCI 制品（onnx+yaml）───▶│                          │
-   │◀─制品 digest──────────────────│                          │
+A（训练平台）                镜像仓库                    B（推理平台）
+   │ 审批通过                      │                          │
+   │──build + docker push────────▶│                          │
+   │◀─digest───────────────────────│                          │
    │ model_publish=published       │                          │
-   │                               │◀──GET manifest/blobs─────│  模型库页点「下载」
-   │                               │───model.onnx / yaml─────▶│
-   │                               │                          │ sha256 校验 + model.yaml 校验
+   │                               │◀──GET manifest/layers────│  模型库页点「拉取」
+   │                               │───layer tar.gz──────────▶│
+   │                               │                          │ 解包 /model/* → sha256
+   │                               │                          │ 解析 model.yaml → 校验
    │                               │                          │ b_model=ready
 ```
 
@@ -487,14 +466,14 @@ A（训练平台）                制品仓库                    B（推理平
 | fixture | 归属 | 用途 |
 |---|---|---|
 | `model_yaml_sample.yaml` | B | `model.yaml` 样例（含 classes/推荐阈值） |
-| `model_manifest_sample.json` | B | OCI 制品 manifest 样例（含媒体类型/blob 布局，供 B 的下载解析测试） |
+| `model_manifest_sample.json` | B | Registry manifest 样例（供 B 的拉取解析测试） |
 | `findings_ingest_sample.json` | C | 错图回传 meta 样例（suspicious + bad 两条） |
 | `inspect_config_sample.yaml` | C | 检测配置样例（`pipeline-core.load_config` 用，A 预标与 B 工位模板共用） |
 
 契约测试（`tests/contracts/test_cross_platform.py`）：
 
-1. 模型上传：同 tag 不同 digest 禁止覆盖；`model.yaml` 与权重 sha256 一致；**未选定模型/未审批 → `42200`**。
-2. 模型下载：digest 校验、幂等（同 digest 直接 ready）、坏 blob → `40010`、非法 `model.yaml` → `42200`。
+1. 模型发布：同 tag 不同 digest 禁止覆盖；`model.yaml` 与权重 sha256 一致。
+2. 模型拉取：digest 校验、幂等（同 digest 直接 ready）、坏层 → `40010`、非法 `model.yaml` → `42200`。
 3. 错图回传：重复请求 → `duplicated=true` 且 id 一致；坏图无图 → 成功；未知工位（A 侧无工位主数据）→ 正常接收；suspicious 图不可解码 → `40010`。
 4. 认证：registry 凭据错误 → `40100`；回传缺 `X-Internal-Token` → `40100`。
 5. 版本兼容：`schema_version` 未知 / `skillname` 主版本不兼容 → 拒绝。
@@ -502,5 +481,3 @@ A（训练平台）                制品仓库                    B（推理平
 ---
 
 *本契约于 D2 冻结；D9、D15 评审窗口。破坏性变更四件套：改文档 + 改 stub + 改 fixture + 双方契约测试过。*
-
-*2026-09-11 变更（结构性，由项目负责人裁定）：模型分发语义由「A 构建并推送 Docker 镜像 → B 拉取镜像层解包」改为**「A 上传模型制品（`model.onnx` + `.sha256` + `model.yaml`，OCI 制品，不构建镜像）→ B 下载制品」**；新增 §2.1.1 媒体类型基线、§2.4 由「模型库中人工选定模型」触发上传。待跟进（D7 前）：B 侧 `POST /models/pull` 命名沿用 `image` 字段（语义=制品引用）、B 侧 `MODEL_PULL_MODE` 仅保留 `oci`、`model_manifest_sample.json` 需按 §2.1.1 复核。*

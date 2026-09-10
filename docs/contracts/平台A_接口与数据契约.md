@@ -1,17 +1,16 @@
 # 平台 A 接口与数据契约（训练与标注平台，LS 二开）
 
 > 归属：**B 主笔**（主数据源 / 业务接口 / 二开包裹）；消费：A 侧前端、Celery workers、平台 B（仅经跨平台契约）。
-> 冻结基线：D2；变更窗口：D9 / D15。跨平台接口（模型制品上传/下载、错图回传）见 `跨平台契约_A-B.md`，不在此重复。
+> 冻结基线：D2；变更窗口：D9 / D15。跨平台接口（模型镜像发布/拉取、错图回传）见 `跨平台契约_A-B.md`，不在此重复。
 > 技术栈：Django + DRF（LS 1.x fork）、PostgreSQL 15、MinIO、Redis 7 + Celery 5。
 
 ---
 
 ## 0. 范围与原则
 
-- 平台 A 是**数据与模型生产的唯一主数据源**：缺陷字典、数据集、标注、预标注、训练、模型注册与**模型上传（制品推送到仓库）**；**不管理工位/相机/推理实例，不参与产线运行**。
-- 平台 A 与平台 B 之间**只有两条链路**：A 上传模型制品到仓库（B 下载）、B 回传错图（A 接收）。
+- 平台 A 是**数据与模型生产的唯一主数据源**：缺陷字典、数据集、标注、预标注、训练、模型注册与**模型发布**；**不管理工位/相机/推理实例，不参与产线运行**。
 - LS 原生能力**能用则用**（§1）；二开只做四个业务新域（datasets / prelabel / training / review）+ 三个支撑 app（core / audit / reports）+ 薄包裹。
-- 平台 B 不直连 A 的数据库/对象存储；**A 也不主动连接 B**。所有跨平台交互走 `跨平台契约_A-B.md`（A 上传模型制品 → B 下载；B 回传错图）。
+- 平台 B 不直连 A 的数据库/对象存储；**A 也不主动连接 B**。所有跨平台交互走 `跨平台契约_A-B.md`（A 发布模型镜像 → B 拉取；B 回传错图）。
 - **sidecar 已取消**：原 sidecar 的 ML backend 协议与预标推理归 A 自身（Django + Celery GPU worker + `pipeline-core`）。
 
 ---
@@ -45,7 +44,7 @@
 | `skillname` | 任务类型：`ObjectDetection`（MVP 唯一）→ LS 控件 `RectangleLabels` |
 | `object_fault_type_XX` | 缺陷对象 code，XX 两位数字（01~99），由缺陷字典配置 |
 | `model_ref` | 模型注册版本号，格式 `{seq}-{framework}@ds{version}`，如 `3-yolo@ds1` |
-| `model.yaml` | 随模型**制品**上传的**模型能力描述**（skillname/类别/推荐阈值/张量信息），见跨平台契约 §2.3 |
+| `model.yaml` | 随模型镜像发布的**模型能力描述**（skillname/类别/推荐阈值/张量信息），见跨平台契约 §2.3 |
 | `station_code` | B 侧工位 code；A 只作**不透明字符串**存储（A 没有工位主数据） |
 | `verdict` | 初检判定：`auto_pass` / `recheck` / `manual`（语义在 `pipeline-core`） |
 | `source` | 图片来源：`manual_real` / `camera` / `reflux_review` / `prelabel_model_{id}` |
@@ -92,7 +91,7 @@
 - **RBAC 自研**：LS 开源版的组织/角色权限框架不可用（能力不完整且语义与 AOI 三角色不匹配），**不作为权限依据**；不修改 LS 原生 users/组织表，授权关系存 `aoi_core.user_role`（`user_id` 逻辑引用 LS users，不建外键）。
 - **B → A（错图回传）**：`X-Internal-Token: <INTERNAL_TOKEN>`；`instance_code` / `station_code` 由 B 在回传体中给出，供审计与溯源。
 - **LS → A 预标端点（D2 实测）**：LS 调用 `aoi/prelabel/{task_id}/*` 时**不携带 `X-Internal-Token`/Authorization**，仅带 `User-Agent: heartex/...`；因此默认放行，请求若带内部头则必须正确。置 `AOI_PRELABEL_REQUIRE_INTERNAL_TOKEN=true` 可强制 40100（需配合网关注入头或 LS Basic Auth）；生产建议该端点仅在内网暴露。
-- **A → 制品仓库（模型上传）**：`MODEL_REGISTRY_USER` / `MODEL_REGISTRY_PASSWORD`，见跨平台契约 §1.2。**A 不直接连接 B**。
+- **A → 镜像仓库（模型发布）**：`MODEL_REGISTRY_USER` / `MODEL_REGISTRY_PASSWORD`，见跨平台契约 §1.2。**A 不直接连接 B**。
 - 权限点（模块级）：`datasets.*`、`training.*`、`review.*`、`system.*`；动作 `view/create/update/cancel/approve/publish`；三角色 `operator`（操作员）/ `admin`（管理员）/ `super_admin`（超级管理员）——**仅用于平台 A**；默认权限矩阵见 §3.1。
 
 ### 2.5 公共请求约定
@@ -154,7 +153,7 @@ CREATE TABLE aoi_core.user_role (
 | `prelabel.*` | — | ✅ | ✅ |
 | `training.view` | ✅ | ✅ | ✅ |
 | `training.create` / `cancel` / `approve` | — | ✅ | ✅ |
-| `training.publish`（上传模型制品到仓库） | — | ✅ | ✅ |
+| `training.publish`（发布模型镜像） | — | ✅ | ✅ |
 | `review.view` / `review.finalize` | ✅ | ✅ | ✅ |
 | `system.roles` / `system.users`（角色与授权） | — | — | ✅ |
 | `system.audit` | — | — | ✅ |
@@ -273,17 +272,17 @@ CREATE TABLE aoi_training.model (
   config_snapshot JSONB                      -- 含 model.yaml 快照（跨平台契约 §2.3）
 );
 
-CREATE TABLE aoi_training.model_publish (    -- 模型制品上传到仓库（A→registry，一次上传=一行）
+CREATE TABLE aoi_training.model_publish (    -- 模型发布到镜像仓库（A→registry）
   id SERIAL PRIMARY KEY,
-  model_ref VARCHAR(64) NOT NULL,            -- 上传的是哪一个已训练模型（前端在模型库中选择）
+  model_ref VARCHAR(64) NOT NULL,
   registry VARCHAR(128) NOT NULL,            -- docker.io / registry.corp:5000
-  image VARCHAR(256) NOT NULL,               -- 制品仓库路径 <org>/aoi-model（列名沿用，语义为制品仓库）
+  image VARCHAR(256) NOT NULL,               -- <org>/aoi-model
   tag VARCHAR(128) NOT NULL,                 -- 3-yolo-ds1 / 3-yolo-ds1-fp16
-  digest VARCHAR(128),                       -- 制品 manifest digest：sha256:...
-  status VARCHAR(16) DEFAULT 'queued',       -- queued/exporting/uploading/published/failed
+  digest VARCHAR(128),                       -- sha256:...
+  status VARCHAR(16) DEFAULT 'queued',       -- queued/building/pushing/published/failed
   attempts INT DEFAULT 0, error_message TEXT,
   published_by INT, created_at TIMESTAMPTZ DEFAULT now(), published_at TIMESTAMPTZ,
-  UNIQUE(model_ref, tag)                     -- P1 errata：按 tag 唯一，fp16 才能单独上传
+  UNIQUE(model_ref, tag)                     -- P1 errata：按 tag 唯一，fp16 才能单独发布
 );
 ```
 
@@ -407,17 +406,10 @@ CREATE TABLE aoi_audit.audit_log (
 | `POST /jobs` | training.create | `{dataset_version, framework:"yolo", preset:{...}}` → `{job_id}` |
 | `GET /jobs/{id}` / `POST /jobs/{id}/cancel` | training.view/cancel | 状态/指标/取消 |
 | `GET /jobs/{id}/progress` | training.view | **SSE**：`{phase, epoch, total, loss, metrics}`，`phase ∈ {training,evaluating,exporting,finished,failed}` |
-| `GET /models?lifecycle=&task_type=` | training.view | 注册表：`[{id, version, framework, task_type, dataset_version, class_names, cover_classes, precision, weights_key, eval_metrics, gate_status, lifecycle}]`；**同时是前端「选择要上传的模型」的数据源**（见下） |
+| `GET /models?lifecycle=&task_type=` | training.view | 注册表：`[{id, version, framework, task_type, dataset_version, class_names, cover_classes, precision, weights_key, eval_metrics, gate_status, lifecycle}]` |
 | `POST /models/{id}/approve` | training.approve | `{decision, note}` → `lifecycle=approved` |
-| `POST /models/{id}/publish` | training.publish | **对选定的这一个模型上传制品到仓库**（`{precision?:"fp32"}`；跨平台契约 §2.4）→ `{publish_id, status}`；未审批 / 门禁未通过 → `42200` |
-| `GET /models/{id}/publish` | training.view | 上传状态：`{repository, tag, digest, status, attempts, error_message, published_at}` |
-
-**「选择模型上传」的前后端约定**（跨平台契约 §2.4 的入口；由项目负责人 2026-09-11 裁定补充）：
-
-| 侧 | 要求 |
-|---|---|
-| 后端 | 上传必须由**具体 `model.id`** 驱动（一次一个模型），不接受无参批量发布；`GET /models` 支持 `lifecycle`/`gate_status` 过滤，供前端列出**可上传**的模型；同一模型重复上传按 `UNIQUE(model_ref, tag)` 幂等或 `40900`，失败可重推；状态机 `queued → exporting → uploading → published / failed` |
-| 前端（A 侧「训练 → 模型库与发布」页，归 B 交付） | ① 模型列表展示 `version/lifecycle/gate_status/precision/关键指标`，并标注**哪些可上传**（approved + 门禁通过）；② 每行提供「上传到仓库」操作（含精度 fp32/fp16），按钮受 `training.publish` 权限控制；③ 提交前二次确认，明确显示目标仓库与 tag（如 `docker.io/rekal1018/aoi-model:3-yolo-ds1`）；④ 展示 `queued/exporting/uploading/published/failed` 状态、`digest`、错误信息与「重推」入口 |
+| `POST /models/{id}/publish` | training.publish | **构建并推送模型镜像到 registry**（跨平台契约 §2.4）→ `{publish_id, status}` |
+| `GET /models/{id}/publish` | training.view | 发布状态：`{image, tag, digest, status, attempts, error_message, published_at}` |
 
 preset 结构：
 
@@ -500,11 +492,11 @@ A 侧登记：LS 原生 ML 设置页 `MLBackend(url={A}/api/prelabel/{task_id})`
 | `dataset.published` | A | A(worker) | `{dataset_id, version}` |
 | `training.completed` | A | A | `{train_job_id, model_ref, gate_status}` |
 | `model.approved` | A | A（触发发布候选） | `{model_ref}` |
-| `model.published` | A | A（审计） | `{model_ref, repository, tag, digest}` |
+| `model.published` | A | A（审计） | `{model_ref, image, tag, digest}` |
 | `review.finalized` | A | A（统计） | `{fact_id, workitem_id, verdict}` |
 | `feedback.suggested` | A | A（统计） | `{rule_code, count}` |
 
-> 平台 B **不接 Redis**，不消费/生产事件；跨平台交互只走制品仓库（A 上传 / B 下载）与错图回传（B→A）。
+> 平台 B **不接 Redis**，不消费/生产事件；跨平台交互只走镜像仓库（A→B）与错图回传（B→A）。
 
 ### 5.2 Celery 队列
 
@@ -512,7 +504,7 @@ A 侧登记：LS 原生 ML 设置页 `MLBackend(url={A}/api/prelabel/{task_id})`
 |---|---|---|
 | `training` | YOLO 训练 / ONNX 导出 / 金标准回归 | GPU |
 | `default` | 导入包裹 / 导出 / 统计 | CPU |
-| `publish` | 模型上传（导出产物 + 组装 OCI 制品 + 推送到仓库 + 重试） | CPU + 网络 |
+| `publish` | 模型发布（构建镜像 + docker push + 重试） | CPU + 网络 |
 
 - LS 自带 `django_rq` 仅服务 LS 原生功能，保持不动；**aoi 二开任务统一 Celery**。
 - 任务幂等：`Idempotency-Key` + 状态机 CAS；失败可重试，重试不产生重复副作用。
@@ -526,23 +518,23 @@ A 侧登记：LS 原生 ML 设置页 `MLBackend(url={A}/api/prelabel/{task_id})`
 | LS 原生存储（uploads/data，默认桶 `aoi-images`） | LS 上传/媒体 | LS | A 前端（预签名） |
 | `images/{md5}.jpg` | aoi 原图登记（含 B 回传图片） | A | A |
 | `datasets/exports/{dataset}_{version}.zip` | LS data_export 产物 | A | A |
-| `models/{model_ref}/{precision}/model.onnx` + `.sha256` + `model.yaml` | 模型产物（上传源，含能力描述） | A | A（上传制品时读取） |
+| `models/{model_ref}/{precision}/model.onnx` + `.sha256` + `model.yaml` | 模型产物（发布源，含能力描述） | A | A（构建镜像时读取） |
 | `goldens/goldens.json` + `g001~g003.jpg` | 金标准（A 侧回归用，**不跨机传输**） | A | A |
 | `hv-data/` | 高价值数据桶（二期） | 二期 | 二期 |
 | `tmp/` | 中转 | A | A |
 
 > **D2 实测**：LS 原生上传落 MinIO 私有桶；`/data/...` 需鉴权访问，`AWS_QUERYSTRING_AUTH=False` 时 LS 默认不生成预签名 URL；LS 后端无缩略图端点。预签名 URL 与缩略图由 aoi 导入/下载包裹（D4）补足。
-> 平台 B **不读 A 的 MinIO**：模型由 A 以**制品**（ONNX + `model.yaml`）上传到仓库，B 从仓库下载；图片由 B 回传后由 A 写入 MinIO。
+> 平台 B **不读 A 的 MinIO**：模型由 A 打成镜像推送到 registry，B 从 registry 拉取；图片由 B 回传后由 A 写入 MinIO。
 
 ---
 
-## 7. 模型能力描述与制品上传（A 产出；B 消费）
+## 7. 模型能力描述与镜像发布（A 产出；B 消费）
 
-**A 不再拥有/下发方案模板**：检测模板由 B 在自己的 GUI 里配置（平台 B 契约 §3.3）。A 通过**模型制品**里的 `model.yaml` 给出模型能力与**推荐阈值**；上传哪个模型由 A 侧在模型库中人工选定（§4.2）。
+**A 不再拥有/下发方案模板**：检测模板由 B 在自己的 GUI 里配置（平台 B 契约 §3.3）。A 通过模型镜像里的 `model.yaml` 给出模型能力与**推荐阈值**。
 
 - `model.yaml` 字段与校验规则：见 `跨平台契约_A-B.md` §2.3；
-- 制品内容、制品 manifest/媒体类型、命名与 tag 规范、digest 固定：见 `跨平台契约_A-B.md` §2.1、§2.1.1、§2.2；
-- 上传流程与状态机：见 `跨平台契约_A-B.md` §2.4；A 侧表 `aoi_training.model_publish`（§3.3）。
+- 镜像布局、命名、tag 规范、digest 固定：见 `跨平台契约_A-B.md` §2.1、§2.2；
+- 发布流程与状态机：见 `跨平台契约_A-B.md` §2.4；A 侧表 `aoi_training.model_publish`（§3.3）。
 
 A 侧生成 `model.yaml` 的数据来源（字段级别见跨平台契约 §2.3）：
 
@@ -636,7 +628,7 @@ class RecheckBackend(ABC):
 ### 13.1 契约测试
 
 - `tests/contracts/test_pipeline_core.py`（共享包，A/B 同跑）：切片/合并/三档判定/`load_config`/StubRuntimeModel。
-- `tests/contracts/test_platform_a_api.py`：信封/鉴权/**权限锚点（每视图声明权限点；D2 恒放行，见下）**/导入幂等/训练状态机（approve/publish 门禁与 40401）/**模型上传（model.yaml 生成 + 制品 tag 规范 + `(model_ref, tag)` 唯一）**/`/api/ingest/findings` 幂等（含半写补建）/复审状态机（claim/finalize 并发与低桶强制）。
+- `tests/contracts/test_platform_a_api.py`：信封/鉴权/**权限锚点（每视图声明权限点；D2 恒放行，见下）**/导入幂等/训练状态机（approve/publish 门禁与 40401）/**模型发布（model.yaml 生成 + 镜像 tag 规范 + `(model_ref, tag)` 唯一）**/`/api/ingest/findings` 幂等（含半写补建）/复审状态机（claim/finalize 并发与低桶强制）。
   - **RBAC 覆盖延期（P1 标注）**：三角色矩阵、越权 `40300`、授权缓存失效属 **D4** 交付（`AoiPermission.has_permission` 目前仅要求登录）；D2 只测试"权限锚点已声明 + 匿名 40100"，避免文档声称了不存在的覆盖。
 - fixtures：`detect_result_sample.json`、`findings_ingest_sample.json`、`model_yaml_sample.yaml`、`ml_backend_predict_sample.json`、`goldens.json`。
 - stub 原则：aoi API 在 D3 前全量 stub + OpenAPI。

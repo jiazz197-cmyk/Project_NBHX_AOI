@@ -76,7 +76,7 @@ git diff --name-only 30a7f330d -- \
 - MVP 唯一 `task_type = skillname.SkillName.OBJECT_DETECTION`（`ObjectDetection`）→ LS 控件 `RectangleLabels`；
 - `aoi_training.*.task_type` 一律取 `skillname.SkillName.OBJECT_DETECTION`；
 - **禁止** import 上游 `ml_models.SkillNames`（上游仅 `TextClassification`/`NER`，见 `label_studio/ml_models/models.py`）；
-- `model_ref` 严格格式 `^([0-9]+)-([a-z0-9._-]+)@ds([0-9]+)$`（ASCII；`\d` 的 Unicode 语义禁止）；制品 tag 由 `skillname.image_tag_from_model_ref` 生成（函数名沿用，语义为模型制品 tag）；
+- `model_ref` 严格格式 `^([0-9]+)-([a-z0-9._-]+)@ds([0-9]+)$`（ASCII；`\d` 的 Unicode 语义禁止）；镜像 tag 由 `skillname.image_tag_from_model_ref` 生成；
 - 缺陷 code `^object_fault_type_(0[1-9]|[1-9][0-9])$`（01~99，ASCII），8 色调色板由 `skillname.color_for_index` 提供。
 
 ---
@@ -113,7 +113,7 @@ git diff --name-only 30a7f330d -- \
   fact 已存在但 workitem 缺失（半写/崩溃）时**补建**，不再返回 `workitem_id=null`。
 - ingest 元数据全量校验（类型/枚举/长度/图片字段）→ 42200 + `detail.fields`；单图 >100MB → 40010（不读入内存）。
 - `skillname` 词汇表：`object_fault_type_XX` 限定 ASCII 01~99（`00`、全角/阿拉伯数字一律非法）；
-  `model_ref`/制品 tag 只接受 ASCII 数字。
+  `model_ref`/镜像 tag 只接受 ASCII 数字。
 
 **P1（冻结面上的守卫与状态机）**
 
@@ -173,37 +173,3 @@ LaunchDarkly 旗标；⑥ 没有 `SIMPLE_JWT` 配置，access 生命周期/签�
 aoi 端点与 LS 原生 `/api/current-user/whoami`、登出黑名单、浏览器 session 回归、中间件移除守卫）；
 契约文档 §2.4/§4.0 与 fixture `aoi_api_paths.json`（`d3-20260910`）同步更新。
 `tests/contracts/test_ls_reuse_smoke.py`（需真实 LS 实例）覆盖 `/data/upload` 的 Bearer 下载回归。
-
----
-
-## 文档变更（D3）：模型分发语义修正为「制品上传」（2026-09-11）
-
-**背景**：原契约/计划把模型分发写成「A 把 `/model/*` 打成 `FROM scratch` 单层镜像 → `docker push` → B 拉取镜像层解包」。
-经项目负责人裁定：**A 平台不打包镜像**，而是把训练产出的**模型文件（`model.onnx`）与模型配置文件（`model.yaml`）**以
-**OCI 制品**形式上传到仓库，B 从该仓库下载；且**上传哪个模型由 A 侧在模型库中人工选定**（前后端都要体现）。
-
-**改动（仅文档，代码/stub 的跟进项见下）**：
-
-| 文档 | 改动 |
-|---|---|
-| `docs/contracts/跨平台契约_A-B.md` | §0 链路表与关键约束（新增「上传由 A 侧人工选择」）；§1 协议/超时/大小/凭据/错误码措辞；**§2 重写**：`2.1 制品内容`、**新增 `2.1.1` OCI 制品 manifest 与媒体类型基线**、`2.2 制品命名与标签`（含既有标识符命名沿用说明）、`2.4 上传`（选定模型 → 导出 → 组装制品 → Registry v2 上传）、`2.5 下载`（按媒体类型取 blob，`MODEL_PULL_MODE=oci` 唯一模式，离线包改为制品 tar）；§4 幂等/重试/断连；§5.1 时序图；§6 fixture 说明；页脚变更记录 |
-| `docs/contracts/平台A_接口与数据契约.md` | §0 链路表述；§2.1 术语；§3.2 权限点；§3.3 `model_publish`（状态机改 `queued/exporting/uploading/published/failed`，列 `image` 语义注明）；**§4.2 端点 + 新增「选择模型上传」前后端约定表**；§5.1 事件 payload；§5.2 publish 队列；§6 存储；§7 标题与引用；§13 测试说明 |
-| `docs/contracts/平台B_接口与数据契约.md` | §1 链路/错误码/列注释；**§3.2 模型库改为「从制品仓库下载」**（blobs、离线制品包 tar、`MODEL_PULL_MODE=oci` 唯一）；§7 离线包与 SLA |
-| `docs/MVP开发计划.md` | 摘要/结论速览/里程碑/分工/技术栈/裁剪/TOP9/排期（D2/D3/D7/D9~D11/M1/M2）/风险/变更记录；**D7 明确「模型库中选定模型 → 上传制品」并要求前后端双侧落地** |
-| `docs/P0骨架设计_双平台.md` | 目录树注释、`model_publish` 表状态、A 侧 stub 行为（`POST /publish` 必须带具体 `model.id`）、B 侧 `registry/pull.py`、前端页面、测试清单、空跑验收 ⑧、配置键（`MODEL_PULL_MODE=oci` 唯一） |
-| `docs/双平台架构与拆分方案.md` | 结构性调整说明、结论速览、拆分动因、A/B 职责、部署拓扑图、环境变量表、降级表、数据流、§8.1/§8.2 时序、新旧对照、二期演进 |
-| `docs/README.md`、根 `README.md`、`CHANGES.md` | 架构图、术语表（新增「模型制品」）、目录注释、平台定位与技术栈表述 |
-| `docs/docker-registry-setup.md` | 重写为「模型制品仓库配置」：明确仓库存的是制品而非镜像、A/B 配置均已就位 |
-
-**命名沿用（本期不改，避免破坏共享包签名与既有配置）**：`skillname.image_tag_from_model_ref`、A 侧
-`MODEL_IMAGE_REPO`、`model_publish.image`、`b_model.source_image`、B 侧 `POST /models/pull` 的 `image` 字段——
-语义一律为**制品**。若后续清理命名，走 D9/D15 变更窗口。
-
-**待跟进（D7 前，属「破坏性变更四件套」的 stub/fixture/测试三件）**：
-
-1. A 侧 `ModelPublish.STATUS_*`（现为 `queued/building/pushing/published/failed`）改为 `queued/exporting/uploading/published/failed` + 迁移；
-2. A 侧 `POST /api/train/models/{id}/publish` 补齐 `precision` 入参与「未审批/门禁未过 → 42200」；
-3. A 侧前端「模型库与发布」页的模型选择/二次确认/状态与重推（归 B 交付，D9~D13）；
-4. B 侧 `POST /models/pull` 与 `registry/pull.py` 按媒体类型取 blob（不依赖层顺序）、`MODEL_PULL_MODE` 去掉 `docker` 模式；
-5. `fixtures/model_manifest_sample.json` 按 §2.1.1 媒体类型基线复核（B 侧 fixture）。
-
