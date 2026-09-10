@@ -210,16 +210,19 @@ GET /api/v1/health
 | 方法/路径 | 说明 |
 |---|---|
 | `GET /models` | 本地模型列表：`{model_ref, skillname, precision, sha256, source_image, image_digest, status, classes, received_at}` |
+| `GET /models/remote?refresh=` | **远端可用模型列表（一键拉取的数据源）**：B 用只读凭据调 Registry v2 `GET /tags/list` → `{registry, repository, items:[{tag, model_ref, precision, image, local, local_status?}]}`；`local=true` 表示已在本地；默认短缓存，`refresh=1` 强制刷新；仓库不可达 → `50300` + 原因 |
 | `GET /models/{model_ref}` | 详情（含 `config_json` 原文：类别/推荐阈值/张量契约/预留字段；B 只解析必填字段） |
-| `POST /models/pull` | **从镜像仓库拉取**：`{image: "<registry>/<org>/aoi-model:3-yolo-ds1", digest?: "sha256:..."}` → 拉 manifest/层 → 解包 → 校验 → 注册；返回 `{model_ref, digest, status, classes}` |
+| `POST /models/pull` | **从镜像仓库拉取（一键触发）**：`{image: "<registry>/<org>/aoi-model:3-yolo-ds1", digest?: "sha256:..."}` → 拉 manifest/层 → 解包 → 校验 → 注册；返回 `{model_ref, digest, status, classes}`（异步执行时先返回 `status:"pulling"`） |
 | `POST /models/import` | **离线导入**：multipart 上传 `docker save` 或层 tar → 同样校验/注册 |
 | `POST /models/{model_ref}/preload` | 预加载 ONNX 会话 |
 | `POST /models/{model_ref}/unload` | 卸载（被启用工位模板引用时 → `40900`） |
 | `DELETE /models/{model_ref}` | 删除本地文件与记录（被引用时 → `40900`） |
 
+- **「一键拉取」前端约定**（B 前端「系统 → 模型库」页，A 主笔）：① 打开页面即调 `GET /models/remote` 展示**可拉取列表**（`tag`/`model_ref`/`precision`/是否已在本地）；② 每项一个「拉取」按钮，`local=true` 时置灰显示 `ready`；③ 拉取中显示 `pulling`，完成后刷新本地列表（`GET /models`）；④ 失败显示原因 + 「重试」；⑤ 拉取完成的模型**立即可在工位模板的模型选择项中选到**（§3.3），形成「一键拉取 → 配模板/选模型 → 生效」闭环。
 - 拉取模式：`MODEL_PULL_MODE=oci`（默认，httpx 直连 Registry v2，无需 Docker）或 `docker`（本机 `docker pull` + `docker create` + `docker cp`）。
 - 校验规则与失败语义见跨平台契约 §2.3、§2.5；**可选/预留/未知字段不报错**（预留字段原样保存，B 升级后可直接启用）。
 - 模型只是「能力供给」；**启用与否由工位模板决定**（§3.3）。
+- A 侧对已上传记录的「删除」是**软删**：仓库 tag/digest 不变，本列表与拉取能力不受影响。
 
 ### 3.3 工位、相机与工位模板（B 自管，GUI 编辑）
 

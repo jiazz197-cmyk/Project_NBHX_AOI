@@ -204,8 +204,8 @@ bun install && bun run dev
 
 平台间链路（跨机器，详见 [`docs/contracts/跨平台契约_A-B.md`](docs/contracts/跨平台契约_A-B.md)）：
 
-- **A → 镜像仓库**：`POST /api/train/models/{id}/publish` 构建并推送模型镜像（`/model/model.onnx` + `model.yaml` + `.sha256`）；
-- **镜像仓库 → B**：`POST /api/v1/models/pull` 拉取 manifest/层 → 解包 → sha256 校验 → 解析 `model.yaml` → 注册；
+- **A → 镜像仓库**：在模型库中**勾选模型**（支持多选批量，逐条独立）→ `POST /api/train/models/publish` 构建并推送模型镜像（`/model/model.onnx` + `model.yaml` + `.sha256`）；已上传记录可**下线 / 软删 / 恢复**（软删只清 A 侧记录，仓库镜像保留）；
+- **镜像仓库 → B**：`GET /api/v1/models/remote` 列出远端可用 tag → **一键拉取** → `POST /api/v1/models/pull` 拉 manifest/层 → 解包 → sha256 校验 → 解析 `model.yaml` → 注册；
 - **B → A**：错图回传（`POST /api/ingest/findings`，仅可疑图/坏图，outbox 重试）。
 - **A 从不主动连接 B**：无实例管理、无心跳、无方案下发。
 

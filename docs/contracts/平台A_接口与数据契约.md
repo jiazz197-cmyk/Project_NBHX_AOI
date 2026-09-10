@@ -281,6 +281,8 @@ CREATE TABLE aoi_training.model_publish (    -- 模型发布到镜像仓库（A�
   digest VARCHAR(128),                       -- sha256:...
   status VARCHAR(16) DEFAULT 'queued',       -- queued/building/pushing/published/failed
   attempts INT DEFAULT 0, error_message TEXT,
+  deleted_at TIMESTAMPTZ,                    -- 软删标记（仅 A 侧记录；**仓库镜像保留**，B 仍可拉取）
+  deleted_by INT,                            -- 删除人（仅管理员/超管，见 §4.2）
   published_by INT, created_at TIMESTAMPTZ DEFAULT now(), published_at TIMESTAMPTZ,
   UNIQUE(model_ref, tag)                     -- P1 errata：按 tag 唯一，fp16 才能单独发布
 );
@@ -406,10 +408,24 @@ CREATE TABLE aoi_audit.audit_log (
 | `POST /jobs` | training.create | `{dataset_version, framework:"yolo", preset:{...}}` → `{job_id}` |
 | `GET /jobs/{id}` / `POST /jobs/{id}/cancel` | training.view/cancel | 状态/指标/取消 |
 | `GET /jobs/{id}/progress` | training.view | **SSE**：`{phase, epoch, total, loss, metrics}`，`phase ∈ {training,evaluating,exporting,finished,failed}` |
-| `GET /models?lifecycle=&task_type=` | training.view | 注册表：`[{id, version, framework, task_type, dataset_version, class_names, cover_classes, precision, weights_key, eval_metrics, gate_status, lifecycle}]` |
+| `GET /models?lifecycle=&task_type=` | training.view | 注册表：`[{id, version, framework, task_type, dataset_version, class_names, cover_classes, precision, weights_key, eval_metrics, gate_status, lifecycle}]`；**同时是前端「选择要上传的模型」的数据源** |
 | `POST /models/{id}/approve` | training.approve | `{decision, note}` → `lifecycle=approved` |
-| `POST /models/{id}/publish` | training.publish | **构建并推送模型镜像到 registry**（跨平台契约 §2.4）→ `{publish_id, status}` |
+| `POST /models/{id}/retire` | training.publish | 下线：`lifecycle=retired`（**删除已上传记录的前置条件**，见下） → `{id, lifecycle}` |
+| `POST /models/{id}/publish` | training.publish | **对单个模型**构建并推送镜像到 registry（跨平台契约 §2.4）→ `{publish_id, status}` |
+| `POST /models/publish` | training.publish | **批量上传**：`{model_ids:[...], precision?:"fp32"}` → **逐条独立执行**，返回 `{results:[{model_id, publish_id?, status, error?}]}`；某条失败（未审批/门禁未过/同 tag 已发布）不影响其余条目 |
 | `GET /models/{id}/publish` | training.view | 发布状态：`{image, tag, digest, status, attempts, error_message, published_at}` |
+| `GET /publishes?include_deleted=&model_ref=&status=` | training.view | **已上传模型列表**（跨模型）：`[{publish_id, model_id, model_ref, image, tag, digest, status, deleted_at, published_at, published_by}]`；默认隐藏已删除项 |
+| `POST /publishes/{id}/delete` | training.publish | **软删已上传记录**（仅管理员/超管）：要求该模型 `lifecycle=retired`，否则 `40900`；**只删 A 侧记录，仓库镜像保留**（B 仍可拉取/回滚） |
+| `POST /publishes/{id}/restore` | training.publish | **恢复/重新上线**：清空 `deleted_at` 并将 `lifecycle` 置回 `published`（仓库镜像仍在，恢复零成本） |
+
+**「选择上传」与「已上传模型管理」的前后端约定**（跨平台契约 §2.4；项目负责人 2026-09-11 裁定）：
+
+| 侧 | 要求 |
+|---|---|
+| 后端 | ① 上传由**人工选择**驱动，支持多选批量（`POST /models/publish`），**逐条独立**处理并返回每条结果，不做整批回滚；② 删除为**软删**（`deleted_at`/`deleted_by`，保留审计），**绝不动仓库镜像**；③ 删除前置校验 `lifecycle=retired`，未下线一律 `40900` 并提示先下线；④ 删除/恢复**仅管理员与超级管理员**（复用 `training.publish` 权限点）；⑤ 恢复后 `lifecycle` 回 `published` |
+| 前端（A 侧「训练 → 模型库与发布」页，归 B 交付） | ① 模型列表（`GET /models`）支持**多选 + 「批量上传」**，逐条展示上传结果与失败原因，失败项可单独重推；② 独立「已上传」区展示 `image/tag/digest/status/published_at` 与删除态筛选；③ 每行提供「下线」「删除」「恢复」，删除需二次确认；模型未 `retired` 时删除按钮禁用并提示「请先下线」；④ 删除确认文案明确「仅移除 A 侧记录，仓库镜像保留、B 仍可拉取」；⑤ 全部操作受 `training.publish` 权限控制 |
+
+> **不做「该模型是否已被产线使用」的展示**：A 从不主动连接 B、不做心跳/回执，A 侧只呈现自己的上传状态（`image/tag/digest/status`）。
 
 preset 结构：
 
@@ -469,7 +485,7 @@ A 侧登记：LS 原生 ML 设置页 `MLBackend(url={A}/api/prelabel/{task_id})`
 
 | 方法/路径 | 权限 | 说明 |
 |---|---|---|
-| `GET /audit` | system.audit（super_admin） | 审计查询（角色/授权、模型发布、训练、导出等关键操作） |
+| `GET /audit` | system.audit（super_admin） | 审计查询（角色/授权、模型发布/下线/删除/恢复、训练、导出等关键操作） |
 
 ### 4.6 跨平台接收域 `/api/ingest`（内部头）
 
@@ -628,7 +644,7 @@ class RecheckBackend(ABC):
 ### 13.1 契约测试
 
 - `tests/contracts/test_pipeline_core.py`（共享包，A/B 同跑）：切片/合并/三档判定/`load_config`/StubRuntimeModel。
-- `tests/contracts/test_platform_a_api.py`：信封/鉴权/**权限锚点（每视图声明权限点；D2 恒放行，见下）**/导入幂等/训练状态机（approve/publish 门禁与 40401）/**模型发布（model.yaml 生成 + 镜像 tag 规范 + `(model_ref, tag)` 唯一）**/`/api/ingest/findings` 幂等（含半写补建）/复审状态机（claim/finalize 并发与低桶强制）。
+- `tests/contracts/test_platform_a_api.py`：信封/鉴权/**权限锚点（每视图声明权限点；D2 恒放行，见下）**/导入幂等/训练状态机（approve/publish 门禁与 40401）/**模型发布（model.yaml 生成 + 镜像 tag 规范 + `(model_ref, tag)` 唯一 + 批量上传逐条独立 + 未 `retired` 删除 → 40900 + 软删不删仓库镜像 + 恢复回 published）**/`/api/ingest/findings` 幂等（含半写补建）/复审状态机（claim/finalize 并发与低桶强制）。
   - **RBAC 覆盖延期（P1 标注）**：三角色矩阵、越权 `40300`、授权缓存失效属 **D4** 交付（`AoiPermission.has_permission` 目前仅要求登录）；D2 只测试"权限锚点已声明 + 匿名 40100"，避免文档声称了不存在的覆盖。
 - fixtures：`detect_result_sample.json`、`findings_ingest_sample.json`、`model_yaml_sample.yaml`、`ml_backend_predict_sample.json`、`goldens.json`。
 - stub 原则：aoi API 在 D3 前全量 stub + OpenAPI。
