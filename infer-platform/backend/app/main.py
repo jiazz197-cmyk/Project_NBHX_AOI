@@ -14,6 +14,7 @@ from .api import health, inspect, models, records, reports, stations, stats, sys
 from .config import get_settings
 from .db import init_db
 from .envelope import new_request_id, register_exception_handlers
+from . import scheduler
 
 
 @asynccontextmanager
@@ -21,7 +22,9 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     Path(settings.DATA_DIR).mkdir(parents=True, exist_ok=True)
     init_db()
+    scheduler.start()
     yield
+    scheduler.shutdown()
 
 
 def create_app() -> FastAPI:
