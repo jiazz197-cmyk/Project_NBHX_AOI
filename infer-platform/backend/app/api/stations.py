@@ -6,6 +6,7 @@ import json
 import time
 from typing import Any
 
+import yaml
 from fastapi import APIRouter, Body, Depends
 from fastapi.responses import Response
 
@@ -144,14 +145,49 @@ def snapshot_station(code: str, request_id: str = Depends(get_request_id)) -> Re
     return Response(content=image_bytes, media_type="image/jpeg")
 
 
+def _build_suggest() -> dict[str, Any] | None:
+    """未配置模板时的建议默认值（取自首个 ready 模型的推荐阈值，契约 §3.3）。"""
+    models = [m for m in store_models.list_models() if m["status"] in ("ready", "active")]
+    if not models:
+        return None
+    row = models[0]
+    try:
+        config = yaml.safe_load(row["config_json"])
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(config, dict):
+        return None
+    classes = config.get("classes") or []
+    objects = []
+    for i, cls in enumerate(classes):
+        rec = cls.get("recommended") or {}
+        objects.append({
+            "code": cls.get("code"),
+            "class_map": {str(cls.get("index", i)): cls.get("code")},
+            "thresholds": {
+                "recheck_min": rec.get("recheck_min", 0.5),
+                "auto_min": rec.get("auto_min", 0.9),
+            },
+            "risk_level": cls.get("risk_level", 1),
+        })
+    tiling = config.get("tiling") or {}
+    return {
+        "model_ref": row["model_ref"],
+        "skillname": row["skillname"],
+        "tile_size": tiling.get("recommended_tile_size", 1280),
+        "overlap": tiling.get("overlap", 0.2),
+        "objects": objects,
+    }
+
+
 @router.get("/stations/{code}/template")
 def get_template(code: str, request_id: str = Depends(get_request_id)) -> dict[str, Any]:
     row = store_models.get_station(code)
     if row is None:
         raise BizError(404, CODE_NOT_FOUND, "资源不存在")
     if not row.get("template_json"):
-        return ok(None, request_id)
-    return ok(json.loads(row["template_json"]), request_id)
+        return ok({"template": None, "suggest": _build_suggest()}, request_id)
+    return ok({"template": json.loads(row["template_json"]), "suggest": None}, request_id)
 
 
 def _validate_template(payload: dict[str, Any]) -> None:
