@@ -280,9 +280,14 @@ extensions: {}                    # 任意扩展字段；B 原样保存、不解
 
 ### 2.4 发布（A → 镜像仓库）
 
+**触发方式：由 A 侧管理员在「训练 → 模型库」中人工勾选模型后上传**（支持多选批量；不是"审批通过即自动发布"）：
+
 ```
-1. 模型 lifecycle=approved 且金标准回归通过
-2. POST /api/train/models/{id}/publish  → Celery publish 任务
+1. 模型 lifecycle=approved 且金标准回归通过（这是"可上传"资格，不等于自动上传）
+2. 管理员在模型库中勾选一个或多个模型 → 批量上传
+   POST /api/train/models/publish {"model_ids":[...], "precision"?:"fp32"}
+   （单模型亦可 POST /api/train/models/{id}/publish）
+   → 逐条独立执行：某条失败不影响其余，返回每条结果（成功 publish_id / 失败原因）
 3. 生成 model.yaml（含 onnx.sha256）→ 构建镜像（FROM scratch + COPY /model/*）
 4. docker build -t <registry>/<org>/aoi-model:<tag> .
 5. docker push
@@ -294,22 +299,39 @@ extensions: {}                    # 任意扩展字段；B 原样保存、不解
 - 发布失败（网络/鉴权/磁盘）：`model_publish.status=failed` + `error_message`，指数退避重试 3 次（30s / 2m / 10m），可人工重推。
 - A 侧记录 digest；B 拉取后回报的 digest 若不一致，视为仓库被篡改并告警。
 
+**已上传模型的管理（A 侧）**：
+
+| 操作 | 规则 |
+|---|---|
+| 查看 | `GET /api/train/publishes` 列出已上传记录（`image/tag/digest/status/published_at`），默认隐藏已删除项 |
+| 下线 | `POST /api/train/models/{id}/retire` → `lifecycle=retired`，**这是删除的前置条件** |
+| 删除 | `POST /api/train/publishes/{id}/delete`：仅管理员/超管；要求该模型已 `retired`（否则 `40900`）；**只软删 A 侧记录（`deleted_at`），仓库镜像与 tag 一律保留**——B 仍可正常拉取与回滚 |
+| 恢复 | `POST /api/train/publishes/{id}/restore`：清空软删标记并把 `lifecycle` 置回 `published`（仓库镜像仍在，恢复零成本） |
+
+> A 侧"删除"**不影响跨平台可用性**：镜像不可变语义（§2.2）与 digest 记录保持不变；仓库中镜像的物理清理不在 MVP 范围内，需人工执行。
+
 ### 2.5 拉取（镜像仓库 → B）
 
+**触发方式：B 侧「系统 → 模型库」一键拉取**——先列出仓库可用 tag 供选择，再一键下载（不需要人工拼镜像地址）：
+
 ```
-1. 运维在 B 的「系统 → 模型库」输入镜像地址（或从 tag 列表选择）
-2. POST {B}/api/v1/models/pull {"image": "<registry>/<org>/aoi-model:3-yolo-ds1", "digest": "sha256:..."}
-3. B 取 registry token（若需要）→ GET manifest → 校验 digest（若给定）
-4. GET 层 blob → gunzip + untar → 提取 /model/*
-5. 校验 model.onnx sha256（§2.3 规则 4）→ 解析 model.yaml → 执行 §2.3 全部校验
-6. 落盘 /data/models/{model_ref}/{precision}/ → 注册 b_model + 刷新 b_defect_class
-7. → {"code":0,"data":{"model_ref":"3-yolo@ds1","digest":"sha256:...","status":"ready","classes":2}}
+1. GET {B}/api/v1/models/remote  → B 用只读凭据调 Registry v2 GET /tags/list
+   返回可拉取列表：[{tag, model_ref, precision, local: true|false}]（local=已在本地模型库）
+2. 运维在列表中点「拉取」（一键触发）
+3. POST {B}/api/v1/models/pull {"image": "<registry>/<org>/aoi-model:3-yolo-ds1", "digest"?:"sha256:..."}
+4. B 取 registry token（若需要）→ GET manifest → 校验 digest（若给定）
+5. GET 层 blob → gunzip + untar → 提取 /model/*
+6. 校验 model.onnx sha256（§2.3 规则 4）→ 解析 model.yaml → 执行 §2.3 全部校验
+7. 落盘 /data/models/{model_ref}/{precision}/ → 注册 b_model + 刷新 b_defect_class
+8. → {"code":0,"data":{"model_ref":"3-yolo@ds1","digest":"sha256:...","status":"ready","classes":2}}
 ```
 
+- **一键拉取的落地要求**：B 前端「系统 → 模型库」页需提供 ①**远端可用模型列表**（`GET /models/remote`，可带 `?refresh=1` 跳过缓存）；②每项「拉取」按钮（已在本地时置灰并显示 `ready`）；③拉取中状态（`pulling`）与失败原因；④下载完成后该模型**立即出现在工位模板的模型选择项中**（模板编辑见平台 B 契约 §3.3），形成「拉取 → 配模板/选模型 → 生效」闭环。
 - **幂等**：同 `model_ref` + 同 digest → 直接返回 `ready`（不重复下载）；同 `model_ref` 不同 digest → `40900`（需先删除旧版本）。
 - **失败**：不写半成品（临时目录 + 原子 rename）；已有模型不受影响；错误与重试次数记录在模型库页。
 - **无 Docker 依赖**：默认 `MODEL_PULL_MODE=oci`，用 httpx 直接走 Registry v2 API；本机有 Docker 时可切 `docker` 模式（`docker pull` + `docker create` + `docker cp`）。
 - **离线导入**：A 侧 `docker save` 或层 tar → B 的 `POST /api/v1/models/import`（multipart 上传 tar）→ 走同样的校验/注册流程。
+- **不受 A 侧软删影响**：A 的"删除"只针对自己的管理记录，仓库 tag/digest 不变，B 的可用 tag 列表与拉取能力不受影响。
 
 ### 2.6 版本兼容
 
@@ -472,10 +494,11 @@ A（训练平台）                镜像仓库                    B（推理平
 
 契约测试（`tests/contracts/test_cross_platform.py`）：
 
-1. 模型发布：同 tag 不同 digest 禁止覆盖；`model.yaml` 与权重 sha256 一致。
-2. 模型拉取：digest 校验、幂等（同 digest 直接 ready）、坏层 → `40010`、非法 `model.yaml` → `42200`。
-3. 错图回传：重复请求 → `duplicated=true` 且 id 一致；坏图无图 → 成功；未知工位（A 侧无工位主数据）→ 正常接收；suspicious 图不可解码 → `40010`。
-4. 认证：registry 凭据错误 → `40100`；回传缺 `X-Internal-Token` → `40100`。
+1. 模型发布：同 tag 不同 digest 禁止覆盖；`model.yaml` 与权重 sha256 一致；**批量上传逐条独立**（含部分失败结果）。
+2. 模型拉取：digest 校验、幂等（同 digest 直接 ready）、坏层 → `40010`、非法 `model.yaml` → `42200`；**远端 tag 列表（`GET /models/remote`）与 `local` 标记**。
+3. A 侧已上传管理（平台 A 契约测试覆盖）：未 `retired` 删除 → `40900`；软删后仓库 tag 仍可拉取；`restore` 后 `lifecycle=published`。
+4. 错图回传：重复请求 → `duplicated=true` 且 id 一致；坏图无图 → 成功；未知工位（A 侧无工位主数据）→ 正常接收；suspicious 图不可解码 → `40010`。
+5. 认证：registry 凭据错误 → `40100`；回传缺 `X-Internal-Token` → `40100`。
 5. 版本兼容：`schema_version` 未知 / `skillname` 主版本不兼容 → 拒绝。
 
 ---

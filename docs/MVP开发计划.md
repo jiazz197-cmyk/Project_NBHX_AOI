@@ -11,8 +11,8 @@
 
 | 项 | 结论 |
 |---|---|
-| 平台形态 | A = LS 1.x 二开（数据/标注/预标/训练/**模型发布**；账户复用 LS、**RBAC 自研**）；B = FastAPI + SQLite + 独立 React 前端（**拉模型/工位模板/推理/统计/日报/回传**；无 RBAC、无用户认证、无 Redis/Celery/MinIO） |
-| 模型分发 | A 把 `/model/{model.onnx, model.onnx.sha256, model.yaml}`（**权重 + 能力描述，同版本**）打成 `FROM scratch` 镜像 `docker push` 到 registry；B 用 Registry v2 API 拉取并校验；**无 A→B 直连、无实例管理、无心跳** |
+| 平台形态 | A = LS 1.x 二开（数据/标注/预标/训练/**模型发布（勾选模型上传 + 已上传管理/软删）**；账户复用 LS、**RBAC 自研**）；B = FastAPI + SQLite + 独立 React 前端（**一键拉取模型/工位模板/推理/统计/日报/回传**；无 RBAC、无用户认证、无 Redis/Celery/MinIO） |
+| 模型分发 | A 把 `/model/{model.onnx, model.onnx.sha256, model.yaml}`（**权重 + 能力描述，同版本**）打成 `FROM scratch` 镜像 `docker push` 到 registry——**上传哪些模型由管理员在模型库中勾选决定**，已上传记录可下线/软删/恢复；B 用 Registry v2 API **列远端 tag + 一键拉取**并校验；**无 A→B 直连、无实例管理、无心跳** |
 | 工位与模板 | **全部由 B 自管**（工位/相机/工位模板，GUI 编辑）；A 不持有工位主数据，只在 `model.yaml` 给推荐阈值 |
 | 工时 | 3×22 = 66 人日；五条主线保留；两个前端各自独立开发（**平台 A 前端＝B，平台 B 前端＝A**）；A 侧报告最后做、可砍 |
 | 里程碑 | M1(D8) 发布镜像→B 拉取→配模板→假图推理→错图回传→A 建复审项；M2(D14) 标注→首轮训练→审批→发布→拉取→模板→推理→回传→**预标→三桶→复审**→回流；M3(D19) **预标三桶闭环（含落版）** + 真机 1 路 + 8 路仿真 + 日报 + 双机离线包；M4(D22) 验收 |
@@ -32,7 +32,7 @@
 1. **D1~3：训练域数据基座前置**——`aoi_training` 四表迁移（`train_job`/`base_model`/`model`/`preset`）+ `skillname` 枚举裁定落地 + `/api/train/base-models|models|jobs` stub；`model` 表含 `task_type`/`cover_classes`。
 2. D1~4：LS fork 仓库骨架（锁 tag、上游模块只读、`label_studio/aoi/` 二开 app、Menubar 占位）+ 契约/stub 先行（aoi API 全量 stub + OpenAPI、共享表迁移、label config 生成）+ D4~5 **A 侧前端素材更换**（公司 logo/名称/描述，去除 LS 吉祥物与登录页署名）。**A 侧前端页面（数据集/训练（含模型库与发布）/复审/系统）归 B**：按页随对应后端同期交付（D4~D7 数据集/复审骨架、D9~D13 训练/模型库、D13~D15 复审三桶页）。
 3. D4~7：**自研 RBAC 三角色**（角色/权限点/授权表 + DRF 权限类；LS 原生角色框架不可用）+ 图片标注（配置 LS 项目/Review 流）+ 缺陷字典 + 导入包裹（复用 LS 上传）+ **错图接收端点 `/api/ingest/findings`**。
-4. D9~12：训练链（数据集版本/划分/红线、LS data_export 包裹、训练执行流 + 门禁 + 金标准 + ONNX 导出、模型注册与审批）+ **模型发布服务**（`/model/{model.onnx, model.onnx.sha256, model.yaml}` → `FROM scratch` 单层镜像 → `docker push`；契约 §2.1/§2.4）。
+4. D9~12：训练链（数据集版本/划分/红线、LS data_export 包裹、训练执行流 + 门禁 + 金标准 + ONNX 导出、模型注册与审批）+ **模型发布服务**（`/model/{model.onnx, model.onnx.sha256, model.yaml}` → `FROM scratch` 单层镜像 → `docker push`；契约 §2.1/§2.4）+ **已上传模型管理**（列表 / 下线 / 软删 / 恢复；仅管理员与超管，删除仅清 A 侧记录、仓库镜像保留）。
 5. **D12~13（先）：预标**——D12 预标任务 + **A 侧自实现 LS ML backend 协议**（D2 fixture 先行，D12 ONNX 导出后接真模型）；D13 预标真推理（`pipeline-core` + ONNX Runtime，跑 worker-gpu）+ **三桶路由**（`verdict → bucket → review_workitem`，高桶自动转 annotation）。
 6. **D13~15（后）：复审**——三桶人工复审（认领/终裁/低桶强制编辑）+ 错图终裁 + 建议清单（R1~R4）/坏图（D13~D14，M2 走通）；D15 批量复审完善 + 数据集落版校验（全部 workitem finalized、低桶已重标 → `phase=published`）。
 7. D16：预标阈值调优 + 预标批量压测（真实规模）+ 与 C 对齐 `pipeline-core` 判定语义（边界用例）。
@@ -43,7 +43,7 @@
 2. **平台 B 骨架**（D1~3）：FastAPI + SQLite + APScheduler + 静态前端托管 + 全量端点 stub。
 3. **相机链路推理**（D4~8）：ONNX Runtime 适配器 + `pipeline-core.run` + `/api/v1/inspect/image` + 检测记录落库。
 4. **错图回传**（D6~8）：outbox + 重试 + 断点补传，打通 A 的 `/api/ingest/findings`。
-5. **模型拉取与工位模板**（D9~12）：Registry v2 拉取（manifest/层解包/sha256/`model.yaml` 校验）+ 工位模板校验/热加载/加载自检。
+5. **模型拉取与工位模板**（D9~12）：Registry v2 拉取（manifest/层解包/sha256/`model.yaml` 校验）+ **远端可用 tag 列表**（`GET /tags/list`）与**一键拉取** + 工位模板校验/热加载/加载自检。
 6. **统计与日报**（D15~18）：错图统计、信息统计、日报生成与导出。
 7. **真实相机 1 路 + 8 通道仿真**（D17~18）；B 侧运维（保留策略/磁盘水位/日志轮转/备份）。
 
@@ -111,8 +111,8 @@
 
 ### 2.2 二开增量（真正要写的代码）
 
-- **`label_studio/aoi/` 七个二开 app（四个业务新域 + 三个支撑 app）**：业务新域 datasets（字典/版本/划分红线/导入包裹）、prelabel（预标 + ML backend 协议）、training（任务/门禁/注册/**发布**）、review（工作项/终裁/建议/坏图 + 错图接收）；支撑 app core（**自研 RBAC**/公共）、audit（审计）、reports（可选）。
-- **A 侧前端页面**（**B 主笔**，D2 确认，不归 A）：数据集、训练（含模型库与发布）、复审、系统（用户/角色/审计）（复用 LS 组件库）+ 素材更换（公司 logo/名称/描述，去除 LS 吉祥物）。
+- **`label_studio/aoi/` 七个二开 app（四个业务新域 + 三个支撑 app）**：业务新域 datasets（字典/版本/划分红线/导入包裹）、prelabel（预标 + ML backend 协议）、training（任务/门禁/注册/**发布 + 已上传管理（下线/软删/恢复）**）、review（工作项/终裁/建议/坏图 + 错图接收）；支撑 app core（**自研 RBAC**/公共）、audit（审计）、reports（可选）。
+- **A 侧前端页面**（**B 主笔**，D2 确认，不归 A）：数据集、训练（含模型库与发布：**模型列表多选批量上传 + 已上传记录管理**）、复审、系统（用户/角色/审计）（复用 LS 组件库）+ 素材更换（公司 logo/名称/描述，去除 LS 吉祥物）。
 - **workers**：Celery 训练/导入/模型发布任务。
 - **A 侧预标推理**：`pipeline-core` + ONNX Runtime，跑在 worker-gpu。
 
@@ -137,6 +137,8 @@
 |---|---|
 | 平台拆分 | A 数据/标注/预标/训练/发布；B 拉模型/配工位模板/推理/统计/日报/回传；跨机器，不共享数据库/对象存储 |
 | 模型分发 | **只走镜像仓库**；不做 A→B 直连、不做分片上传/断点续传、不做实例注册与心跳 |
+| 已上传模型的删除 | **只软删 A 侧记录**（`deleted_at` + 审计，仓库镜像保留、B 仍可拉取）；**仓库镜像的物理清理不入 MVP**（人工执行）；删除前必须先下线（`lifecycle=retired`），仅管理员/超管可操作，支持恢复 |
+| B 侧拉取入口 | **列远端 tag + 一键拉取**（只读凭据调 Registry v2 `GET /tags/list`）；不做镜像仓库的目录/搜索、不做断点续传、不做拉取进度百分比（只做 `pulling`/成功/失败三态） |
 | 工位与工位模板 | **B 自管**（GUI 编辑）；A 不持有工位主数据，只在 `model.yaml` 给推荐阈值 |
 | B 的 RBAC / 用户认证 | **都不做**；无用户体系、无登录、无用户认证；靠内网隔离 |
 | B 的基础设施 | **不做** Redis/Celery/MinIO/Nginx（可选）/K8s/Docker daemon（可选）；SQLite + 本地磁盘 + 单进程 |
@@ -200,7 +202,7 @@
 | D4 | 数据整理工具；B 前端「概览」页骨架 | **自研 RBAC 三角色**（角色/权限点/授权表 + DRF 权限类）；LS 项目模板配置；**前端素材更换起步** | `pipeline-core` 切片/NMS 真逻辑；ONNX Runtime 适配器；B 检测记录落库 |
 | D5 | 假数据生成（OK + 缺陷图）；B 前端「检测记录」页 | 缺陷字典 + label config 生成 + 导入包裹（复用 LS 上传）；**前端素材更换完成**；A 侧前端「数据集」页 | `/api/v1/inspect/image` 完整链路；单图推理 + 三档判定；B 记录查询接口 |
 | D6 | 节拍模拟器（打 B 的 `/api/v1/inspect/image`） | 标注项目创建 + Review 流配置验证；**`/api/ingest/findings` 完整实现（图片落 MinIO + fact + workitem/bad_image）**；A 侧前端「复审」页骨架 | 相机适配器壳（DirectorySource）+ 坏图登记 + outbox 回传真实打通 |
-| D7 | 双机联调 + 离线包初版；B 前端「工位与相机」页 | **模型发布服务真实推送**（`/model/{model.onnx, model.onnx.sha256, model.yaml}` → `FROM scratch` 单层镜像 → `docker push` → 写 `model_publish{image,tag,digest,status}`；权重先用基模导出的占位 ONNX，D12 真模型复用同一条流水线，**不得只发 `model.yaml`**）；A 侧前端「训练」页骨架 | **B 模型拉取真实打通**（Registry v2 manifest/层解包/校验/注册）；B 前端联调 |
+| D7 | 双机联调 + 离线包初版；B 前端「工位与相机」页 | **模型发布服务真实推送**（在模型库中**勾选模型**（支持多选批量，逐条独立）→ `/model/{model.onnx, model.onnx.sha256, model.yaml}` → `FROM scratch` 单层镜像 → `docker push` → 写 `model_publish{image,tag,digest,status}`；权重先用基模导出的占位 ONNX，D12 真模型复用同一条流水线，**不得只发 `model.yaml`**）；**已上传记录的下线/软删/恢复后端**（软删只清 A 侧记录，仓库镜像保留）；A 侧前端「训练」页骨架 | **B 模型拉取真实打通**（Registry v2 manifest/层解包/校验/注册）+ **远端可用 tag 列表与一键拉取**；B 前端联调 |
 | D8 | **M1 联调** + B 前端「系统」页 | **M1 联调**（复审工作项可见） | **M1 联调**（端到端稳定） |
 | **M1** | A 发布镜像 → B 拉取 → 配一个工位模板 → 假图按节拍推理 → 三档判定 → 错图回传 → A 建复审工作项；B 概览页可见统计；界面为公司 logo/平台描述、无 LS 吉祥物 | | |
 
@@ -208,8 +210,8 @@
 
 | 天 | A | B | C |
 |---|---|---|---|
-| D9 | 缺陷样本补充；B 前端「日报」页骨架 | 数据集版本/划分/测试集红线；发布流程完善（重试/失败重推） | **工位模板 GUI 校验与热加载**（`load_config` 边界用例） |
-| D10 | 万级导入压测；B 前端图表联调 | LS data_export 包裹（YOLO 导出 + 红线校验）；A 侧前端「模型库」页 | B 多模型按对象分发 + 模型库页（拉取/导入/删除） |
+| D9 | 缺陷样本补充；B 前端「日报」页骨架 | 数据集版本/划分/测试集红线；发布流程完善（重试/失败重推、批量逐条结果展示） | **工位模板 GUI 校验与热加载**（`load_config` 边界用例） |
+| D10 | 万级导入压测；B 前端图表联调 | LS data_export 包裹（YOLO 导出 + 红线校验）；A 侧前端「模型库」页（**多选批量上传 + 已上传管理：下线/删除/恢复**） | B 多模型按对象分发 + 模型库页（**远端列表 + 一键拉取**/导入/删除） |
 | D11 | 交付包完善（权重/字体/双平台镜像/离线模型镜像） | YOLO adapter + 训练执行流 + 训练进度 SSE + 发布前置（金标准/审批） | B 加载自检（张量匹配 + 空跑）+ 预加载/卸载 |
 | D12 | 自检脚本；B 前端「模型库」区 | 门禁 + 金标准回归 + ONNX 导出 + 模型 lifecycle + 审批流；**预标任务 + A 侧 ML backend 协议端点**（fixture 先行，导出后接真模型） | B 磁盘保留策略 + 清理任务 + 磁盘水位告警 |
 | D13 | 备份脚本 | **预标真推理（`pipeline-core` + ONNX Runtime，worker-gpu）+ 三桶路由**（高桶自动转 annotation + auto-finalized 记录；中/低桶生成 `review_workitem`，低桶 `forced=true`）；**三桶人工复审队列**（认领/终裁/低桶强制编辑）；A 侧前端「复审」三桶页（红/黄/绿） | B 检测记录/错图统计接口完善 |
@@ -243,6 +245,7 @@
 | 风险 | 应对 |
 |---|---|
 | 镜像仓库不可达/限流/凭据失效 | B 用本地已有模型继续推理；A 侧发布失败可重推；离线包（`docker save`/层 tar）人工导入；必要时切内网 registry |
+| 模型上传/删除误操作 | 上传由管理员勾选触发（非自动），失败可重推；删除为**软删 + 审计 + 可恢复**且要求先下线；仓库镜像不删，误删不影响 B 拉取 |
 | 私有仓库拉取凭据泄漏 | B 只配只读 token；token 存环境变量不落库；定期轮换 |
 | 两平台契约漂移（`skillname`/`pipeline-core`/`model.yaml`） | 公共包语义化版本 + `model.yaml.schema_version`；双端契约测试挂 CI；D2 冻结、D9/D15 窗口 |
 | B 侧被做重（引入 Redis/Celery/MinIO/Docker daemon） | 轻量化硬约束进评审红线；B 的依赖清单由 C 维护、A 在交付包中校验 |
@@ -264,3 +267,5 @@
 *随开发维护：D2/D9/D15 评审；契约变更同步 `docs/contracts/` 与 `docs/P0骨架设计_双平台.md`。*
 
 *2026-09-10 调整：① 预标提前到 D12~13（**先于复审**），三桶人工复审 D13~15；② 平台 A 前端归属 **B**（与 `docs/P0骨架设计_双平台.md` §2.2、`docs/设计_预标三桶复审流程.md` §7 一致）；③ 模型发布镜像内容按跨平台契约 §2.1 明确为 `/model/{model.onnx, model.onnx.sha256, model.yaml}`（不是只放 `model.yaml`）。*
+
+*2026-09-11 补充（项目负责人裁定，镜像分发机制不变）：① **A 侧上传由管理员在模型库中勾选决定**（支持多选批量，`POST /api/train/models/publish`，**逐条独立**返回结果，非"审批即自动发布"）；② **A 侧可管理已上传模型**——列表 / 下线（`lifecycle=retired`）/ **软删（只清 A 侧记录 + 审计，仓库镜像保留）** / 恢复，仅管理员与超管，删除前必须先下线；③ **B 侧一键拉取**——新增远端可用 tag 列表（Registry v2 `GET /tags/list`）→ 选中 → 一键拉取，拉取完成后模型立即可用于工位模板与模型选择；④ 不引入 A→B 心跳/回执，A 侧不展示"模型是否已被产线使用"。详见 `docs/contracts/跨平台契约_A-B.md` §2.4/§2.5、`平台A_接口与数据契约.md` §3.3/§4.2、`平台B_接口与数据契约.md` §3.2。*

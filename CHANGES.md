@@ -173,3 +173,31 @@ LaunchDarkly 旗标；⑥ 没有 `SIMPLE_JWT` 配置，access 生命周期/签�
 aoi 端点与 LS 原生 `/api/current-user/whoami`、登出黑名单、浏览器 session 回归、中间件移除守卫）；
 契约文档 §2.4/§4.0 与 fixture `aoi_api_paths.json`（`d3-20260910`）同步更新。
 `tests/contracts/test_ls_reuse_smoke.py`（需真实 LS 实例）覆盖 `/data/upload` 的 Bearer 下载回归。
+
+---
+
+## 文档变更（D3）：A 侧「勾选模型上传 + 已上传管理」与 B 侧「一键拉取」（2026-09-11）
+
+**背景**：模型经镜像仓库分发（构建镜像 / 推送 / 拉取）的机制**不变**；本次补齐两处能力约定：
+
+1. **A 侧自主决定上传哪些模型**——由管理员在「训练 → 模型库」中**勾选**（支持多选批量）后上传，不是"审批通过即自动发布"；
+2. **A 侧可管理已上传模型**——列表 / 下线（`lifecycle=retired`）/ **软删（仅 A 侧记录 + 审计，仓库镜像保留）** / 恢复；仅管理员与超级管理员，**删除前必须先下线**；
+3. **B 侧一键拉取**——新增远端可用 tag 列表（Registry v2 `GET /tags/list`）→ 选中 → 一键拉取；拉取完成后模型立即可用于工位模板与模型选择。
+
+**改动（仅文档）**：
+
+| 文档 | 改动 |
+|---|---|
+| `docs/contracts/跨平台契约_A-B.md` | §2.4 触发方式改为"管理员勾选批量上传（逐条独立）"+ 新增「已上传模型的管理」表（下线/软删/恢复规则）；§2.5 新增"一键拉取"流程与"A 侧软删不影响 B 可用 tag"；§6 契约测试补 3 项 |
+| `docs/contracts/平台A_接口与数据契约.md` | §3.3 `model_publish` 增 `deleted_at`/`deleted_by`；§4.2 新增 `POST /models/publish`（批量逐条独立）、`POST /models/{id}/retire`、`GET /publishes`、`POST /publishes/{id}/delete`、`POST /publishes/{id}/restore` 与**前后端约定表**；审计枚举补"下线/删除/恢复" |
+| `docs/contracts/平台B_接口与数据契约.md` | §3.2 新增 `GET /models/remote`（远端可用 tag + `local` 标记）与**「一键拉取」前端约定**（列表/置灰/状态/重试/模板选择闭环）；注明 A 侧软删不影响本列表 |
+| `docs/MVP开发计划.md` | 速览/分工/二开增量/裁剪（新增软删与拉取入口两项决策）/风险（误删与误操作）/D7、D9、D10 排期/变更记录 |
+| `docs/P0骨架设计_双平台.md` | `model_publish` 加软删字段；A 侧 stub 表补 5 个端点；B 侧 stub 表补 `GET /models/remote`；前端页面与验收 ⑧ 同步 |
+| `README.md`、`docs/docker-registry-setup.md` | 平台间链路说明；仓库文档补"A 侧删除为软删、镜像保留、B 仍可拉取" |
+
+**接口新增（路径/字段命名待评审确认）**：`POST /api/train/models/publish`、`POST /api/train/models/{id}/retire`、
+`GET /api/train/publishes`、`POST /api/train/publishes/{id}/delete`、`POST /api/train/publishes/{id}/restore`、
+`GET /api/v1/models/remote`。删除/恢复复用 `training.publish` 权限点（管理员/超管）。
+
+**待跟进（"破坏性变更四件套"的 stub/fixture/测试三件，D7 前）**：A 侧 `model_publish` 迁移补 `deleted_at`/`deleted_by`；
+A 侧批量上传/下线/软删/恢复 stub 与契约测试；B 侧 `GET /models/remote` stub（真实实现调 Registry v2 `GET /tags/list`）与假 tag 列表 fixture。
