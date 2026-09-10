@@ -13,7 +13,7 @@
  *   - §3.7 日报: GET /reports/daily
  */
 
-import type { HealthData, ModelInfo, StationInfo, StationTemplate, InspectionRecord, StatsSummary, TrendPoint, ErrorStats, DailyReport } from './types';
+import type { HealthData, ModelInfo, StationInfo, StationTemplate, InspectionRecord, StatsSummary, TrendPoint, ErrorStats, DailyReport, OutboxItem, BadImage } from './types';
 
 // ============ 健康检查 (§3.1) ============
 export const mockHealth: HealthData = {
@@ -146,4 +146,19 @@ export const mockReports: DailyReport[] = [
   { day: '2026-09-08', total: 12480, auto_pass: 11232, recheck: 936, manual: 312, bad_count: 45, html_path: '/data/reports/2026-09-08.html', csv_path: '/data/reports/2026-09-08.csv' },
   { day: '2026-09-07', total: 11800, auto_pass: 10620, recheck: 880, manual: 300, bad_count: 40, html_path: '/data/reports/2026-09-07.html', csv_path: '/data/reports/2026-09-07.csv' },
   { day: '2026-09-06', total: 12100, auto_pass: 10890, recheck: 910, manual: 300, bad_count: 42, html_path: '/data/reports/2026-09-06.html', csv_path: '/data/reports/2026-09-06.csv' },
+];
+
+// ============ 回传队列 (§3.1 system/outbox) ============
+export const mockOutbox: OutboxItem[] = [
+  { id: 31, kind: 'suspicious', ref_id: 98762, idempotency_key: 'ST03-3041-suspicious', attempts: 0, status: 'pending', created_at: '2026-09-08T08:30:50Z' },
+  { id: 30, kind: 'suspicious', ref_id: 98763, idempotency_key: 'ST02-2041-suspicious', attempts: 2, next_retry_at: '2026-09-08T08:32:00Z', status: 'pushing', created_at: '2026-09-08T08:30:55Z' },
+  { id: 29, kind: 'suspicious', ref_id: 98761, idempotency_key: 'ST05-5041-suspicious', attempts: 5, next_retry_at: '2026-09-08T09:30:00Z', status: 'dead', last_error: 'connect timeout after 60s', created_at: '2026-09-08T08:20:00Z' },
+  { id: 28, kind: 'bad', ref_id: 12, idempotency_key: 'ST05-5040-bad', attempts: 5, next_retry_at: '2026-09-08T09:20:00Z', status: 'dead', last_error: '40100 internal token rejected', created_at: '2026-09-08T08:19:58Z' },
+];
+
+// ============ 坏图清单 (§3.5 bad-images) ============
+export const mockBadImages: BadImage[] = [
+  { id: 12, station_code: 'ST05', seq: 5040, captured_at: '2026-09-08T08:19:58Z', error_code: 'capture_failed', note: '相机断连', pushed_status: 'dead', created_at: '2026-09-08T08:19:58Z' },
+  { id: 11, station_code: 'ST02', seq: 2040, captured_at: '2026-09-08T08:19:50Z', error_code: 'decode_failed', image_md5: 'c4d2...a9', pushed_status: 'pending', created_at: '2026-09-08T08:19:50Z' },
+  { id: 10, station_code: 'ST01', seq: 1040, captured_at: '2026-09-08T08:19:42Z', error_code: 'timeout', pushed_status: 'pushed', pushed_at: '2026-09-08T08:20:10Z', created_at: '2026-09-08T08:19:42Z' },
 ];

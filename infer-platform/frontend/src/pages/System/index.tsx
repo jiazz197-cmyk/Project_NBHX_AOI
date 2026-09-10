@@ -11,20 +11,22 @@ import {
 import {
   CloudDownloadOutlined, UploadOutlined, DeleteOutlined,
   ReloadOutlined, ThunderboltOutlined, CheckCircleOutlined,
-  CloseCircleOutlined, WarningOutlined, SyncOutlined,
+  CloseCircleOutlined, WarningOutlined, SyncOutlined, ExportOutlined,
 } from '@ant-design/icons';
-import { mockHealth, mockModels } from '../../api/mock';
-import type { HealthData, ModelInfo } from '../../api/types';
+import { mockHealth, mockModels, mockOutbox } from '../../api/mock';
+import type { HealthData, ModelInfo, OutboxItem } from '../../api/types';
 
 export default function System() {
   const [health, setHealth] = useState<HealthData | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [outbox, setOutbox] = useState<OutboxItem[]>([]);
   const [pullModalOpen, setPullModalOpen] = useState(false);
   const [pullImage, setPullImage] = useState('');
 
   useEffect(() => {
     setHealth(mockHealth);
     setModels(mockModels);
+    setOutbox(mockOutbox);
   }, []);
 
   const handlePull = () => {
@@ -42,6 +44,23 @@ export default function System() {
 
   const handlePreload = (modelRef: string) => {
     message.info(`预加载模型: ${modelRef}（mock）`);
+  };
+
+  const handleRetryAll = () => {
+    // TODO: POST /system/outbox/retry-all
+    setOutbox(prev => prev.map(o => (o.status === 'dead' ? { ...o, status: 'pending', last_error: undefined } : o)));
+    message.success('已触发全部死信重推（mock）');
+  };
+
+  const handleRetryOne = (id: number) => {
+    // TODO: POST /system/outbox/{id}/retry
+    setOutbox(prev => prev.map(o => (o.id === id ? { ...o, status: 'pending', last_error: undefined } : o)));
+    message.success(`已重推回传记录 #${id}（mock）`);
+  };
+
+  const handleExportDead = () => {
+    // TODO: 本地导出 dead 记录（跨平台契约 §3.5：dead 支持本地导出）
+    message.info('导出死信记录（mock）');
   };
 
   const modelColumns = [
@@ -68,6 +87,32 @@ export default function System() {
           <a onClick={() => handleDelete(record.model_ref)} style={{ color: '#ff4d4f' }}><DeleteOutlined /> 删除</a>
         </Space>
       ),
+    },
+  ];
+
+  const outboxStatusColors: Record<string, string> = {
+    pending: 'blue',
+    pushing: 'processing',
+    pushed: 'green',
+    dead: 'red',
+  };
+
+  const outboxColumns = [
+    { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
+    { title: '类型', dataIndex: 'kind', key: 'kind', width: 90, render: (v: string) => <Tag>{v}</Tag> },
+    { title: '幂等键', dataIndex: 'idempotency_key', key: 'idempotency_key' },
+    { title: '次数', dataIndex: 'attempts', key: 'attempts', width: 60 },
+    {
+      title: '状态', dataIndex: 'status', key: 'status', width: 90,
+      render: (v: string) => <Tag color={outboxStatusColors[v]}>{v}</Tag>,
+    },
+    { title: '下次重试', dataIndex: 'next_retry_at', key: 'next_retry_at', width: 170, render: (v?: string) => v ?? '-' },
+    { title: '最后错误', dataIndex: 'last_error', key: 'last_error', render: (v?: string) => v ?? '-' },
+    { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 170, render: (v: string) => new Date(v).toLocaleString() },
+    {
+      title: '操作', key: 'action', width: 80,
+      render: (_: unknown, record: OutboxItem) =>
+        record.status === 'dead' ? <a onClick={() => handleRetryOne(record.id)}><ReloadOutlined /> 重推</a> : null,
     },
   ];
 
@@ -137,24 +182,26 @@ export default function System() {
         />
       </Card>
 
-      {/* Outbox 状态 */}
-      {health && (
-        <Card title="回传队列 (Outbox)" size="small" style={{ marginTop: 16 }}>
-          <Row gutter={16}>
-            <Col span={8}>
-              <Statistic title="待回传" value={health.outbox.pending} valueStyle={{ color: '#1677ff' }} />
-            </Col>
-            <Col span={8}>
-              <Statistic title="死信" value={health.outbox.dead} valueStyle={{ color: '#ff4d4f' }} />
-            </Col>
-            <Col span={8}>
-              <Space>
-                <Button icon={<ReloadOutlined />} size="small">全部重推</Button>
-              </Space>
-            </Col>
-          </Row>
-        </Card>
-      )}
+      {/* Outbox 回传队列 */}
+      <Card
+        title="回传队列 (Outbox)"
+        size="small"
+        style={{ marginTop: 16 }}
+        extra={
+          <Space>
+            <Button icon={<ReloadOutlined />} size="small" onClick={handleRetryAll}>全部重推</Button>
+            <Button icon={<ExportOutlined />} size="small" onClick={handleExportDead}>导出死信</Button>
+          </Space>
+        }
+      >
+        <Table
+          columns={outboxColumns}
+          dataSource={outbox}
+          rowKey="id"
+          size="small"
+          pagination={false}
+        />
+      </Card>
 
       {/* 版本信息 */}
       <Card title="版本信息" size="small" style={{ marginTop: 16 }}>
