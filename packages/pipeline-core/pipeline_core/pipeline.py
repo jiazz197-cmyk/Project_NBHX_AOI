@@ -53,7 +53,8 @@ def run(
     for model_ref, objects in model_groups.items():
         model = models.get(model_ref)
         if model is None:
-            continue
+            # 宁错不漏：配置引用的模型缺失时不得静默跳过（否则该模型负责的缺陷会漏检）
+            raise KeyError(f"model_ref not provided in models: {model_ref!r}")
 
         # 收集该模型负责的 class_id 集合
         class_ids: set[int] = set()
@@ -73,7 +74,7 @@ def run(
                 # 只保留该模型负责的类别
                 if cls_id not in class_ids:
                     continue
-                code = code_map.get(cls_id, f"unknown_{cls_id}")
+                code = code_map[cls_id]
                 box = DetectBox(
                     xyxy=(float(x1), float(y1), float(x2), float(y2)),
                     class_id=int(cls_id),
@@ -81,14 +82,14 @@ def run(
                     score=float(conf),
                     model_ref=model_ref,
                 )
-                global_box = box_to_global(box, tile.offset_x, tile.offset_y)
+                global_box = box_to_global(box, (tile.offset_x, tile.offset_y))
                 all_boxes.append(global_box)
 
     # 5. NMS 合并
     merged_boxes = merge_across_tiles(all_boxes)
 
     # 6. 三档判定
-    verdict, reasons = decide_verdict(merged_boxes, cfg.objects)
+    verdict, reasons = decide_verdict(merged_boxes, cfg)
 
     elapsed_ms = int((time.time() - t0) * 1000)
 

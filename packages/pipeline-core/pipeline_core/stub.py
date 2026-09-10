@@ -21,7 +21,7 @@ class StubRuntimeModel(RuntimeModel):
     每个切片固定返回一个假框（左上角 100x100 区域，置信度 0.85，类别 0）
     """
 
-    def __init__(self, model_ref: str = "stub@ds0"):
+    def __init__(self, model_ref: str = "0-stub@ds0"):
         self._model_ref = model_ref
 
     def infer(self, tiles: list[np.ndarray]) -> list[list[RawBox]]:

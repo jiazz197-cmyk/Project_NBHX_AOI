@@ -55,8 +55,9 @@ def merge_across_tiles(
     for box in sorted_boxes:
         suppressed = False
         for kept_box in kept:
-            # 只对同类别做 NMS
-            if box.class_id == kept_box.class_id:
+            # 只对同一缺陷类别（object_code）做 NMS：跨切片/跨模型去重；
+            # 不同缺陷类别不互相抑制（多模型同 class_id 不同 code 时避免误杀）
+            if box.object_code == kept_box.object_code:
                 iou = _compute_iou(box, kept_box)
                 if iou > iou_thr:
                     suppressed = True

@@ -55,18 +55,18 @@ def slice_image(
     return tiles
 
 
-def box_to_global(box: DetectBox, offset_x: int, offset_y: int) -> DetectBox:
+def box_to_global(box: DetectBox, offset: tuple[int, int]) -> DetectBox:
     """
     将切片内检测框坐标转为原图全局坐标。
 
     Args:
         box: 切片内的检测框
-        offset_x: 切片在原图中的 x 偏移
-        offset_y: 切片在原图中的 y 偏移
+        offset: (offset_x, offset_y) 切片左上角在原图中的偏移
 
     Returns:
         全局坐标的 DetectBox（新实例，原实例不变）
     """
+    offset_x, offset_y = offset
     x1, y1, x2, y2 = box.xyxy
     return DetectBox(
         xyxy=(x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y),
