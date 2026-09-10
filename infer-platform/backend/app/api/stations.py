@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 import yaml
@@ -124,7 +123,7 @@ def capture_station(code: str, request_id: str = Depends(get_request_id)) -> dic
         image_bytes = camera.capture()
     except Exception as exc:  # noqa: BLE001
         raise BizError(404, CODE_STATION_NOT_REGISTERED, "采集失败") from exc
-    seq = int(time.time() * 1000)
+    seq = store_models.next_seq(code)
     data = run_inspection(image_bytes, code, seq, "")
     return ok(data, request_id)
 

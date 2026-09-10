@@ -296,6 +296,18 @@ def list_bad_images() -> list[dict[str, Any]]:
         conn.close()
 
 
+def next_seq(station_code: str) -> int:
+    """该工位下一个检测序号（契约 §5.2：单调递增，重启后从最大值+1 继续）。"""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT MAX(seq) AS m FROM b_inspection WHERE station_code = ?", (station_code,),
+        ).fetchone()
+        return (row["m"] or 0) + 1
+    finally:
+        conn.close()
+
+
 # ---------- b_report ----------
 
 def list_reports() -> list[dict[str, Any]]:

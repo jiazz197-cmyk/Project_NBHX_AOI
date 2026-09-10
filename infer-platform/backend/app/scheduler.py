@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -27,9 +27,11 @@ def _outbox_tick() -> None:
 def _daily_report() -> None:
     settings = get_settings()
     try:
-        day = datetime.now(ZoneInfo(settings.TZ)).strftime("%Y-%m-%d")
+        now = datetime.now(ZoneInfo(settings.TZ))
     except Exception:  # noqa: BLE001
-        day = datetime.now().strftime("%Y-%m-%d")
+        now = datetime.now()
+    # 契约 §7：每日 00:10 生成前一日日报
+    day = (now - timedelta(days=1)).strftime("%Y-%m-%d")
     daily.generate_daily(day)
 
 
