@@ -40,6 +40,19 @@ def reset_aoi_stub_state():
     yield
 
 
+@pytest.fixture(autouse=True)
+def force_fake_publish_mode(settings):
+    """契约测试一律走 fake 发布模式，且默认不落盘。
+
+    本地 ``.env`` 可能开着 ``AOI_PUBLISH_MODE=registry``（真推 Docker Hub）：测试必须与本地配置解耦，
+    否则会联网推仓库、污染外部状态。需要验证 registry 客户端的用例自行改 ``settings.AOI_PUBLISH_MODE``
+    并 mock HTTP 层；需要验证落盘的用例用 ``tmp_path`` 覆盖 ``AOI_PUBLISH_ARTIFACTS_DIR``。
+    """
+    settings.AOI_PUBLISH_MODE = 'fake'
+    settings.AOI_PUBLISH_ARTIFACTS_DIR = ''
+    yield
+
+
 def _reset_core_stub_state(core_views) -> None:
     """重置所有进程内全局（含 ``_NEXT_ROLE_ID``，否则用例顺序会影响新建角色 id）。"""
     core_views._ROLES.clear()

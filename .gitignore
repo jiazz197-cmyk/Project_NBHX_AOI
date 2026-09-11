@@ -37,6 +37,8 @@ label_studio/core/downloads
 label_studio/core/export
 
 label_studio/core/static_build
+# 由 `cd web && bun run build`（vite-manifest-plugin）生成的资源清单，含内容哈希，随构建变化
+label_studio/core/static/js/manifest.json
 label_studio/core/version_.py
 label_studio/core/core
 

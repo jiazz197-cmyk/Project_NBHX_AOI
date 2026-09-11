@@ -92,8 +92,11 @@ uv run python label_studio/manage.py runserver 0.0.0.0:8080
 后端默认开发地址：`http://localhost:8080`
 
 > 本地裸跑前请确保 PostgreSQL 和 MinIO 已启动，且 MinIO 中已创建 `aoi-images` bucket。
-> 模型发布变量（`MODEL_REGISTRY`、`MODEL_IMAGE_REPO`、`MODEL_REGISTRY_USER`、`MODEL_REGISTRY_PASSWORD`、`INTERNAL_TOKEN`）在骨架落地后追加到 `.env`，
-> 见 `docs/P0骨架设计_双平台.md` §6。
+> 模型发布变量（`MODEL_REGISTRY`、`MODEL_IMAGE_REPO`、`MODEL_REGISTRY_USER`、`MODEL_REGISTRY_PASSWORD`、`INTERNAL_TOKEN`）在骨架落地后追加到 `.env`；
+> **D3 起**发布服务另有 `AOI_PUBLISH_MODE`（`fake` 离线假推送 / `registry` 走 Registry v2 真推）、
+> `AOI_REGISTRY_PROXY`（只作用于 registry 出网的代理，内网示例 `http://127.0.0.1:7897`）、
+> `AOI_PUBLISH_ARTIFACTS_DIR`（产物落盘目录，默认 `tmp/publish`，已被 `.gitignore` 忽略）。
+> 全部配置键见 `docs/P0骨架设计_双平台.md` §6，仓库/账号分配见 `docs/docker-registry-setup.md`。
 
 ### 3.2 前端本地开发
 

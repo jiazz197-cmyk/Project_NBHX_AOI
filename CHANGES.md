@@ -96,7 +96,7 @@ git diff --name-only 30a7f330d -- \
   - ≥2 个 → 原 `Concat(*intersperse(...))` 不变。
 - **验证**：`PYTHONPATH=label_studio .venv/bin/python -m pytest tests/contracts/test_platform_a_api.py::TestTaskDetailConcatRegression -q` → **5 passed**
   （0/1/2 link name、`all_fields=True`、`GET /api/tasks/{id}/` 200）。
-- **记录**：`docs/已知问题_任务详情500.md`、`docs/复用验证_D2.md` §2.9。
+- **记录**：本节即为该问题的完整记录（背景/根因/修复/验证）；回归用例 `TestTaskDetailConcatRegression`，修复注释在 `data_manager/managers.py::annotate_storage_filename`。
 
 ---
 
@@ -201,3 +201,163 @@ aoi 端点与 LS 原生 `/api/current-user/whoami`、登出黑名单、浏览器
 
 **待跟进（"破坏性变更四件套"的 stub/fixture/测试三件，D7 前）**：A 侧 `model_publish` 迁移补 `deleted_at`/`deleted_by`；
 A 侧批量上传/下线/软删/恢复 stub 与契约测试；B 侧 `GET /models/remote` stub（真实实现调 Registry v2 `GET /tags/list`）与假 tag 列表 fixture。
+
+---
+
+## D3 发布服务 stub（假 build/push）与三项确认（2026-09-11）
+
+**范围**：平台 A 线 D3 里程碑最后一项「发布服务 stub（假 build/push）」落地；同时确认前三项已就绪并补契约锁定测试。
+经评审确认：本次**不含**「已上传管理」五端点与 `deleted_at`/`deleted_by`（仍为 D7 前待办，见上节）。
+
+### 1. 三项确认（不改业务代码）
+
+| 项 | 确认方式 | 结果 |
+|---|---|---|
+| JWT 登录链 | `TestAoiJwtAuth` 16 例 + 真实 `runserver` 冒烟 6 步 | 全绿：登录换 token → Bearer 打 aoi `/api/train/models`（200 信封）→ Bearer 打 LS 原生 `/api/current-user/whoami`（200）→ 无 token 40100 → logout `{revoked:true}` → 黑名单 refresh 再换 access 被拒（`Token is blacklisted`） |
+| `/api/ingest/findings` | 既有 28 例 + **新增 `TestIngestFindingsFixtureContract`** | 全绿：C 侧 fixture `findings_ingest_sample.json`（suspicious + bad）此前**无任何测试消费**，现按真实 payload 打端点，断言应答形状、桶位（recheck→medium）与重复请求 `duplicated=true` |
+| `model_publish` 表 | `manage.py showmigrations aoi_training` + 契约测试 | 全绿：`0002_model_publish` / `0003_p1_publish_unique_ref_tag` 已应用；`UNIQUE(model_ref, tag)` 与 `digest/attempts/error_message/published_at` 齐备，**无 schema 变更** |
+
+### 2. 发布服务 stub（本次新代码）
+
+**新增 `label_studio/aoi/training/publish.py`**（D7 Celery worker 的调用入口）：
+
+| 能力 | 实现 |
+|---|---|
+| 假 build | 不依赖 docker：`build_fake_onnx`（按 model_ref 确定的占位权重 10752B）→ `build_model_files`（`build_model_yaml` + `validate_model_yaml` 校验 + 缺陷字典富化）→ `build_image_artifacts`（与 `FROM scratch + COPY model/ /model/` 等价的 docker schema2 单层产物：layer.tar.gz / config.json / manifest.json；tar `mtime=0`、`gzip(mtime=0)`、config 时间戳固定 → **同一份 `model.yaml` 输入**字节可复现） |
+| push 双模式 | `AOI_PUBLISH_MODE=fake`（默认，离线，digest = 本地 manifest sha256）/ `registry`（`RegistryPushClient`：token → blob 单块上传 → manifest PUT，**digest 一律以仓库返回的 `Docker-Content-Digest` 回执为准**；不回执或回执不一致 → 失败，不拿本地值兜底）；`AOI_REGISTRY_PROXY` **只作用于该客户端会话** |
+| 状态机 | `queued → building → pushing → published` 每步落库；失败 → `failed` + `error_message`（构建错 42200 / 推送错 50300），可人工重推（同 tag 复用记录、`attempts` 递增） |
+| 成功副作用 | `digest`/`published_at` 落 `model_publish`；`model.lifecycle=published`；`model.config_snapshot.model_yaml` 快照；审计 `model.published`（含 mode） |
+| 产物落盘 | `AOI_PUBLISH_ARTIFACTS_DIR`（默认 `tmp/publish/<tag>/`）：`model/` + `artifacts/`（含 `digest.txt`）+ `Dockerfile` + `push.sh`（curl 直推临时通道，含代理参数）；`tmp/` 已在 `.gitignore` |
+
+`POST /api/train/models/{id}/publish` 同步执行上述流水线：应答新增 `digest`/`mode`，`status` 由 `queued` 变 `published`；
+`stub` = `mode == 'fake'`（registry 模式已真推、B 可拉取，故为 `false`）。GET 端点语义不变。
+
+### 3. 验证
+
+- **契约测试全量**：`tests/contracts` → **196 passed, 8 skipped**（8 例为需真实 LS 的 reuse smoke）。新增 12 例：产物 schema2 自洽与 digest 链、字节可复现、落盘与审计、失败后重推、registry 客户端（token scope / blob / manifest / digest 不符 / 网络异常 / 缺凭据）、registry 模式端到端（HTTP mock）、ingest fixture 锁定、落盘目录解析与关闭开关。
+- **真机 JWT 冒烟**：真实 `runserver` + PostgreSQL，6 步见上表。
+- **真实推送验证（registry 模式，经 7897 代理）**：dev 库临时模型 `90-stub@ds9` → `POST /publish` → 5.7s 返回 `digest=sha256:bd95d5bf…223f`、`mode=registry`、`stub=false`；回读仓库校验：`GET /tags/list` 含 `90-stub-ds9`，manifest 回读 sha256 与记录 digest、`Docker-Content-Digest` 三者一致，config/layer blob digest 一致，层内 `model/` 三文件齐全且 `model.onnx.sha256` 与 `model.yaml.onnx.sha256` 互洽。验证后已删除临时模型/发布/审计行与冒烟用户；**镜像 tag 保留**（B 侧可直接拉取验证）。
+
+### 4. 冒烟暴露并当场修复的两个真实缺陷
+
+1. **产物目录错位**：`settings.BASE_DIR` 实为 `label_studio/core`（不是仓库根），`BASE_DIR.parent` 把产物写到了 `label_studio/tmp/publish`。改为以 `publish.py` 位置上溯定位仓库根（`REPO_ROOT`）。
+2. **测试落盘未关闭**：`aoi.common.settings._get()` 对空串会回落到环境变量，使 conftest 的 `AOI_PUBLISH_ARTIFACTS_DIR=''` 失效、测试写入仓库工作区。`get_publish_artifacts_dir()` 改为**显式设置优先（空串 = 关闭）**，并补解析用例锁定；`label_studio/tmp` 已清理，测试不再产生脏文件。
+
+### 5. 配置与不做项
+
+- 新增配置：`.env.example` / `.env` / `docker-compose.yml` 透传 `AOI_PUBLISH_MODE`、`AOI_REGISTRY_PROXY`（示例 `http://127.0.0.1:<proxy-port>`）、`AOI_PUBLISH_ARTIFACTS_DIR`；本地 `.env` 开 `registry` 便于真推，契约测试由 conftest 强制 `fake` + 不落盘，二者解耦。
+- **不做**（D7 前/计划外）：批量上传/下线/软删/恢复五端点与 `deleted_at`/`deleted_by`；Celery `publish` worker 与指数退避重试（`PUBLISH_RETRY` 保留未接线）；真实训练权重导出（当前为占位 ONNX）；B 侧任何代码。
+
+### 6. 文档口径与 D2 证据文档恢复（2026-09-11）
+
+**文档纪律（项目负责人 2026-09-11 裁定，后续遵守）**：`docs/MVP开发计划.md`、`docs/P0骨架设计_双平台.md`、
+`docs/双平台架构与拆分方案.md`、`docs/docker-registry-setup.md`、`docs/contracts/**` 是**不随时间变动的计划/契约规格**——
+**不写入进度、状态、日期注记或变更日志**；一切「做了什么、当前到哪、与计划有何差异」只记在本文件（`CHANGES.md`）。
+
+按此口径，本次**未改动上述文档**（曾短暂写入的状态注记已全部撤回）。因此存在一处**已知的「规格 vs 实现」差异**，在此登记备查：
+
+- `docs/P0骨架设计_双平台.md` §2.6 的 publish 行仍描述「写 `model_publish=queued` → Celery `docker push` → 返回 `{publish_id}`」，
+  而 D3 实际实现为**同步**假 build + `fake`/`registry` 双模式 push，应答含 `digest`/`mode`/`stub`（见本文件 §2）；
+- `docs/contracts/跨平台契约_A-B.md` §2.4 描述的是 **D7 目标机制**（docker build/push + 指数退避）；D3 的等价实现（Python 构造镜像产物 + Registry v2 直推）
+  在**镜像内布局、tag 规范、`model_publish` 字段、digest 语义**上与契约一致，B 侧按契约实现不受影响；
+- 新增配置键 `AOI_PUBLISH_MODE` / `AOI_REGISTRY_PROXY` / `AOI_PUBLISH_ARTIFACTS_DIR` 记录在 `.env.example`（带注释）与 `README.md` §3.1；
+- 以上差异若需正式并入契约文本，走 **D9/D15 契约变更窗口**（含"四件套"），不在本分支临时改规格文档。
+
+**处置两份 D2 证据文档**（卫生清单 H1/H2，最终走「② 丢弃」）：`docs/复用验证_D2.md`、`docs/已知问题_任务详情500.md` 已从 index 与工作区消失且从未提交，决定**不再恢复**；其内容分别由本文件「缺陷修复（D2）」一节与对应用例/注释承载（如需追溯原文，内容仍可自 git 悬空对象 blob `46bb8e1`（复用验证）/ `6614975`（Concat 500）取回，未被 GC 前有效）。**13 处悬空引用已逐处改写为「结论 + 证据落在代码/测试」**（未只删链接）：
+
+| 位置 | 改写 |
+|---|---|
+| `docs/README.md` | 阅读顺序表删去第 7/9 行并重排（8 项） |
+| `label_studio/aoi/common/settings.py` | docstring 内联 D2 实测结论 + 指向 `TestPrelabelProtocol::test_optional_internal_token` |
+| `label_studio/data_manager/managers.py` | 注释内联根因（link name ≤1 时 `Concat` 表达式不足）+ 指向 `TestTaskDetailConcatRegression` |
+| `tests/contracts/test_ls_reuse_smoke.py` | 5 处改为内联结论（thumbnail 缺失、UI 人工项、Review 流 skip 依据、LS 只带 User-Agent、批量协议） |
+| `tests/contracts/test_platform_a_api.py` | 2 处改为内联根因/实测结论 |
+| `tests/contracts/README.md` | UI 人工清单说明改为自包含表述 |
+| `tests/contracts/samples.py` + `fixtures/{yolo_export_layout_sample,ml_backend_predict_sample}.json` | `source` 字段去掉文档路径，保留「实测来源」语义（samples 与 fixture 同步改） |
+| `docs/D3_工程卫生清单.md` | H1/H2 两行标记「已处置（2026-09-11）」并记录处置方式 |
+
+
+
+
+---
+
+## D3 后修正：digest 必须取仓库回执 + 代理端口去硬编码（2026-09-11）
+
+### 1. 背景：上一轮真推报告的**一处错误结论已更正**
+
+上一轮真推（`90-stub@ds9` / `91-yolo@ds9`）报告中曾写「Docker Hub 对 manifest PUT 不回 `Docker-Content-Digest`，
+客户端走的是 `registry_digest or local_digest` 兜底分支」。经复测与代码复核，**该结论是错的**，错因在**取证脚本的日志过滤器**：
+
+- 现象：`tmp/real_publish_run.py` 的探针用固定大小写名单过滤响应头（`{k: v for k, v in response.headers.items() if k in interesting}`），
+  而 Docker Hub 回的是**小写**头名 `docker-content-digest`（Python `requests` 头字典是大小写不敏感的，但**手写字典推导不是**），
+  于是该头被探针丢掉，日志里只剩 `Content-Length`；
+- 真相：`RegistryPushClient.push()` 读的是 `response.headers.get('Docker-Content-Digest')`（**大小写不敏感**），**一直拿到了仓库回执**，
+  并没有走兜底分支；
+- 复测证据：真实推送的响应头为 `docker-content-digest: sha256:…`，blob PUT 与 manifest PUT 都有；且 `push()` 返回值与仓库回执、落库 digest 三者一致。
+- 已修：探针改为大小写不敏感过滤（`tmp/real_publish_run.py`，仅取证脚本，不在版本库）。
+
+**教训**：取证工具的过滤器本身会造假证据；「没看到头」必须先验证是「仓库没发」还是「探针没记」。
+
+### 2. 代码变更：digest 必须来自仓库回执（`label_studio/aoi/training/publish.py`）
+
+| 项 | 变更前 | 变更后 |
+|---|---|---|
+| manifest 回执 | 有则核对，**没有则静默用本地 sha256**（`return registry_digest or artifacts.digest`） | **没有回执 = 失败**：抛 `RegistryPushError`（发布置 `failed` + 50300），绝不把本地自算值当仓库确认值落库 |
+| blob 回执 | 完全不看 | blob PUT 也要求 `Docker-Content-Digest`；缺失或与上传 digest 不一致 → 失败（防篡改） |
+| blob「已存在」分支 | `init` 无 `Location` 直接报错 | 允许 Registry v2 的 `201 + 无 Location`（blob 已存在）：**仅当回执 digest 与本地一致**才放行 |
+| 退路（可选） | 无 | 新增 `missing_digest_policy`：`strict`（默认，不回执即失败）/ `readback`（PUT 后按 tag GET 回读 manifest、**逐字节比对**通过才认，多一次往返换可用性） |
+
+新增常量 `DIGEST_POLICY_STRICT` / `DIGEST_POLICY_READBACK` / `DIGEST_POLICIES` 与内部助手 `_content_digest()`（大小写不敏感的统一点）。
+
+### 3. 契约测试（`tests/contracts` → **205 passed, 8 skipped**；本轮 +9 例）
+
+新增用例：blob 回执不一致 / blob 回执缺失 / manifest 回执缺失（默认 strict 拒绝）/ `readback` 策略成功 / `readback` 字节不一致拒绝 /
+blob 已存在（无 Location）仅回执匹配才放行 / 未知 policy 拒绝 / **跨时刻重建 digest 必须不同（D7 待修事实锁定）** /
+仓库不回执时发布落 `failed` 且 `digest` 为空（端到端）。既有 `TestPublishRegistryMode` 的假仓库已抽成 `_mock_registry()` 并按真实语义回回执。
+
+### 4. 真推复验（strict 代码路径，经本机代理）
+
+`93-yolo@ds9` → `POST /publish` → **全 201**，逐跳响应头（`tmp/real_publish_strict.log`）：
+
+```
+PUT  …/blobs/uploads/<uuid>?digest=sha256:28e2e54f…  → 201  docker-content-digest: sha256:28e2e54f…  location: …/blobs/sha256:28e2e54f…
+PUT  …/blobs/uploads/<uuid>?digest=sha256:78d8f8cf…  → 201  docker-content-digest: sha256:78d8f8cf…  location: …/blobs/sha256:78d8f8cf…
+PUT  …/manifests/93-yolo-ds9                          → 201  docker-content-digest: sha256:f73cef98…  oci-tag: 93-yolo-ds9
+```
+
+接口应答 `digest=sha256:f73cef98…`（= 仓库回执，不再可能是本地兜底值）、`mode=registry`、`stub=false`；
+独立回读校验（`tmp/verify_pushed_image.py`）全项 PASS；DB 现场：`Model` 新增 `92-yolo@ds9`/`93-yolo@ds9`（复核用），
+`model_publish` 与临时用户已清理。
+
+### 5. 代理端口去硬编码（项目负责人要求：端口不进业务代码）
+
+| 文件 | 变更 |
+|---|---|
+| `label_studio/aoi/common/settings.py` | `get_registry_proxy()` docstring 删掉硬编码 `127.0.0.1:7897`，明确「只从 `AOI_REGISTRY_PROXY` 读，端口等地基信息不写进代码」 |
+| `label_studio/aoi/training/publish.py` | `push.sh` 模板示例改 `http://127.0.0.1:<proxy-port>` |
+| `tests/contracts/test_platform_a_api.py` | 新增 `REGISTRY_PROXY_FOR_TESTS = os.environ.get('TEST_REGISTRY_PROXY', 'http://proxy.invalid:3128')`（`.invalid` 为 RFC 2606 保留域名，绝不误连），3 处引用替换 |
+| `.env.example` | 改**假占位** `AOI_REGISTRY_PROXY=http://127.0.0.1:10809`，注明「仅格式占位，并非真实端口」 |
+| `.env`（gitignored） | 同步改占位值；实跑时由环境变量 `AOI_REGISTRY_PROXY=http://<host>:<port>` 注入（已验证占位值 10809 连接被拒） |
+
+`git grep 7897` 在 `label_studio/ docs/ tests/ deploy/ *.example` 范围内已为**空**；`docker-compose.yml` 透传沿用 `${AOI_REGISTRY_PROXY:-}`。
+
+### 6. D7 计划项（已写入 `docs/MVP开发计划.md` §5 D7「验收附加项」）
+
+1. **digest 取仓库回执**（本文件 §2 已实现，D7 只做验收）；
+2. **digest 可复现**：同 `model_ref` + 同产物内容，任意时刻重建必须同 digest —— 根因是 `model.yaml` 的
+   `created_at`（`model_yaml._utcnow()`，秒级）与 `published_at` 参与了 manifest 字节；修法（时间戳移出镜像内 `model.yaml` 或固定为构建批次时间）
+   与验收用例（把当前"必须不等"的锁定用例翻转为"必须相等"）均记在该节；
+3. 三处口径同步：`publish.py` 模块头措辞、跨平台契约 §2.4 步骤、B 侧 digest 校验。
+
+> **文档纪律例外（备案）**：按本文件 §6 的文档纪律，`docs/MVP开发计划.md` 属"计划规格、不写变更日志"；
+> 本次系**项目负责人明确要求**把 D7 待修项写入计划，故以「D7 验收附加项」区块落规格口径（写"必须做到什么"，不写"当前做到哪"）。
+
+### 7. 运维遗留（需人工处置）
+
+- **`rekal1018/aoi-model` 上多出 3 个探测 tag**：`lab-bad-digest-check` / `lab-digest-hdr-check` / `lab-probe-client`
+  （本轮为验证 Docker Hub 回执行为所推）。**脚本删不掉**：registry v2 `DELETE /manifests/<tag>` 需要 `delete` scope，
+  而当前 PAT（读写）换 `delete` scope 时被拒（`access token has insufficient scopes`），Docker Hub 管理 API 同样返回
+  `403 insufficient scope`。请在 Docker Hub 网页端删除，或换一个有删除权限的 token 后执行：
+  `DELETE https://registry-1.docker.io/v2/rekal1018/aoi-model/manifests/<tag>`。
+- 另有真推留下的 `90-stub-ds9` / `91-yolo-ds9` / `92-yolo-ds9` / `93-yolo-ds9` 四个 tag：按契约"镜像不可变、A 侧软删不动仓库"的口径**保留**，
+  供 B 侧拉取联调；如需清理同样需上述删除权限。
