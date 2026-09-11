@@ -31,9 +31,6 @@ a-contract-tests:
         - uv.lock
     paths:
       - .uv-cache
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
     - pip install --quiet uv
     - uv sync --frozen --group test
