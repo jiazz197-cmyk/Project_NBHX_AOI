@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import re
+
 import yaml
 
 from ..envelope import CODE_VALIDATION_FAILED, BizError
@@ -34,6 +36,22 @@ _REQUIRED_CLASS = ("index", "code", "name_cn", "risk_level", "recommended")
 
 def _invalid(fields: dict[str, str]) -> None:
     raise BizError(422, CODE_VALIDATION_FAILED, "model config invalid", {"fields": fields})
+
+
+def _major_version(version: str) -> int | None:
+    """版本字符串 → 主版本号（"0.1.0" → 0）。"""
+    try:
+        return int(str(version).split(".")[0])
+    except (ValueError, IndexError, AttributeError):
+        return None
+
+
+def _require_major(constraint: str) -> int | None:
+    """requires 约束（">=0.1.0"）→ 要求的最低主版本；无法解析返回 None（视为不校验）。"""
+    if not isinstance(constraint, str) or not constraint.strip():
+        return None
+    m = re.match(r"^\s*>=?\s*v?(\d+)", constraint)
+    return int(m.group(1)) if m else None
 
 
 def parse_model_yaml(text: str) -> dict[str, Any]:
@@ -138,6 +156,22 @@ def validate_model_yaml(data: dict[str, Any]) -> dict[str, Any]:
         # 7. index 唯一且连续
         if indexes and (len(set(indexes)) != len(indexes) or indexes != list(range(min(indexes), min(indexes) + len(indexes)))):
             fields["classes.index"] = "indexes must be unique and contiguous"
+
+    # 10. requires.* 主版本不兼容 → 42200（契约 §2.3 规则 10；次版本差异仅告警，MVP 不拒绝）
+    requires = data.get("requires")
+    if isinstance(requires, dict):
+        import pipeline_core as _pipeline_core
+        import skillname as _skillname
+
+        installed = {
+            "skillname": _major_version(_skillname.__version__),
+            "pipeline_core": _major_version(_pipeline_core.__version__),
+        }
+        for pkg in ("skillname", "pipeline_core"):
+            required = _require_major(requires.get(pkg))
+            cur = installed[pkg]
+            if required is not None and cur is not None and required > cur:
+                fields[f"requires.{pkg}"] = f"requires major {required}, B installed major {cur}"
 
     if fields:
         _invalid(fields)

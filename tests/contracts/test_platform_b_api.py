@@ -320,3 +320,31 @@ class TestOutbox:
         assert bads[0]["pushed_status"] == "pushed"
         assert bads[0]["pushed_at"]
         get_settings.cache_clear()
+
+
+# --------------------------------------------------------------------------- requires 主版本校验（契约 §2.3 规则 10）
+class TestRequiresVersion:
+    def _sample(self):
+        from app.registry import model_yaml
+
+        text = (FIXTURES / "model_yaml_sample.yaml").read_text(encoding="utf-8")
+        return model_yaml.parse_model_yaml(text)
+
+    def test_requires_major_incompatible_returns_42200(self):
+        from app.envelope import BizError
+        from app.registry import model_yaml
+
+        data = self._sample()
+        data["requires"] = {"skillname": ">=1.0.0", "pipeline_core": ">=0.1.0"}
+        with pytest.raises(BizError) as exc:
+            model_yaml.validate_model_yaml(data)
+        assert exc.value.code == 42200
+        assert "requires.skillname" in exc.value.detail["fields"]
+
+    def test_requires_compatible_ok(self):
+        from app.registry import model_yaml
+
+        data = self._sample()
+        # fixture 自带 requires: >=0.1.0，与 B 侧主版本 0 兼容
+        summary = model_yaml.validate_model_yaml(data)
+        assert summary["model_ref"] == "3-yolo@ds1"
