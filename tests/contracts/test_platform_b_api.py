@@ -106,6 +106,49 @@ class TestBadImage:
         assert resp.status_code == 400
         assert resp.json()["code"] == 40010
 
+    def test_bad_enqueues_outbox(self, client):
+        resp = client.post(
+            "/api/v1/inspect/image",
+            files={"file": ("bad.jpg", b"not-an-image", "image/jpeg")},
+            data={"station_code": "ST01", "seq": 1},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == 40010
+
+        from app.outbox import queue
+        from app.store import models as store_models
+
+        items = queue.list_items()
+        assert len(items) == 1
+        item = items[0]
+        assert item["kind"] == "bad"
+        assert item["idempotency_key"] == "ST01-1-bad"
+
+        payload = json.loads(item["payload"])
+        assert payload["error_code"] == "decode_failed"
+        assert payload["image"] is None
+        assert payload["verdict"] is None
+
+        bads = store_models.list_bad_images()
+        assert len(bads) == 1
+        assert item["ref_id"] == bads[0]["id"]
+
+    def test_bad_duplicate_no_dup(self, client):
+        for _ in range(2):
+            resp = client.post(
+                "/api/v1/inspect/image",
+                files={"file": ("bad.jpg", b"not-an-image", "image/jpeg")},
+                data={"station_code": "ST01", "seq": 1},
+            )
+            assert resp.status_code == 400
+            assert resp.json()["code"] == 40010
+
+        from app.outbox import queue
+        from app.store import models as store_models
+
+        assert len(queue.list_items()) == 1
+        assert len(store_models.list_bad_images()) == 1
+
 
 # --------------------------------------------------------------------------- 工位 40402
 class TestStation:
