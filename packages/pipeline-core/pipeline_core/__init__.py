@@ -24,7 +24,10 @@ from pipeline_core.config import load_config
 from pipeline_core.pipeline import run
 from pipeline_core.stub import StubRuntimeModel
 
+__version__ = "0.1.0"
+
 __all__ = [
+    "__version__",
     "DetectBox",
     "DetectResult",
     "ObjectSpec",

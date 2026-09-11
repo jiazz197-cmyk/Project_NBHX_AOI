@@ -20,11 +20,14 @@ _OUTBOX_ITEM_FIELDS = (
 
 @router.get("/system/info")
 def system_info(request_id: str = Depends(get_request_id)) -> dict[str, Any]:
+    import pipeline_core
+    import skillname
+
     return ok({
         "versions": {
             "platform": "0.1.0",
-            "skillname": "0.1.0",
-            "pipeline_core": "0.1.0",
+            "skillname": skillname.__version__,
+            "pipeline_core": pipeline_core.__version__,
             "schema": 1,
         },
         "config": {},
