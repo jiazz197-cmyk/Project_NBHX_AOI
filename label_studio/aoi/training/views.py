@@ -2,7 +2,9 @@
 
 - 训练/模型数据落 ``aoi_training`` 表；未命中返回同形 stub；
 - SSE 进度用 Django ``StreamingHttpResponse``（P0 §2.6：training×2~3 + finished）；
-- 发布为 stub：写 ``model_publish=queued``，真实 build/push 在 D7（计划 §7 出界）。
+- 发布走 ``aoi.training.publish``（D3 stub）：假 build（Python 构造 schema2 镜像产物）+
+  双模式 push（``AOI_PUBLISH_MODE``：fake 离线 / registry 真推），状态推进到 ``published``
+  并落 digest/审计；D7 换真实权重与 Celery 异步流水线。
 """
 
 from __future__ import annotations
@@ -13,9 +15,10 @@ from typing import Any
 from aoi.common.errors import CODE_CONFLICT, CODE_NOT_FOUND, CODE_UNPROCESSABLE, AoiError
 from aoi.common.idempotency import get_idempotency_key
 from aoi.common.pagination import paginate
-from aoi.common.settings import get_model_image_repo, get_model_registry
+from aoi.common.settings import get_model_image_repo, get_model_registry, get_publish_mode
 from aoi.common.views import AoiAPIView
 from aoi.training.models import BaseModel, Model, ModelPublish, Preset, TrainJob
+from aoi.training.publish import run_publish
 from django.http import StreamingHttpResponse
 from drf_spectacular.utils import extend_schema
 from skillname import SkillName, image_tag_from_model_ref
@@ -355,7 +358,12 @@ class ModelApproveView(AoiAPIView):
 
 @extend_schema(tags=['aoi-train'])
 class ModelPublishView(AoiAPIView):
-    """``POST/GET /api/train/models/{id}/publish``（D3 stub：写 ``model_publish=queued``，真实 build/push 在 D7）。
+    """``POST/GET /api/train/models/{id}/publish``（D3 发布服务 stub：假 build + 双模式 push）。
+
+    POST 同步执行 ``aoi.training.publish.run_publish``：构建镜像产物 → 落盘 → 推送
+    （``AOI_PUBLISH_MODE=fake`` 离线 / ``registry`` 走 Registry v2 真推）→ 置 ``published``
+    并写 digest、``model.lifecycle=published`` 与审计；任一步失败置 ``failed`` + ``error_message``
+    并返回 42200（构建）/ 50300（推送），可人工重推。
 
     P1：未知模型 → 40401；``lifecycle`` 必须已 approved（契约 §8 发布前置）；唯一性按
     ``(model_ref, tag)``，同 tag 已有的发布记录不再覆盖（换 ``model_ref`` 版本号递增）。
@@ -416,6 +424,9 @@ class ModelPublishView(AoiAPIView):
                 status=ModelPublish.STATUS_QUEUED,
                 published_by=self.user_id,
             )
+
+        mode = get_publish_mode()
+        publish = run_publish(publish, actor_id=self.user_id, request_id=self.request_id)
         return self.ok(
             {
                 'publish_id': publish.id,
@@ -423,8 +434,11 @@ class ModelPublishView(AoiAPIView):
                 'model_ref': model_ref,
                 'tag': tag,
                 'image': image,
-                # D3 stub：真实 build/push 在 D7，调用方据此不要把它当已发布
-                'stub': True,
+                'digest': publish.digest,
+                # D3 stub 标记：fake 模式仓库里没有镜像（digest 仅为本地 manifest sha256）；
+                # registry 模式已真推到仓库，B 可拉取，故 stub=false
+                'mode': mode,
+                'stub': mode == 'fake',
             }
         )
 

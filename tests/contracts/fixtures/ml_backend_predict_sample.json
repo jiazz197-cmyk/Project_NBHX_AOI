@@ -1,6 +1,6 @@
 {
   "description": "LS 1.x ML backend 协议样例（健康/初始化/预测/校验）",
-  "source": "LS 1.24.0.dev0 label_studio/ml/api_connector.py + D2 实测（docs/复用验证_D2.md §2.7）",
+  "source": "LS 1.24.0.dev0 label_studio/ml/api_connector.py + D2 实测",
   "observed_request_headers": {
     "User-Agent": "heartex/<git-sha>",
     "X-Internal-Token": null,

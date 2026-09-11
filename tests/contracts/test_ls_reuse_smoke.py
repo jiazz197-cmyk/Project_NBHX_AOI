@@ -14,7 +14,7 @@ PYTHONPATH=label_studio .venv/bin/python -m pytest tests/contracts/test_ls_reuse
 - 未设置 ``LS_REUSE_BASE_URL`` → 整文件 skip；
 - 设置了 URL 但凭据缺失/被拒 → **fail（不 skip）**，避免"零覆盖但绿灯"；
 - 会写数据的用例要求 ``LS_REUSE_ALLOW_MUTATION=1``，并在模块结束时删除自己创建的 project/MLBackend；
-- UI 项 4/5 为人工清单（见 ``docs/复用验证_D2.md``）。
+- UI 项 4/5 为人工清单（框标注交互与 Review 流需在浏览器人工核对，无自动化断言）。
 """
 
 from __future__ import annotations
@@ -210,10 +210,10 @@ class TestLsReuseSmoke:
         authorized = ls.get(url, timeout=30)
         assert authorized.status_code == 200, authorized.text[:200]
         assert authorized.headers.get('Content-Type', '').startswith('image/')
-        # 实测：label_studio 代码库无 thumbnail 端点；预签名由 aoi 侧补（见 docs/复用验证_D2.md §3）
+        # D2 实测：label_studio 代码库无 thumbnail 端点；预签名由 aoi 侧补（本用例只认原图下载）
 
     def test_04_annotation_rectanglelabels_api(self, ls, imported_task):
-        """④ 框标注 API 基线（UI 人工清单见复用验证文档）。"""
+        """④ 框标注 API 基线（UI 交互为人工清单，见模块 docstring）。"""
         result = {
             'result': [
                 {
@@ -239,7 +239,7 @@ class TestLsReuseSmoke:
 
     def test_05_review_flow_manual(self):
         """⑤ LS OSS 无 Review 流：实测 grep 无 review 端点/模型 → 降级 aoi 自研复审接口。"""
-        pytest.skip('LS 1.24.0.dev0 OSS 无 Review 流（人工/静态证据见 docs/复用验证_D2.md §5）')
+        pytest.skip('LS 1.24.0.dev0 OSS 无 Review 流（D2 静态证据：上游无 review 模块/端点 → 降级 aoi 自研复审）')
 
     def test_06_yolo_export(self, ls, project, imported_task):
         """⑥ data_export YOLO：zip 布局与 classes 顺序（实测无 data.yaml）。"""
@@ -287,11 +287,11 @@ class TestLsReuseSmoke:
         assert predict.status_code == 200, predict.text[:400]
         body = predict.json()
         assert body.get('response'), body
-        # 实测：LS 调用只带 User-Agent（heartex/...），不携带 X-Internal-Token（见复用验证 §7）
+        # D2 实测：LS 调用只带 User-Agent（heartex/...），不携带 X-Internal-Token
         # 故 aoi.prelabel 默认放行；置 AOI_PRELABEL_REQUIRE_INTERNAL_TOKEN=true 可强制 40100。
 
     def test_08_batch_predictions_protocol(self, ls, imported_task):
-        """⑧ Batch predictions：多任务批量协议（LS 侧单请求多任务，见复用验证 §8）。"""
+        """⑧ Batch predictions：多任务批量协议（LS 侧单请求多任务）。"""
         payload = {
             'tasks': [
                 {'id': 9001, 'data': {'image': 'http://example.com/1.jpg'}},

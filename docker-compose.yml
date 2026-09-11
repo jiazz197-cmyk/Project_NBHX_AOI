@@ -62,6 +62,10 @@ services:
       - MODEL_REGISTRY_USER=${MODEL_REGISTRY_USER:-}
       - MODEL_REGISTRY_PASSWORD=${MODEL_REGISTRY_PASSWORD:-}
       - PUBLISH_RETRY=${PUBLISH_RETRY:-3}
+      # 发布服务（D3）：fake 离线假推送 / registry 真推送；代理只作用于 registry 出网
+      - AOI_PUBLISH_MODE=${AOI_PUBLISH_MODE:-fake}
+      - AOI_REGISTRY_PROXY=${AOI_REGISTRY_PROXY:-}
+      - AOI_PUBLISH_ARTIFACTS_DIR=${AOI_PUBLISH_ARTIFACTS_DIR:-tmp/publish}
       - DEBUG=${DEBUG:-false}
     #      - LOG_LEVEL=DEBUG
     volumes:
