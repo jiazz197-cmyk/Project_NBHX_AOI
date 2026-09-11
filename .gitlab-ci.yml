@@ -35,4 +35,9 @@ a-contract-tests:
     - pip install --quiet uv
     - uv sync --frozen --group test
     - uv pip install -e packages/skillname -e 'packages/pipeline-core[yaml]'
+    - |
+      for i in $(seq 1 30); do
+        python -c "import socket; socket.create_connection(('postgres', 5432), timeout=2)" && break
+        echo "waiting for postgres... ($i)"; sleep 2
+      done
     - PYTHONPATH=label_studio uv run pytest tests/contracts -q
