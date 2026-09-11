@@ -1,0 +1,41 @@
+# A 侧 CI（平台 B 的 job 由 B 侧自行追加，勿混入本文件职责）
+#
+# 覆盖范围：tests/contracts 全量（双平台契约测试，含验收项 ⑩ skillname/pipeline-core）。
+# 依赖事实：
+# - uv.lock 无 git 源（label-studio-sdk 已改 PyPI），uv sync 只需 runner 可达 PyPI；
+# - psycopg[binary] 免编译，python:3.12-slim 无需构建链；
+# - MINIO_SKIP=true 让 Django 落回 FileSystemStorage，契约测试无需 MinIO 服务；
+# - 共享包不在依赖组内，必须单独 editable 安装（aoi 应用 import skillname）。
+# - PYTHONPATH=label_studio：pytest-django 定位 Django 工程（根 pyproject 的 DJANGO_SETTINGS_MODULE）。
+
+stages:
+  - test
+
+a-contract-tests:
+  stage: test
+  image: python:3.12-slim
+  services:
+    - postgres:16
+  variables:
+    DJANGO_DB: default
+    POSTGRE_HOST: postgres
+    POSTGRE_PORT: "5432"
+    POSTGRE_NAME: postgres
+    POSTGRE_USER: postgres
+    POSTGRE_PASSWORD: postgres
+    MINIO_SKIP: "true"
+    UV_CACHE_DIR: .uv-cache
+  cache:
+    key:
+      files:
+        - uv.lock
+    paths:
+      - .uv-cache
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - pip install --quiet uv
+    - uv sync --frozen --group test
+    - uv pip install -e packages/skillname -e 'packages/pipeline-core[yaml]'
+    - PYTHONPATH=label_studio uv run pytest tests/contracts -q
