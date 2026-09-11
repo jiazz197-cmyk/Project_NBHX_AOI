@@ -21,7 +21,7 @@ from ..envelope import (
     ok,
 )
 from ..store import models as store_models
-from .inspect import run_inspection
+from .inspect import register_bad_image, run_inspection
 
 router = APIRouter()
 
@@ -122,7 +122,11 @@ def capture_station(code: str, request_id: str = Depends(get_request_id)) -> dic
     try:
         image_bytes = camera.capture()
     except Exception as exc:  # noqa: BLE001
-        raise BizError(404, CODE_STATION_NOT_REGISTERED, "采集失败") from exc
+        # 采集失败 → 登记坏图(capture_failed) + 入队 kind=bad 无图回传（契约 §5.2）
+        seq = store_models.next_seq(code)
+        register_bad_image(code, seq, "", "capture_failed",
+                           station_name=row.get("name"), template_version=row.get("template_version"))
+        raise BizError(400, CODE_BAD_PAYLOAD, "坏图") from exc
     seq = store_models.next_seq(code)
     data = run_inspection(image_bytes, code, seq, "")
     return ok(data, request_id)

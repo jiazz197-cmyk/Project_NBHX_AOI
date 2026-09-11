@@ -45,21 +45,60 @@ def _box_to_dict(box: Any) -> dict[str, Any]:
     }
 
 
+def register_bad_image(
+    station_code: str,
+    seq: int,
+    captured_at: str,
+    error_code: str,
+    station_name: str | None = None,
+    template_version: int | None = None,
+) -> int:
+    """登记坏图 + 异步入队 kind=bad 无图回传 A；返回 b_bad_image.id。
+
+    error_code ∈ {capture_failed, decode_failed, timeout, model_error, disk_error}。
+    坏图无图可落：image_path 保持 NULL，推送时不带 file（跨平台契约 §3.1）。
+    """
+    settings = get_settings()
+    now = _now()
+    bad_image_id = store_models.insert_bad_image({
+        "station_code": station_code, "seq": seq,
+        "captured_at": captured_at or now, "error_code": error_code,
+    })
+    meta = {
+        "kind": "bad",
+        "instance_code": settings.INSTANCE_CODE,
+        "station_code": station_code,
+        "station_name": station_name,
+        "seq": seq,
+        "captured_at": captured_at or now,
+        "received_at": now,
+        "template_version": template_version,
+        "model_refs": [],
+        "verdict": None,
+        "verdict_reasons": [],
+        "boxes": [],
+        "tiling_meta": {},
+        "latency_ms": None,
+        "image": None,
+        "error_code": error_code,
+        "versions": {"platform": "0.1.0", "skillname": "0.1.0", "pipeline_core": "0.1.0"},
+    }
+    queue.enqueue("bad", bad_image_id, station_code, seq, meta)
+    return bad_image_id
+
+
 def run_inspection(image_bytes: bytes, station_code: str, seq: int, captured_at: str) -> dict[str, Any]:
     """核心推理链路（inspect/image 与 capture 共用），返回响应 data。"""
     settings = get_settings()
 
-    # 1. 解码（坏图 → 40010 + 登记 b_bad_image）
+    # 1. 解码（坏图 → 40010 + 登记 b_bad_image + 异步入队回传 A）
     try:
         img = Image.open(BytesIO(image_bytes)).convert("RGB")
         arr = np.array(img)
         md5 = hashlib.md5(image_bytes).hexdigest()
         width, height = img.size
     except Exception as exc:  # noqa: BLE001
-        store_models.insert_bad_image({
-            "station_code": station_code, "seq": seq,
-            "captured_at": captured_at or _now(), "error_code": "decode_failed",
-        })
+        register_bad_image(station_code, seq, captured_at, "decode_failed")
         raise BizError(400, CODE_BAD_PAYLOAD, "坏图") from exc
 
     # 2. 工位（未注册/未启用 → 40402）

@@ -271,8 +271,15 @@ def list_inspections() -> list[dict[str, Any]]:
 # ---------- b_bad_image ----------
 
 def insert_bad_image(info: dict[str, Any]) -> int:
+    """登记坏图；同 (station_code, seq) 已存在则返回既有 id（幂等，防 UNIQUE 冲突）。"""
     conn = _connect()
     try:
+        row = conn.execute(
+            "SELECT id FROM b_bad_image WHERE station_code = ? AND seq = ?",
+            (info["station_code"], info["seq"]),
+        ).fetchone()
+        if row:
+            return row["id"]
         cur = conn.execute(
             """
             INSERT INTO b_bad_image (station_code, seq, captured_at, error_code, note, pushed_status, created_at)
