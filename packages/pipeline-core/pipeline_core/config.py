@@ -31,6 +31,7 @@ def load_config(yaml_text: str) -> InspectConfig:
 
     objects: list[ObjectSpec] = []
     seen_codes: set[str] = set()
+    seen_class_ids: dict[str, set[int]] = {}
     for obj in objects_data:
         if not isinstance(obj, dict):
             raise ValueError("config.objects[] must be a mapping")
@@ -62,12 +63,19 @@ def load_config(yaml_text: str) -> InspectConfig:
             raise ValueError(f"object {code}: require 0 < recheck_min < auto_min < 1")
 
         risk_level = obj.get("risk_level")
-        if not isinstance(risk_level, int):
-            raise ValueError(f"object {code}: risk_level must be int")
+        if not isinstance(risk_level, int) or not (1 <= risk_level <= 3):
+            raise ValueError(f"object {code}: risk_level must be int in [1, 3]")
 
         model_ref = obj.get("model_ref") or top_model_ref
         if not isinstance(model_ref, str) or not model_ref:
             raise ValueError(f"object {code}: model_ref is required")
+
+        # 同一 model_ref 下，class_map 的类别索引不得跨 object 重复（否则静默覆盖映射）
+        ids = seen_class_ids.setdefault(model_ref, set())
+        for cls_id in parsed_map:
+            if cls_id in ids:
+                raise ValueError(f"model {model_ref}: duplicate class_map index {cls_id} across objects")
+            ids.add(cls_id)
 
         objects.append(ObjectSpec(
             code=code,
