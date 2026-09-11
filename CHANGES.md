@@ -361,3 +361,54 @@ PUT  …/manifests/93-yolo-ds9                          → 201  docker-content-
   `DELETE https://registry-1.docker.io/v2/rekal1018/aoi-model/manifests/<tag>`。
 - 另有真推留下的 `90-stub-ds9` / `91-yolo-ds9` / `92-yolo-ds9` / `93-yolo-ds9` 四个 tag：按契约"镜像不可变、A 侧软删不动仓库"的口径**保留**，
   供 B 侧拉取联调；如需清理同样需上述删除权限。
+
+---
+
+## 依赖去 git 源 + A 侧 CI 落地（2026-09-11）
+
+### 1. 背景
+
+落 A 侧 CI（`tests/contracts` 挂 GitLab）时发现：根 `pyproject.toml` 的 `label-studio-sdk`
+钉在 `git+https://github.com/HumanSignal/label-studio-sdk.git@effb2988`（上游 LS 自带，
+随 fork 骨架继承；上游用它未发版的提交，故钉 rev 而非 PyPI 版本）。后果：任何
+`uv sync --frozen` 都必须能出网 GitHub——本机直连实测不通（仅 127.0.0.1:7897 代理可用），
+内网 runner 能否出网未知，CI 落地的硬阻塞。
+
+另：该包为 LS 运行时依赖（`data_import`/`data_export`/`projects`/`tasks` 等 17 处模块级
+import，含 `converter` 导出引擎），不可移除，只能换源。
+
+### 2. 变更
+
+| 文件 | 变更 |
+|---|---|
+| `pyproject.toml` | `label-studio-sdk` 改版本约束 `>=2.1.1,<3.0.0`；删除 `[tool.uv.sources]` 的 git pin |
+| `uv.lock` | 重锁，仅该包变化：`v2.1.3 (effb2988) → v2.1.1`（PyPI registry）；git 源清零 |
+| `.gitlab-ci.yml` | **新增**。job `a-contract-tests`：python:3.12-slim + postgres:16 service，`uv sync --frozen --group test` → editable 装两个共享包 → `PYTHONPATH=label_studio` 跑 `tests/contracts`；uv 缓存按 uv.lock 键控；MR 与默认分支触发 |
+
+版本选择说明：钉的 rev 自报 2.1.3（未发版），PyPI 最新 2.1.1（2026-08-10 发布），退两个 patch。
+
+### 3. 验证（换源不改行为）
+
+1. **契约套件（CI 目标）三形态全绿 205 passed / 8 skipped**：常规环境、`MINIO_SKIP=true`、
+   `env -i` 白名单环境（只给 PG + `MINIO_SKIP` + `PYTHONPATH`，即 CI job 的精确环境形态）。
+2. **SDK 相关面上游子集 A/B**（data_export/data_import/projects/tasks/prediction_validation/tests/sdk）：
+   2.1.1 下 230 passed / 10 failed；将 2.1.3（本地 uv git 缓存）装回重跑**同样 10 个失败**——
+   证明失败为存量问题（骨架清理剥离 S3/nginx 相关所致），与换版本无关。
+3. **源码 diff**：`label_interface/interface.py` 仅 26 行差异且全在报错文案；`control_tags.py`
+   差异为新增标签类型（Bitmask/MagicWand/Vector/Timeline，AOI 不使用）。
+4. `find_tags('control')`（`cache_labels.py` 的调用形态）在两版本实现逐字相同（单数非合法类别、
+   均落"返回全部 tags"兜底）——上游自身用法，行为零变化。
+
+### 4. CI 配方中被实测钉死的细节
+
+- **共享包必须单独 editable 安装**（`aoi_training.models` import `skillname`；不装则上游套件收集即挂）；
+- **`MINIO_SKIP=true` 必须显式设置**：`base.py:951` 的 endpoint 缺省 `localhost:9000` 且默认不 skip，
+  本地跑绿隐含依赖了常驻 minio 容器，CI 不带 MinIO；
+- `psycopg[binary]` 免编译，slim 镜像无需构建链；`tests/contracts` 无需 MinIO/Redis 服务。
+
+### 5. 顺带发现（存量，本次未处理）
+
+- 上游 `make test` 自 9 月 8 日骨架化起不可运行：`label_studio/fsm/tests/conftest.py:27` 引用
+  已被清理的 `label_studio.tests.conftest.aws_credentials`，收集即错（绕开 fsm 后另有 10 例存量失败，见 §3.2）；
+- 本机默认 uv 缓存 `~/.cache/uv/sdists-v9/.git`（0 字节异常文件）导致 uv 无法初始化缓存，
+  本机需 `UV_CACHE_DIR` 指仓库内 `.uv-cache`。
