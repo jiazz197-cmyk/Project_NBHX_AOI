@@ -304,13 +304,20 @@ def list_bad_images() -> list[dict[str, Any]]:
 
 
 def next_seq(station_code: str) -> int:
-    """该工位下一个检测序号（契约 §5.2：单调递增，重启后从最大值+1 继续）。"""
+    """该工位下一个检测序号（契约 §5.2：单调递增，重启后从最大值+1 继续）。
+
+    坏图也占号：取 b_inspection 与 b_bad_image 两者 MAX(seq) 的较大值 +1，
+    避免坏图占用的 seq 被后续好图复用（同 seq 既坏又好，违反 seq 唯一性）。
+    """
     conn = _connect()
     try:
-        row = conn.execute(
+        insp = conn.execute(
             "SELECT MAX(seq) AS m FROM b_inspection WHERE station_code = ?", (station_code,),
         ).fetchone()
-        return (row["m"] or 0) + 1
+        bad = conn.execute(
+            "SELECT MAX(seq) AS m FROM b_bad_image WHERE station_code = ?", (station_code,),
+        ).fetchone()
+        return max((insp["m"] or 0), (bad["m"] or 0)) + 1
     finally:
         conn.close()
 

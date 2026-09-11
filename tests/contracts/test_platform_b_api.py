@@ -149,6 +149,56 @@ class TestBadImage:
         assert len(queue.list_items()) == 1
         assert len(store_models.list_bad_images()) == 1
 
+    def test_capture_failed_enqueues_outbox(self, client, tmp_path):
+        client.post("/api/v1/stations", json={"code": "ST01", "name": "1号线"})
+        client.post("/api/v1/stations/ST01/enable")
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        client.put("/api/v1/stations/ST01/camera", json={"adapter": "directory", "source": str(empty_dir)})
+
+        resp = client.post("/api/v1/stations/ST01/capture")
+        assert resp.status_code == 400
+        assert resp.json()["code"] == 40010
+
+        from app.outbox import queue
+        from app.store import models as store_models
+
+        items = queue.list_items()
+        assert len(items) == 1
+        item = items[0]
+        assert item["kind"] == "bad"
+        assert item["idempotency_key"] == "ST01-1-bad"
+
+        payload = json.loads(item["payload"])
+        assert payload["error_code"] == "capture_failed"
+        assert payload["image"] is None
+        assert payload["verdict"] is None
+
+        bads = store_models.list_bad_images()
+        assert len(bads) == 1
+        assert bads[0]["error_code"] == "capture_failed"
+        assert item["ref_id"] == bads[0]["id"]
+
+    def test_consecutive_capture_failed_seq_increments(self, client, tmp_path):
+        client.post("/api/v1/stations", json={"code": "ST01", "name": "1号线"})
+        client.post("/api/v1/stations/ST01/enable")
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        client.put("/api/v1/stations/ST01/camera", json={"adapter": "directory", "source": str(empty_dir)})
+
+        from app.outbox import queue
+        from app.store import models as store_models
+
+        for _ in range(3):
+            resp = client.post("/api/v1/stations/ST01/capture")
+            assert resp.status_code == 400
+            assert resp.json()["code"] == 40010
+
+        # 连续坏图 seq 单调递增（坏图也占号，不重号、不吞图）
+        bads = store_models.list_bad_images()
+        assert sorted(b["seq"] for b in bads) == [1, 2, 3]
+        assert len(queue.list_items()) == 3
+
 
 # --------------------------------------------------------------------------- 工位 40402
 class TestStation:
@@ -247,4 +297,26 @@ class TestOutbox:
         id2 = queue.enqueue("suspicious", 1, "ST01", 1042, meta)
         assert id1 == id2
         assert len(queue.list_items()) == 1
+        get_settings.cache_clear()
+
+    def test_mark_pushed_syncs_bad_image_status(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DB_PATH", str(tmp_path / "infer.db"))
+        monkeypatch.setenv("DATA_DIR", str(tmp_path))
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        from app.db import init_db
+
+        init_db()
+        from app.outbox import queue
+        from app.store import models as store_models
+
+        bad_id = store_models.insert_bad_image({"station_code": "ST01", "seq": 1, "error_code": "capture_failed"})
+        oid = queue.enqueue("bad", bad_id, "ST01", 1, {"kind": "bad"})
+
+        queue.mark_pushed(oid)
+
+        bads = store_models.list_bad_images()
+        assert bads[0]["pushed_status"] == "pushed"
+        assert bads[0]["pushed_at"]
         get_settings.cache_clear()

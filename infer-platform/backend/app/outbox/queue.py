@@ -108,6 +108,22 @@ def due_items(limit: int = 50) -> list[dict[str, Any]]:
 
 # ---------- 状态机 ----------
 
+def _mark_ref_status(conn, kind: str, ref_id: int, status: str) -> None:
+    """回写 ref 表（b_inspection / b_bad_image）的 pushed_status/pushed_at，
+    使业务记录的展示状态与 outbox 实际推送结果一致。"""
+    now = _now()
+    if kind == "suspicious":
+        conn.execute(
+            "UPDATE b_inspection SET pushed_status=?, pushed_at=? WHERE id=?",
+            (status, now, ref_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE b_bad_image SET pushed_status=?, pushed_at=? WHERE id=?",
+            (status, now, ref_id),
+        )
+
+
 def mark_pushing(outbox_id: int) -> None:
     conn = _connect()
     try:
@@ -118,41 +134,54 @@ def mark_pushing(outbox_id: int) -> None:
 
 
 def mark_pushed(outbox_id: int) -> None:
+    """outbox 置 pushed，并回写 ref 表的 pushed_status='pushed'。"""
     conn = _connect()
     try:
+        row = conn.execute("SELECT kind, ref_id FROM b_outbox WHERE id = ?", (outbox_id,)).fetchone()
+        if row is None:
+            return
         conn.execute(
             "UPDATE b_outbox SET status='pushed', pushed_at=?, last_error=NULL WHERE id = ?",
             (_now(), outbox_id),
         )
+        _mark_ref_status(conn, row["kind"], row["ref_id"], "pushed")
         conn.commit()
     finally:
         conn.close()
 
 
 def mark_dead(outbox_id: int, error: str) -> None:
+    """outbox 置 dead，并回写 ref 表的 pushed_status='dead'。"""
     conn = _connect()
     try:
+        row = conn.execute("SELECT kind, ref_id FROM b_outbox WHERE id = ?", (outbox_id,)).fetchone()
+        if row is None:
+            return
         conn.execute(
             "UPDATE b_outbox SET status='dead', last_error=? WHERE id = ?",
             (error[:500], outbox_id),
         )
+        _mark_ref_status(conn, row["kind"], row["ref_id"], "dead")
         conn.commit()
     finally:
         conn.close()
 
 
 def on_failure(outbox_id: int, error: str) -> None:
-    """推送失败：attempts+1；退避用尽或超 24h → dead，否则定下次重试时间。"""
+    """推送失败：attempts+1；退避用尽或超 24h → dead（并回写 ref 表），否则定下次重试时间。"""
     settings = get_settings()
     conn = _connect()
     try:
-        row = conn.execute("SELECT attempts, created_at FROM b_outbox WHERE id = ?", (outbox_id,)).fetchone()
+        row = conn.execute(
+            "SELECT kind, ref_id, attempts, created_at FROM b_outbox WHERE id = ?", (outbox_id,)
+        ).fetchone()
         if row is None:
             return
         attempts = row["attempts"] + 1
         if attempts >= len(RETRY_BACKOFF_MINUTES) or _age_hours(row["created_at"]) >= settings.OUTBOX_MAX_AGE_HOURS:
             conn.execute("UPDATE b_outbox SET status='dead', attempts=?, last_error=? WHERE id = ?",
                          (attempts, error[:500], outbox_id))
+            _mark_ref_status(conn, row["kind"], row["ref_id"], "dead")
         else:
             next_retry = _add_minutes(_now(), RETRY_BACKOFF_MINUTES[attempts - 1])
             conn.execute(
