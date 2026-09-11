@@ -41,13 +41,21 @@ def reset_aoi_stub_state():
 
 
 @pytest.fixture(autouse=True)
-def force_fake_publish_mode(settings):
+def force_fake_publish_mode(request):
     """契约测试一律走 fake 发布模式，且默认不落盘。
 
     本地 ``.env`` 可能开着 ``AOI_PUBLISH_MODE=registry``（真推 Docker Hub）：测试必须与本地配置解耦，
     否则会联网推仓库、污染外部状态。需要验证 registry 客户端的用例自行改 ``settings.AOI_PUBLISH_MODE``
     并 mock HTTP 层；需要验证落盘的用例用 ``tmp_path`` 覆盖 ``AOI_PUBLISH_ARTIFACTS_DIR``。
+
+    pytest-django 不可用时（例如只跑 ``packages/*`` 或平台 B 的纯包/纯 FastAPI 测试）直接放行，
+    不把"零三方依赖"的包测试与 B 侧测试绑死在 Django 的 ``settings`` fixture 上。
     """
+    try:
+        settings = request.getfixturevalue('settings')
+    except Exception:  # pragma: no cover - 无 pytest-django 的测试环境
+        yield
+        return
     settings.AOI_PUBLISH_MODE = 'fake'
     settings.AOI_PUBLISH_ARTIFACTS_DIR = ''
     yield
