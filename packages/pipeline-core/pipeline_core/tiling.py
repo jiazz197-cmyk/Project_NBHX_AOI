@@ -26,7 +26,7 @@ def slice_image(
         Tile 列表，每个包含切片图像和位置信息
     """
     h, w = image.shape[:2]
-    stride = int(tile_size * (1 - overlap))
+    stride = max(1, int(tile_size * (1 - overlap)))
     tiles: list[Tile] = []
 
     y = 0

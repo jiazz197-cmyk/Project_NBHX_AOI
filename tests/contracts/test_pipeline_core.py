@@ -184,3 +184,12 @@ def test_load_config_from_fixture(fixtures_dir):
     assert cfg.objects[0].code == "object_fault_type_01"
     assert cfg.objects[0].risk_level == 3
     assert cfg.objects[0].class_map == {0: "object_fault_type_01"}
+
+
+def test_version_matches_distribution_metadata():
+    """``__version__`` 与发行元数据一致（避免两处版本漂移）。"""
+    import importlib.metadata as md
+
+    import pipeline_core
+
+    assert pipeline_core.__version__ == md.version("pipeline-core")

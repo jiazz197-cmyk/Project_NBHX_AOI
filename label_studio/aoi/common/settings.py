@@ -21,7 +21,13 @@ __all__ = [
     'get_model_registry_user',
     'get_model_registry_password',
     'get_publish_retry',
+    'get_publish_mode',
+    'get_registry_proxy',
+    'get_publish_artifacts_dir',
 ]
+
+#: 发布模式：``fake`` 纯离线假推送（默认）/ ``registry`` 走 Registry v2 API 真推送
+PUBLISH_MODES = ('fake', 'registry')
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +81,8 @@ def get_prelabel_require_internal_token() -> bool:
 
     默认 ``False``：LS 1.x ``MLApi`` 只发送 ``User-Agent``（可选 Basic Auth），
     **不携带** ``X-Internal-Token``（见 ``label_studio/ml/api_connector.py`` 的 HEADERS）。
-    D2 复用验证日实证结论见 ``docs/复用验证_D2.md`` §7；如需强制可置
-    ``AOI_PRELABEL_REQUIRE_INTERNAL_TOKEN=true``。
+    D2 复用验证日实测确认（回归：``TestPrelabelProtocol::test_optional_internal_token``）；
+    如需强制可置 ``AOI_PRELABEL_REQUIRE_INTERNAL_TOKEN=true``。
     """
     raw = _get('AOI_PRELABEL_REQUIRE_INTERNAL_TOKEN', 'false')
     return str(raw).strip().lower() in {'1', 'true', 'yes', 'on'}
@@ -103,3 +109,37 @@ def get_publish_retry() -> int:
         return int(_get('PUBLISH_RETRY', '3'))
     except (TypeError, ValueError):
         return 3
+
+
+def get_publish_mode() -> str:
+    """发布模式（D3）：``fake``（默认，纯离线）或 ``registry``（Registry v2 真推送）。
+
+    未知取值一律回落 ``fake``（宁可不推，也不误连外网）；D7 真实流水线上线后本开关保留用于离线开发。
+    """
+    mode = str(_get('AOI_PUBLISH_MODE', 'fake')).strip().lower()
+    return mode if mode in PUBLISH_MODES else 'fake'
+
+
+def get_registry_proxy() -> str:
+    """发布推送（registry/auth）专用 HTTP 代理；空 = 直连。
+
+    只作用于 ``aoi.training.publish.RegistryPushClient`` 的会话，不影响平台其它出网流量。
+    取值只从 ``AOI_REGISTRY_PROXY`` 环境变量读，**端口等地基信息不写进代码**；
+    Docker Hub 直连不通的机器按本机实际代理填写（格式与占位见 ``.env.example``）。
+    """
+    return _get('AOI_REGISTRY_PROXY', '')
+
+
+def get_publish_artifacts_dir() -> str:
+    """发布产物落盘目录（相对路径按**仓库根**解析）；空字符串 = 不落盘。
+
+    产物（layer/config/manifest + model.yaml + 占位权重）供人工核查与「有网机器手工直推」临时通道，
+    默认 ``tmp/publish``——``tmp/`` 已在 ``.gitignore``，不会进版本库。
+
+    **显式空串即关闭**：与其它键不同，这里空串是有效取值（关掉落盘），因此显式设置的
+    ``settings.AOI_PUBLISH_ARTIFACTS_DIR``（含空串，测试常用）优先于环境变量，不再回落默认值。
+    """
+    override = getattr(settings, 'AOI_PUBLISH_ARTIFACTS_DIR', None)
+    if override is not None:
+        return str(override)
+    return os.environ.get('AOI_PUBLISH_ARTIFACTS_DIR', 'tmp/publish')

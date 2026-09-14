@@ -8,12 +8,18 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
-from .api import health
+from .api import health, inspect, models, records, reports, stations, stats, system
 from .config import get_settings
 from .db import init_db
 from .envelope import new_request_id, register_exception_handlers
+from . import scheduler
+
+# 前端构建产物目录（Vite 产物：dist/index.html + dist/assets/*）
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 
 @asynccontextmanager
@@ -21,7 +27,9 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     Path(settings.DATA_DIR).mkdir(parents=True, exist_ok=True)
     init_db()
+    scheduler.start()
     yield
+    scheduler.shutdown()
 
 
 def create_app() -> FastAPI:
@@ -34,7 +42,31 @@ def create_app() -> FastAPI:
         return response
 
     app.include_router(health.router, prefix="/api/v1")
+    app.include_router(models.router, prefix="/api/v1")
+    app.include_router(stations.router, prefix="/api/v1")
+    app.include_router(inspect.router, prefix="/api/v1")
+    app.include_router(records.router, prefix="/api/v1")
+    app.include_router(stats.router, prefix="/api/v1")
+    app.include_router(reports.router, prefix="/api/v1")
+    app.include_router(system.router, prefix="/api/v1")
     register_exception_handlers(app)
+
+    # 静态前端托管（P0骨架 §3.1）：/assets 静态资源 + SPA fallback 到 index.html
+    if FRONTEND_DIST.exists():
+        assets_dir = FRONTEND_DIST / "assets"
+        if assets_dir.is_dir():
+            app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def spa_fallback(full_path: str):
+            # 不吞 API 与静态资源路径，交给已有路由/404
+            if full_path.startswith(("api/", "assets/")):
+                raise HTTPException(status_code=404)
+            candidate = FRONTEND_DIST / full_path
+            if full_path and candidate.is_file():
+                return FileResponse(candidate)
+            return FileResponse(FRONTEND_DIST / "index.html")
+
     return app
 
 

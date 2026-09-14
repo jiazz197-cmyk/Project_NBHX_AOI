@@ -191,7 +191,7 @@ def ml_backend_sample() -> dict[str, Any]:
 
     return {
         'description': 'LS 1.x ML backend 协议样例（健康/初始化/预测/校验）',
-        'source': 'LS 1.24.0.dev0 label_studio/ml/api_connector.py + D2 实测（docs/复用验证_D2.md §2.7）',
+        'source': 'LS 1.24.0.dev0 label_studio/ml/api_connector.py + D2 实测',
         # 实测：LS 调用只带 User-Agent，不携带 X-Internal-Token / Authorization（无 Basic Auth 时）
         'observed_request_headers': {
             'User-Agent': 'heartex/<git-sha>',
@@ -230,7 +230,7 @@ def ml_backend_sample() -> dict[str, Any]:
 def yolo_export_layout_sample() -> dict[str, Any]:
     """LS 1.24 YOLO 导出实测布局（D2；无 data.yaml，classes.txt 为准）。"""
     return {
-        'source': 'LS 1.24.0.dev0 data_export YOLO 实测（docs/复用验证_D2.md §2.6）',
+        'source': 'LS 1.24.0.dev0 data_export YOLO 实测（D2）',
         'entries': ['images/', 'labels/', 'classes.txt', 'notes.json'],
         'has_data_yaml': False,
         'classes_source': 'classes.txt',

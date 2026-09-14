@@ -1165,8 +1165,8 @@ def annotate_storage_filename(queryset: TaskQuerySet) -> TaskQuerySet:
 
     storage_key_names = [F(s + '__key') for s in settings.IO_STORAGES_IMPORT_LINK_NAMES]
     # AOI 仓库清理云存储 provider 后可能只剩 1 个（甚至 0 个）import link name；
-    # Concat 要求至少 2 个位置表达式，否则 `Concat must take at least two expressions`。
-    # 见 docs/已知问题_任务详情500.md。
+    # Concat 要求至少 2 个位置表达式，否则 `Concat must take at least two expressions`，
+    # 任务详情（all_fields=True）必然 500。回归：TestTaskDetailConcatRegression。
     if not storage_key_names:
         return queryset.annotate(storage_filename=Value(None, output_field=TextField()))
     if len(storage_key_names) == 1:

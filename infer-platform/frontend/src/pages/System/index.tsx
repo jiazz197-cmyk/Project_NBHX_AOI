@@ -11,28 +11,84 @@ import {
 import {
   CloudDownloadOutlined, UploadOutlined, DeleteOutlined,
   ReloadOutlined, ThunderboltOutlined, CheckCircleOutlined,
-  CloseCircleOutlined, WarningOutlined, SyncOutlined,
+  CloseCircleOutlined, WarningOutlined, SyncOutlined, ExportOutlined,
 } from '@ant-design/icons';
-import { mockHealth, mockModels } from '../../api/mock';
-import type { HealthData, ModelInfo } from '../../api/types';
+import { mockHealth, mockModels, mockOutbox } from '../../api/mock';
+import { get, post } from '../../api/client';
+import type { HealthData, ModelInfo, OutboxItem, RemoteModelItem } from '../../api/types';
 
 export default function System() {
   const [health, setHealth] = useState<HealthData | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [outbox, setOutbox] = useState<OutboxItem[]>([]);
   const [pullModalOpen, setPullModalOpen] = useState(false);
   const [pullImage, setPullImage] = useState('');
+  const [remoteOpen, setRemoteOpen] = useState(false);
+  const [remoteItems, setRemoteItems] = useState<RemoteModelItem[]>([]);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+  const [remoteRepo, setRemoteRepo] = useState('');
+  const [pullingTag, setPullingTag] = useState<string | null>(null);
 
   useEffect(() => {
     setHealth(mockHealth);
     setModels(mockModels);
+    setOutbox(mockOutbox);
   }, []);
 
-  const handlePull = () => {
+  const refreshLocalModels = async () => {
+    try {
+      const list = await get<ModelInfo[]>('/models');
+      setModels(list);
+    } catch {
+      // 后端未就绪时保持现有列表
+    }
+  };
+
+  const handlePull = async () => {
     if (!pullImage.trim()) return;
-    // TODO: POST /models/pull { image: "..." }
-    message.info(`拉取模型: ${pullImage}（mock）`);
-    setPullModalOpen(false);
-    setPullImage('');
+    try {
+      await post('/models/pull', { image: pullImage.trim() });
+      message.success('拉取成功');
+      setPullModalOpen(false);
+      setPullImage('');
+      await refreshLocalModels();
+    } catch (e) {
+      message.error((e as Error).message || '拉取失败');
+    }
+  };
+
+  const fetchRemote = async (refresh = false) => {
+    setRemoteLoading(true);
+    try {
+      const params: Record<string, string> = {};
+      if (refresh) params.refresh = '1';
+      if (remoteRepo) params.repo = remoteRepo;
+      const data = await get<{ registry: string; repository: string; items: RemoteModelItem[] }>('/models/remote', params);
+      setRemoteItems(data.items);
+    } catch (e) {
+      message.error((e as Error).message || '获取远端列表失败');
+    } finally {
+      setRemoteLoading(false);
+    }
+  };
+
+  const openRemote = () => {
+    setRemoteOpen(true);
+    fetchRemote(true);
+  };
+
+  const pullRemote = async (item: RemoteModelItem) => {
+    setPullingTag(item.tag);
+    try {
+      await post('/models/pull', { image: item.image });
+      message.success(`拉取成功：${item.model_ref ?? item.tag}`);
+      await refreshLocalModels();
+      await fetchRemote(true);
+    } catch (e) {
+      message.error((e as Error).message || '拉取失败');
+    } finally {
+      setPullingTag(null);
+    }
   };
 
   const handleDelete = (modelRef: string) => {
@@ -42,6 +98,23 @@ export default function System() {
 
   const handlePreload = (modelRef: string) => {
     message.info(`预加载模型: ${modelRef}（mock）`);
+  };
+
+  const handleRetryAll = () => {
+    // TODO: POST /system/outbox/retry-all
+    setOutbox(prev => prev.map(o => (o.status === 'dead' ? { ...o, status: 'pending', last_error: undefined } : o)));
+    message.success('已触发全部死信重推（mock）');
+  };
+
+  const handleRetryOne = (id: number) => {
+    // TODO: POST /system/outbox/{id}/retry
+    setOutbox(prev => prev.map(o => (o.id === id ? { ...o, status: 'pending', last_error: undefined } : o)));
+    message.success(`已重推回传记录 #${id}（mock）`);
+  };
+
+  const handleExportDead = () => {
+    // TODO: 本地导出 dead 记录（跨平台契约 §3.5：dead 支持本地导出）
+    message.info('导出死信记录（mock）');
   };
 
   const modelColumns = [
@@ -68,6 +141,52 @@ export default function System() {
           <a onClick={() => handleDelete(record.model_ref)} style={{ color: '#ff4d4f' }}><DeleteOutlined /> 删除</a>
         </Space>
       ),
+    },
+  ];
+
+  const remoteColumns = [
+    { title: 'Tag', dataIndex: 'tag', key: 'tag' },
+    { title: '模型引用', dataIndex: 'model_ref', key: 'model_ref', render: (v: string | null) => v ?? '-' },
+    { title: '精度', dataIndex: 'precision', key: 'precision', width: 70 },
+    {
+      title: '状态', key: 'local', width: 100,
+      render: (_: unknown, r: RemoteModelItem) =>
+        r.local ? <Tag color="green">已就绪</Tag> : <Tag>远端</Tag>,
+    },
+    {
+      title: '操作', key: 'action', width: 100,
+      render: (_: unknown, r: RemoteModelItem) =>
+        r.local ? (
+          <Button size="small" disabled>已就绪</Button>
+        ) : (
+          <Button size="small" type="primary" loading={pullingTag === r.tag} onClick={() => pullRemote(r)}>拉取</Button>
+        ),
+    },
+  ];
+
+  const outboxStatusColors: Record<string, string> = {
+    pending: 'blue',
+    pushing: 'processing',
+    pushed: 'green',
+    dead: 'red',
+  };
+
+  const outboxColumns = [
+    { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
+    { title: '类型', dataIndex: 'kind', key: 'kind', width: 90, render: (v: string) => <Tag>{v}</Tag> },
+    { title: '幂等键', dataIndex: 'idempotency_key', key: 'idempotency_key' },
+    { title: '次数', dataIndex: 'attempts', key: 'attempts', width: 60 },
+    {
+      title: '状态', dataIndex: 'status', key: 'status', width: 90,
+      render: (v: string) => <Tag color={outboxStatusColors[v]}>{v}</Tag>,
+    },
+    { title: '下次重试', dataIndex: 'next_retry_at', key: 'next_retry_at', width: 170, render: (v?: string) => v ?? '-' },
+    { title: '最后错误', dataIndex: 'last_error', key: 'last_error', render: (v?: string) => v ?? '-' },
+    { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 170, render: (v: string) => new Date(v).toLocaleString() },
+    {
+      title: '操作', key: 'action', width: 80,
+      render: (_: unknown, record: OutboxItem) =>
+        record.status === 'dead' ? <a onClick={() => handleRetryOne(record.id)}><ReloadOutlined /> 重推</a> : null,
     },
   ];
 
@@ -121,9 +240,8 @@ export default function System() {
         size="small"
         extra={
           <Space>
-            <Button icon={<CloudDownloadOutlined />} type="primary" onClick={() => setPullModalOpen(true)}>
-              拉取模型
-            </Button>
+            <Button icon={<CloudDownloadOutlined />} type="primary" onClick={openRemote}>远端模型</Button>
+            <Button icon={<CloudDownloadOutlined />} onClick={() => setPullModalOpen(true)}>拉取模型</Button>
             <Button icon={<UploadOutlined />}>离线导入</Button>
           </Space>
         }
@@ -137,24 +255,26 @@ export default function System() {
         />
       </Card>
 
-      {/* Outbox 状态 */}
-      {health && (
-        <Card title="回传队列 (Outbox)" size="small" style={{ marginTop: 16 }}>
-          <Row gutter={16}>
-            <Col span={8}>
-              <Statistic title="待回传" value={health.outbox.pending} valueStyle={{ color: '#1677ff' }} />
-            </Col>
-            <Col span={8}>
-              <Statistic title="死信" value={health.outbox.dead} valueStyle={{ color: '#ff4d4f' }} />
-            </Col>
-            <Col span={8}>
-              <Space>
-                <Button icon={<ReloadOutlined />} size="small">全部重推</Button>
-              </Space>
-            </Col>
-          </Row>
-        </Card>
-      )}
+      {/* Outbox 回传队列 */}
+      <Card
+        title="回传队列 (Outbox)"
+        size="small"
+        style={{ marginTop: 16 }}
+        extra={
+          <Space>
+            <Button icon={<ReloadOutlined />} size="small" onClick={handleRetryAll}>全部重推</Button>
+            <Button icon={<ExportOutlined />} size="small" onClick={handleExportDead}>导出死信</Button>
+          </Space>
+        }
+      >
+        <Table
+          columns={outboxColumns}
+          dataSource={outbox}
+          rowKey="id"
+          size="small"
+          pagination={false}
+        />
+      </Card>
 
       {/* 版本信息 */}
       <Card title="版本信息" size="small" style={{ marginTop: 16 }}>
@@ -186,6 +306,34 @@ export default function System() {
             支持 Docker Hub 和内网 registry。B 用只读凭据拉取，无需 Docker daemon。
           </Typography.Text>
         </Space>
+      </Modal>
+
+      {/* 远端模型列表弹窗（一键拉取） */}
+      <Modal
+        title="远端模型（一键拉取）"
+        open={remoteOpen}
+        onCancel={() => setRemoteOpen(false)}
+        footer={null}
+        width={640}
+      >
+        <Space style={{ marginBottom: 12 }}>
+          <Input
+            placeholder="仓库名（默认 MODEL_IMAGE_REPO）"
+            value={remoteRepo}
+            onChange={(e) => setRemoteRepo(e.target.value)}
+            style={{ width: 280 }}
+          />
+          <Button icon={<ReloadOutlined />} loading={remoteLoading} onClick={() => fetchRemote(true)}>刷新</Button>
+        </Space>
+        <Table
+          columns={remoteColumns}
+          dataSource={remoteItems}
+          rowKey="tag"
+          size="small"
+          pagination={false}
+          loading={remoteLoading}
+          locale={{ emptyText: '远端暂无可用模型' }}
+        />
       </Modal>
     </div>
   );

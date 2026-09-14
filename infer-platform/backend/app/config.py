@@ -27,6 +27,7 @@ class Settings(BaseModel):
     MODEL_REGISTRY: str = "docker.io"
     MODEL_REGISTRY_USER: str = ""
     MODEL_REGISTRY_TOKEN: str = ""
+    MODEL_IMAGE_REPO: str = ""
     MODEL_PULL_MODE: str = "oci"
 
     # ---------- 对接平台 A ----------

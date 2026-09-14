@@ -67,6 +67,13 @@ def run(
         # 推理
         raw_results = model.infer([t.image for t in tiles])
 
+        # 宁错不漏：模型返回片数必须与切片数一致，否则静默丢切片会漏检
+        if len(raw_results) != len(tiles):
+            raise ValueError(
+                f"model {model_ref!r} infer returned {len(raw_results)} results "
+                f"for {len(tiles)} tiles (must be equal)"
+            )
+
         # 4. 坐标转换 + 过滤
         for tile, raw_boxes in zip(tiles, raw_results):
             for raw_box in raw_boxes:
