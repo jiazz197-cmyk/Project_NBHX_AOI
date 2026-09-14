@@ -57,6 +57,12 @@ frontend-watch:
 frontend-build: frontend-setup
 	cd web && bun run build
 
+# Build frontend + refresh the manifest Django actually reads (STATIC_ROOT/js/manifest.json,
+# populated only by collectstatic — web/dist's own manifest.json is never read at runtime).
+# Django loads the manifest once at process start: restart the backend afterwards.
+frontend-build-collect: frontend-build
+	DJANGO_DB=default LOG_DIR=tmp DEBUG=true LOG_LEVEL=DEBUG DJANGO_SETTINGS_MODULE=core.settings.label_studio uv run python label_studio/manage.py collectstatic --noinput
+
 frontend-storybook-serve: frontend-setup
 	cd web && bun run ui:serve
 

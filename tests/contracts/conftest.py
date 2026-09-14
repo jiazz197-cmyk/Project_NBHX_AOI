@@ -25,19 +25,21 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
-def reset_aoi_stub_state():
-    """重置 aoi.core 进程内角色占位（D4 由 aoi_core 表替换）。
+def reset_authz_cache():
+    """清空权限判定缓存。
 
-    Django/DRF 不可用时（例如只跑 ``packages/skillname`` 的纯包测试）直接放行，
-    不把"零三方依赖"的包测试绑死在 Django 上。
+    D4 起权限判定缓存是 ``LocMemCache``（跨用例共享），而用例结束会回滚 ``authz_state.version``：
+    若不清空，下一个用例 bump 回同一版本号时会读到上一个用例的陈旧权限集。
+    Django 不可用时（例如只跑 ``packages/skillname`` 的纯包测试）直接放行。
     """
     try:
-        from aoi.core import views as core_views
+        from django.core.cache import cache
     except Exception:  # pragma: no cover - 纯包测试环境
         yield
         return
-    _reset_core_stub_state(core_views)
+    cache.clear()
     yield
+    cache.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -61,14 +63,6 @@ def force_fake_publish_mode(request):
     yield
 
 
-def _reset_core_stub_state(core_views) -> None:
-    """重置所有进程内全局（含 ``_NEXT_ROLE_ID``，否则用例顺序会影响新建角色 id）。"""
-    core_views._ROLES.clear()
-    core_views._ROLES.update({role['id']: dict(role) for role in core_views._BUILTIN_ROLES})
-    core_views._USER_ROLES.clear()
-    core_views._NEXT_ROLE_ID = 4
-
-
 @pytest.fixture
 def fixtures_dir() -> Path:
     return FIXTURES_DIR
@@ -83,10 +77,22 @@ def api_client():
 
 @pytest.fixture
 def test_user(db):
+    """契约测试主账号：默认授予 ``super_admin``。
+
+    D4 起 RBAC 真实生效（无角色 → 40300），既有用例依赖"登录即可访问"，
+    故主账号取全权限角色；**RBAC 用例自建各角色用户，不复用本账号**。
+    """
+    from aoi.core import authz
+    from aoi.core.models import Role, UserRole
     from django.contrib.auth import get_user_model
 
     User = get_user_model()
-    return User.objects.create_user(email=TEST_USER_EMAIL, password=TEST_USER_PASSWORD)
+    user = User.objects.create_user(email=TEST_USER_EMAIL, password=TEST_USER_PASSWORD)
+    role = Role.objects.filter(code='super_admin').first()
+    if role is not None:
+        UserRole.objects.create(user_id=user.id, role_id=role.id)
+        authz.bump_version()
+    return user
 
 
 @pytest.fixture

@@ -1,0 +1,96 @@
+{% extends 'simple.html' %}
+{% load i18n %}
+{% load static %}
+{% load filters %}
+
+{# ⚠ AOI 覆盖模板（新增文件，未修改任何上游文件） #}
+{# 本文件位于 TEMPLATES['DIRS']（= label_studio/templates/，见 core/settings/base.py:396）， #}
+{# DIRS 先于 APP_DIRS 命中，因此遮蔽 label_studio/users/templates/users/new-ui/user_base.html， #}
+{# 从而在不修改上游模板的前提下替换品牌素材。登录/注册页均 extends 本文件，改这一处即可。 #}
+{# 上游升级后需人工对齐（见 CHANGES.md）：改动点共 5 处，均带「AOI 覆盖」注释。 #}
+
+{% block page_labeling %}
+{# AOI 覆盖 1/5：平台标题 #}
+<title>AOI 数智检测</title>
+<link href="{{settings.HOSTNAME}}{% static 'images/favicon.ico' %}" rel="shortcut icon"/>
+{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ settings.HOSTNAME }}{% static 'css/fonts.hellix.css' %}"/>
+<link rel="stylesheet" href="{{ settings.HOSTNAME }}{% static 'css/login.css' %}"/>
+{# AOI 覆盖 2/5：不再加载 Google Analytics 与外站追踪 iframe（空气隔离部署下是失败请求 + 上游痕迹） #}
+{% endblock %}
+
+{% block content %}
+<script nonce="{{request.csp_nonce}}">
+  window.APP_SETTINGS = window.APP_SETTINGS ?? {};
+  window.APP_SETTINGS.collect_analytics = {{ settings.COLLECT_ANALYTICS|yesno:"true,false" }};
+
+  // Log event to the server, if analytics are enabled
+  // This is a fallback for when the __lsa global is not defined
+  // Normally this is a part of our main bundle but these pages do not use the main bundle
+  // and this allows us to log events from these pages
+  const logEvent = (eventName, metadata = {}) => {
+    if (!window.APP_SETTINGS?.collect_analytics) return;
+
+    const payload = {
+      ...metadata,
+      event: eventName,
+      url: window.location.href,
+    };
+
+    window.requestIdleCallback(() => {
+      const params = new URLSearchParams({ __: JSON.stringify(payload) });
+      const url = `/__lsa/?${params}`;
+      try {
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon(url);
+        } else {
+          const img = new Image();
+          img.src = url;
+        }
+      } catch {
+        // Ignore errors here
+      }
+    });
+  };
+  if (!window.__lsa) {
+    window.__lsa = logEvent;
+  }
+</script>
+
+<div class="login_page_new_ui">
+  <div class="left">
+    {# AOI 覆盖 3/5：公司 logo（NBHX.png 161×32）替换上游 Label Studio 内联 SVG #}
+    {# 不使用 .ls-logo class：该 class 被 login.css 写死 414×64（6.47:1），与 NBHX 的 5.03:1 不符会横向拉伸 #}
+    <img
+      src="{{ settings.HOSTNAME }}{% static 'aoi/NBHX.png' %}"
+      alt="宁波华翔 NBHX"
+      style="height:64px;width:auto;"
+    />
+
+    {# AOI 覆盖 4/5：平台描述 #}
+    <h3>门板外观缺陷检测 · 标注与模型训练一体化平台</h3>
+
+    {# AOI 覆盖 4b/5：登录页提示改为静态文案 #}
+    {# 不 include 上游 user_tips.html：该文件是另一套 tips 实现（内联 JS + fetch /heidi-tips + #}
+    {# 硬编码英文营销文案），离线部署时会回落到英文「Enterprise / Starter Cloud」文案。 #}
+    <div class="tips">
+      <div class="title">标注提示</div>
+      <div class="description">
+        无缺陷的 OK 图也需要提交空标注（不画框），用于训练负样本；拿不准的按最接近类别标注，交由复审环节判定。
+      </div>
+    </div>
+
+    <div class="by">
+      {# AOI 覆盖 5/5：公司署名替换上游 Human Signal 内联 SVG #}
+      宁波华翔 · AOI 数智检测
+    </div>
+  </div>
+  <div class="right">
+    {% block user_content %}
+  </div>
+</div>
+
+  {% endblock %}
+{% endblock %}

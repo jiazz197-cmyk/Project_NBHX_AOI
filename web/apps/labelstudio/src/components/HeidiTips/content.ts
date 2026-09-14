@@ -1,269 +1,73 @@
 import type { TipsCollection } from "./types";
 
+/**
+ * AOI 平台提示文案（D4 素材更换）。
+ *
+ * - 文案与 `label_studio/aoi/core/heidi_tips.py` 保持一致：服务端 `/heidi-tips` 已遮蔽上游的
+ *   GitHub 代理路由，联网时返回的也是同一套文案；这里保留一份作为离线/首次加载的默认值。
+ * - `link.url` **必须是绝对地址**：`utils.ts::createURL` 内部是 `new URL(base)`，相对路径会抛错。
+ */
+const origin = () => window.location.origin;
+
 export const defaultTipsCollection: TipsCollection = {
   projectCreation: [
     {
-      title: "Did you know?",
-      content: "It’s easier to find the projects when you organize them into workspaces using Label Studio Enterprise.",
+      title: "先建数据集，再进标注",
+      content:
+        "AOI 流程是：数据集 → 缺陷字典 → 导入图片 → 训练 → 发布模型。直接从「新建项目」建的项目不会纳入 AOI 数据集管理。",
       closable: true,
       link: {
-        label: "Learn more",
-        url: "https://docs.humansignal.com/guide/manage_projects#Create-workspaces-to-organize-projects",
-        params: {
-          experiment: "project_creation_tip",
-          treatment: "find_and_manage_projects",
-        },
+        label: "前往数据集",
+        url: `${origin()}/datasets`,
       },
     },
     {
-      title: "Unlock faster access provisioning",
-      content:
-        "Streamline assigning staff to multiple projects by assigning them to workspaces in Label Studio Enterprise.",
+      title: "图片从这里导入",
+      content: "在「数据集」页上传的图片会自动去重并做坏图质检，导入完成后标注页才会出现任务。",
       closable: true,
       link: {
-        label: "Learn more",
-        url: "https://docs.humansignal.com/guide/manage_projects#Add-or-remove-members-to-a-workspace",
-        params: {
-          experiment: "project_creation_tip",
-          treatment: "faster_provisioning",
-        },
-      },
-    },
-    {
-      title: "Did you know?",
-      content:
-        "In the Enterprise platform, admins can view annotator performance dashboards to optimize resource allocation, improve team management, and inform compensation.",
-      closable: true,
-      link: {
-        label: "Learn more",
-        url: "https://docs.humansignal.com/guide/dashboard_annotator",
-        params: {
-          experiment: "project_creation_tip",
-          treatment: "annotator_dashboard",
-        },
-      },
-    },
-    {
-      title: "Did you know?",
-      content:
-        "You can control access to specific projects and workspaces for internal team members and external annotators using Label Studio Enterprise.",
-      closable: true,
-      link: {
-        label: "Learn more",
-        url: "https://docs.humansignal.com/guide/manage_users#Roles-in-Label-Studio-Enterprise",
-        params: {
-          experiment: "project_creation_tip",
-          treatment: "access_to_projects",
-        },
-      },
-    },
-    {
-      title: "Did you know?",
-      content:
-        "You can use or modify dozens or templates to configure your labeling UI, or create a custom configuration from scratch using simple XML-like tag.",
-      closable: true,
-      link: {
-        label: "Learn more",
-        url: "https://labelstud.io/guide/setup",
-        params: {
-          experiment: "project_creation_tip",
-          treatment: "templates",
-        },
-      },
-    },
-    {
-      title: "Labeling for GenAI",
-      content:
-        "Label Studio has templates available for supervised LLM fine-tuning, RAG retrieval ranking, RLHF, chatbot evaluation, and more.",
-      closable: true,
-      link: {
-        label: "Explore templates",
-        url: "https://labelstud.io/templates/gallery_generative_ai",
-        params: {
-          experiment: "project_creation_tip",
-          treatment: "genai_templates",
-        },
+        label: "打开数据集",
+        url: `${origin()}/datasets`,
       },
     },
   ],
   organizationPage: [
     {
-      title: "It looks like your team is growing!",
-      content:
-        "Assign roles to your team using Label Studio Enterprise and control access to sensitive data at the project and workspace levels.",
+      title: "平台有三个角色",
+      content: "操作员负责标注与复审；管理员负责数据集、训练与模型发布；超级管理员额外管理角色授权与审计。",
       closable: true,
       link: {
-        label: "Learn more",
-        url: "https://docs.humansignal.com/guide/manage_users#Roles-in-Label-Studio-Enterprise",
-        params: {
-          experiment: "organization_page_tip",
-          treatment: "team_growing",
-        },
+        label: "权限说明",
+        url: `${origin()}/system`,
       },
     },
     {
-      title: "Want to simplify and secure logging in?",
-      content: "Enable Single Sign-On for your team using SAML, SCIM2 or LDAP with Label Studio Enterprise.",
+      title: "权限在平台内管理",
+      content: "AOI 的权限不依赖 Label Studio 组织设置，请在「系统」页分配角色。",
       closable: true,
       link: {
-        label: "Learn more",
-        url: "https://docs.humansignal.com/guide/auth_setup",
-        params: {
-          experiment: "organization_page_tip",
-          treatment: "enable_sso",
-        },
-      },
-    },
-    {
-      title: "Did you know?",
-      content: "Try Label Studio Starter Cloud, optimized for small teams and projects.",
-      closable: true,
-      link: {
-        label: "Learn more",
-        url: "https://humansignal.com/pricing/",
-        params: {
-          experiment: "organization_page_tip",
-          treatment: "starter_cloud_live",
-        },
-      },
-    },
-    {
-      title: "Want to automate task distribution?",
-      content:
-        "Create rules, automate how tasks are distributed to annotators, and only show tasks assigned to each annotator in their view.and control task visibility for each annotator.",
-      closable: true,
-      link: {
-        label: "Learn more",
-        url: "https://docs.humansignal.com/guide/setup_project#Set-up-annotation-settings-for-your-project",
-        params: {
-          experiment: "organization_page_tip",
-          treatment: "automate_distribution",
-        },
-      },
-    },
-    {
-      title: "Share knowledge with the community",
-      content:
-        "Have questions or a tip to share with other Label Studio users? Join the community slack channel for the latest updates. ",
-      closable: true,
-      link: {
-        label: "Join the community",
-        url: "https://label-studio.slack.com",
-        params: {
-          experiment: "organization_page_tip",
-          treatment: "share_knowledge",
-        },
-      },
-    },
-    {
-      title: "Did you know?",
-      content:
-        "Label Studio supports multiple points of integration with cloud storage, machine learning models, and popular tools to automate your machine learning pipeline.",
-      closable: true,
-      link: {
-        label: "Check out the integrations directory",
-        url: "https://labelstud.io/integrations/",
-        params: {
-          experiment: "organization_page_tip",
-          treatment: "integration_points",
-        },
+        label: "打开系统页",
+        url: `${origin()}/system`,
       },
     },
   ],
   projectSettings: [
     {
-      title: "Apply your AWS spend to Label Studio Enterprise",
-      content:
-        "Label Studio Enterprise is now available on the AWS Marketplace so you can use your committed spend to streamline data labeling workflows.",
+      title: "标签来自缺陷字典",
+      content: "标注界面的标签由缺陷字典渲染；改字典请到「数据集 → 缺陷字典」，发布新版本后生效。",
       closable: true,
       link: {
-        label: "Learn more",
-        url: "https://aws.amazon.com/marketplace/pp/prodview-wjac3msf77tny",
-        params: {
-          experiment: "project_settings_tip",
-          treatment: "aws_marketplace",
-        },
+        label: "打开缺陷字典",
+        url: `${origin()}/datasets`,
       },
     },
     {
-      title: "Save time with Auto-Labeling",
-      content:
-        "Use automation to instantly label large-scale datasets without sacrificing quality in the Enterprise platform.",
+      title: "OK 图也要标",
+      content: "没有缺陷的图片请提交空标注；训练需要负样本，否则模型会倾向漏检。",
       closable: true,
       link: {
-        label: "Learn more",
-        url: "https://docs.humansignal.com/guide/prompts_overview#Auto-labeling-with-Prompts",
-        params: {
-          experiment: "project_settings_tip",
-          treatment: "auto_labeling",
-        },
-      },
-    },
-    {
-      title: "Did you know?",
-      content:
-        "You can increase the quality of your labeled data with reviewer workflows and task agreement scores using Label Studio Enterprise.",
-      closable: true,
-      link: {
-        label: "Learn more",
-        url: "https://docs.humansignal.com/guide/quality",
-        params: {
-          experiment: "project_settings_tip",
-          treatment: "quality_and_agreement",
-        },
-      },
-    },
-    {
-      title: "Evaluate GenAI models",
-      content:
-        "Combine automation plus human supervision to evaluate and ensure LLM quality in the Enterprise platform.",
-      closable: true,
-      link: {
-        label: "Learn more",
-        url: "https://humansignal.com/evals/",
-        params: {
-          experiment: "project_settings_tip",
-          treatment: "evals",
-        },
-      },
-    },
-    {
-      title: "Did you know?",
-      content:
-        "You can save time managing infrastructure and upgrades, plus access more features for automation, quality, and team management, by using the Enterprise cloud service.",
-      closable: true,
-      link: {
-        label: "Learn more",
-        url: "https://humansignal.com/platform/",
-        params: {
-          experiment: "project_settings_tip",
-          treatment: "infrastructure_and_upgrades",
-        },
-      },
-    },
-    {
-      title: "Did you know?",
-      content: "Try Label Studio Starter Cloud, optimized for small teams and projects.",
-      link: {
-        label: "Learn more",
-        url: "https://humansignal.com/pricing/",
-        params: {
-          experiment: "project_settings_tip",
-          treatment: "starter_cloud_live",
-        },
-      },
-    },
-    {
-      title: "Did you know?",
-      content: "You can connect ML models using the backend SDK to save time with pre-labeling or active learning.",
-      closable: true,
-      link: {
-        label: "Learn more",
-        url: "https://labelstud.io/guide/ml",
-        params: {
-          experiment: "project_settings_tip",
-          treatment: "connect_ml_models",
-        },
+        label: "查看标注规范",
+        url: `${origin()}/datasets`,
       },
     },
   ],

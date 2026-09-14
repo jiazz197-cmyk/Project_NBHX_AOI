@@ -310,7 +310,11 @@ REST_FRAMEWORK = {
         'jwt_auth.auth.TokenAuthenticationPhaseout',
         'rest_framework.authentication.SessionAuthentication',
     ),
+    # AOI 二开（LS 原生闸门，注入点，见 CHANGES.md 与平台 A 契约 §3.1.1）：
+    # RBAC 只覆盖 aoi 视图，LS 原生端点在 LSO 下等价于「登录即可写」。闸门为 deny-list、
+    # 默认放行、fail-open，必须排在首位（身份已由上面的认证类解析完成）。
     'DEFAULT_PERMISSION_CLASSES': [
+        'aoi.common.native_gate.AoiNativeGatePermission',
         'core.api_permissions.HasObjectPermission',
         'rest_framework.permissions.IsAuthenticated',
     ],

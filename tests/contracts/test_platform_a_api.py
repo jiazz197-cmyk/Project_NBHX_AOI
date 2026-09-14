@@ -77,6 +77,9 @@ def payload_for(entry: dict, predict_request: dict | None = None):
     method, path = entry['method'], entry['path']
     if path == '/api/core/roles' and method == 'POST':
         return {'code': 'qa_reviewer', 'name_cn': 'QA 复审员'}
+    if path == '/api/core/users/{id}/roles':
+        # D4 起为全量覆盖语义：不能传空数组，否则会清空调用者自己的角色，后续用例全变 40300
+        return {'roles': ['super_admin']}
     if path == '/api/datasets/defects' and method in ('POST', 'PUT'):
         return {'code': 'object_fault_type_01', 'name_cn': '划伤', 'risk_level': 3}
     if path == '/api/datasets/defects/publish':
@@ -109,8 +112,9 @@ class TestEnvelopeAndAuth:
         body = assert_envelope(response)
         assert body['message'] == 'ok'
         assert body['data']['user_id'] is not None
-        assert body['data']['roles'] == []
-        assert body['data']['perms'] == []
+        # D4：RBAC 真实生效；`test_user` 持 super_admin → 全码
+        assert body['data']['roles'] == ['super_admin']
+        assert 'system.roles' in body['data']['perms']
 
     def test_unauthenticated_returns_40100(self, api_client):
         response = api_client.get('/api/core/permissions')
@@ -1082,9 +1086,7 @@ class TestIngestFindingsFixtureContract:
 
     def test_suspicious_sample_roundtrip_and_idempotency(self, jpeg_bytes):
         suspicious = next(item for item in self._samples() if item['kind'] == 'suspicious')
-        response = self._post(
-            suspicious, file=SimpleUploadedFile('sample.jpg', jpeg_bytes, content_type='image/jpeg')
-        )
+        response = self._post(suspicious, file=SimpleUploadedFile('sample.jpg', jpeg_bytes, content_type='image/jpeg'))
         assert response.status_code == 200, response.content[:300]
         data = assert_envelope(response)['data']
         assert set(data) == {'fact_id', 'workitem_id', 'image_id', 'bad_image_id', 'duplicated'}
@@ -1570,7 +1572,9 @@ class TestRegistryPushClient:
         params.update(overrides)
         return RegistryPushClient(**params)
 
-    def _mock_hub(self, mock, artifacts, *, manifest_digest=None, blob_receipt=True, manifest_receipt=True, readback=None):
+    def _mock_hub(
+        self, mock, artifacts, *, manifest_digest=None, blob_receipt=True, manifest_receipt=True, readback=None
+    ):
         """搭一个最小 Registry v2 假仓库。
 
         ``blob_receipt`` / ``manifest_receipt`` 控制仓库**是否回 ``Docker-Content-Digest`` 回执**：
@@ -2251,18 +2255,862 @@ class TestRBACDeferral:
     """契约 §13.1 的 RBAC（三角色矩阵/40300/缓存失效）在 D4 落地；D2 只能冻结现状。"""
 
     @pytest.mark.django_db
-    def test_d2_permission_is_authenticated_only(self, auth_client):
-        from aoi.common.permissions import aoi_permission
-
-        permission = aoi_permission('training.publish')()
-
-        class _Request:
-            user = type('U', (), {'is_authenticated': True})()
-
-        assert permission.has_permission(_Request(), None) is True
-
-    @pytest.mark.django_db
     def test_anonymous_is_40100(self, api_client):
         response = api_client.get('/api/datasets')
         assert response.status_code == 401
         assert_envelope(response, code=40100)
+
+
+# --------------------------------------------------------------------------- RBAC（D4，契约 §3.1）
+#: 38 码全表（**硬编码**：锁定契约本身，不读实现常量，避免测试与实现同源互相掩护）
+ALL_PERMISSION_CODES = """
+datasets.view datasets.create datasets.update datasets.cancel datasets.approve datasets.publish
+datasets.export datasets.delete datasets.config
+training.view training.create training.update training.cancel training.approve training.publish
+review.view review.create review.update review.cancel review.approve review.publish review.finalize
+prelabel.view prelabel.create prelabel.update
+system.view system.create system.update system.cancel system.approve system.publish
+system.roles system.users system.audit system.storage system.ml system.webhook system.labels
+""".split()
+
+#: 三角色默认矩阵（硬编码）
+OPERATOR_CODES = {
+    'datasets.view',
+    'datasets.create',
+    'datasets.update',
+    'training.view',
+    'review.view',
+    'review.update',
+    'review.finalize',
+}
+
+ADMIN_CODES = OPERATOR_CODES | {
+    'datasets.publish',
+    'datasets.export',
+    'datasets.delete',
+    'datasets.config',
+    'prelabel.view',
+    'prelabel.create',
+    'prelabel.update',
+    'training.create',
+    'training.cancel',
+    'training.approve',
+    'training.publish',
+}
+
+
+@pytest.fixture
+def grant_roles(db):
+    """给用户授予角色（全量覆盖），并 bump 授权版本号。"""
+    from aoi.core import authz
+    from aoi.core.models import Role, UserRole
+
+    def _grant(user, *role_codes: str):
+        role_ids = dict(Role.objects.filter(code__in=role_codes).values_list('code', 'id'))
+        UserRole.objects.filter(user_id=user.id).delete()
+        for code in sorted(set(role_codes)):
+            UserRole.objects.create(user_id=user.id, role_id=role_ids[code])
+        authz.bump_version()
+        return user
+
+    return _grant
+
+
+@pytest.fixture
+def make_user(db):
+    """建 LS 账号（RBAC 用例专用，不复用 ``test_user``）。"""
+    import itertools
+
+    from django.contrib.auth import get_user_model
+
+    counter = itertools.count(1)
+
+    def _make(role_code: str | None = None, *, email: str | None = None):
+        user = get_user_model().objects.create_user(
+            email=email or f'rbac-{next(counter)}@example.com',
+            password='rbac-pass-123',
+        )
+        return user
+
+    return _make
+
+
+@pytest.fixture
+def client_for(make_user, grant_roles):
+    """``client_for('operator')`` → 已认证的 APIClient（每次新建，互不串号）。"""
+
+    def _client_for(*role_codes: str, user=None):
+        user = user or make_user()
+        if role_codes:
+            grant_roles(user, *role_codes)
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    return _client_for
+
+
+class TestPermissionCodeRegistry:
+    """权限码表与视图锚点（契约 §3.1）。"""
+
+    def test_code_table_is_the_frozen_38(self):
+        from aoi.core.permissions import PERMISSION_CODES
+
+        assert len(ALL_PERMISSION_CODES) == 38
+        assert len(set(ALL_PERMISSION_CODES)) == 38
+        assert sorted(PERMISSION_CODES) == sorted(ALL_PERMISSION_CODES)
+
+    def test_every_view_anchor_is_a_known_code(self):
+        import inspect
+
+        from aoi.audit import views as audit_views
+        from aoi.common.views import AoiAPIView
+        from aoi.core import views as core_views
+        from aoi.core.permissions import PERMISSION_CODES
+        from aoi.datasets import views as datasets_views
+        from aoi.prelabel import views as prelabel_views
+        from aoi.review import views as review_views
+        from aoi.training import views as training_views
+
+        modules = [core_views, datasets_views, audit_views, prelabel_views, review_views, training_views]
+        bad = []
+        for module in modules:
+            for name, obj in vars(module).items():
+                if not inspect.isclass(obj) or not issubclass(obj, AoiAPIView) or obj is AoiAPIView:
+                    continue
+                declared = [obj.aoi_perm, *obj.aoi_perm_by_method.values()]
+                bad += [
+                    f'{module.__name__}.{name}:{code}' for code in declared if code and code not in PERMISSION_CODES
+                ]
+        assert not bad, f'unknown permission codes on views: {bad}'
+
+    def test_role_matrix_codes_are_all_known(self):
+        from aoi.core.permissions import DEFAULT_ROLE_MATRIX, PERMISSION_CODES
+
+        for role_code, codes in DEFAULT_ROLE_MATRIX.items():
+            unknown = sorted(set(codes) - set(PERMISSION_CODES))
+            assert not unknown, f'{role_code} has unknown codes: {unknown}'
+        # super_admin 覆盖全码（播种的「只加不减」补授以此为前提）
+        assert set(DEFAULT_ROLE_MATRIX['super_admin']) == set(PERMISSION_CODES)
+        # 管理员是操作员的超集
+        assert set(DEFAULT_ROLE_MATRIX['operator']) <= set(DEFAULT_ROLE_MATRIX['admin'])
+
+
+@pytest.mark.django_db
+class TestRbacMatrix:
+    """三角色矩阵在库里逐码生效（契约 §3.1）。"""
+
+    def _seeded_matrix(self) -> dict[str, set[str]]:
+        from aoi.core.models import Permission, Role, RolePermission
+
+        codes = dict(Permission.objects.values_list('id', 'code'))
+        result: dict[str, set[str]] = {}
+        for role in Role.objects.all():
+            perm_ids = RolePermission.objects.filter(role_id=role.id).values_list('permission_id', flat=True)
+            result[role.code] = {codes[pid] for pid in perm_ids}
+        return result
+
+    def test_seeded_permissions_are_the_frozen_38(self):
+        from aoi.core.models import Permission
+
+        assert sorted(Permission.objects.values_list('code', flat=True)) == sorted(ALL_PERMISSION_CODES)
+
+    def test_operator_matrix(self):
+        assert self._seeded_matrix()['operator'] == OPERATOR_CODES
+
+    def test_admin_matrix(self):
+        assert self._seeded_matrix()['admin'] == ADMIN_CODES
+
+    def test_super_admin_matrix(self):
+        assert self._seeded_matrix()['super_admin'] == set(ALL_PERMISSION_CODES)
+
+    def test_operator_can_view_datasets(self, client_for):
+        assert client_for('operator').get('/api/datasets/images').status_code == 200
+
+    def test_admin_can_export_but_operator_cannot(self, client_for):
+        operator = client_for('operator').get('/api/datasets/1/versions/1.0.0/export')
+        assert operator.status_code == 403
+        assert_envelope(operator, code=40300)
+
+        admin = client_for('admin').get('/api/datasets/1/versions/1.0.0/export')
+        assert admin.status_code == 200
+
+
+@pytest.mark.django_db
+class TestRbacForbidden40300:
+    """越权一律 40300（契约 §3.1）。"""
+
+    OVER_PERMISSION_CALLS = (
+        ('POST', '/api/datasets/defects/publish', 'datasets.publish'),
+        ('GET', '/api/datasets/1/versions/1.0.0/export', 'datasets.export'),
+        ('POST', '/api/train/jobs', 'training.create'),
+        ('GET', '/api/core/roles', 'system.roles'),
+    )
+
+    @pytest.mark.parametrize('method,path,perm', OVER_PERMISSION_CALLS)
+    def test_operator_denied(self, client_for, method, path, perm):
+        client = client_for('operator')
+        response = (
+            getattr(client, METHOD_CALL[method])(path, {}, format='json')
+            if method == 'POST'
+            else getattr(client, METHOD_CALL[method])(path)
+        )
+        assert response.status_code == 403, (perm, response.content[:200])
+        assert_envelope(response, code=40300)
+
+    def test_user_without_role_is_denied_everywhere(self, client_for):
+        client = client_for()  # 无角色
+        response = client.get('/api/datasets/images')
+        assert response.status_code == 403
+        assert_envelope(response, code=40300)
+
+        perms = client.get('/api/core/permissions')
+        assert perms.status_code == 200  # 豁免：无角色也应能拿到自己的权限集
+        assert perms.json()['data'] == {'user_id': perms.json()['data']['user_id'], 'roles': [], 'perms': []}
+
+    def test_anonymous_is_40100_not_40300(self, api_client):
+        response = api_client.get('/api/datasets/images')
+        assert response.status_code == 401
+        assert_envelope(response, code=40100)
+
+
+@pytest.mark.django_db
+class TestPermCacheInvalidation:
+    """授权变更**零延迟**生效（契约 §3.1：版本号每请求读一次）。"""
+
+    def test_grant_and_revoke_take_effect_immediately(self, make_user, grant_roles):
+        from aoi.core.models import AuthzState, UserRole
+
+        user = make_user()
+        client = APIClient()
+        client.force_authenticate(user=user)
+        assert client.get('/api/datasets/images').status_code == 403
+
+        before = AuthzState.objects.get(pk=1).version
+        grant_roles(user, 'operator')
+        assert AuthzState.objects.get(pk=1).version > before
+        assert client.get('/api/datasets/images').status_code == 200  # 同进程立即生效
+
+        UserRole.objects.filter(user_id=user.id).delete()
+        from aoi.core import authz
+
+        authz.bump_version()
+        assert client.get('/api/datasets/images').status_code == 403  # 撤销同样立即生效
+
+    def test_deleted_user_loses_roles_without_cleanup(self, make_user, grant_roles):
+        from django.contrib.auth import get_user_model
+
+        user = make_user()
+        grant_roles(user, 'operator')
+        client = APIClient()
+        client.force_authenticate(user=user)
+        assert client.get('/api/datasets/images').status_code == 200
+
+        user_id = user.id
+        get_user_model().objects.filter(pk=user_id).delete()  # user_role 残留（不建外键）
+        from aoi.core import authz
+
+        authz.bump_version()
+        from aoi.core.models import UserRole
+
+        assert UserRole.objects.filter(user_id=user_id).exists()  # 确实残留
+        assert authz.resolve_user_perms(user_id) == frozenset()  # 但读时校验 → 无权限
+
+
+@pytest.mark.django_db
+class TestRoleAdminApi:
+    """角色与授权端点语义（契约 §4.0）。"""
+
+    def test_get_role_returns_permissions(self, client_for):
+        body = assert_envelope(client_for('super_admin').get('/api/core/roles'))
+        roles = {item['code']: item for item in body['data']['items']}
+        assert set(roles['operator']['permissions']) == OPERATOR_CODES
+        assert 'permissions' in roles['admin']
+
+    def test_put_role_replaces_permissions(self, client_for):
+        client = client_for('super_admin')
+        response = client.put('/api/core/roles/2', {'permissions': ['datasets.view']}, format='json')
+        body = assert_envelope(response)
+        assert body['data']['permissions'] == ['datasets.view']
+
+        # 清空
+        response = client.put('/api/core/roles/2', {'permissions': []}, format='json')
+        assert assert_envelope(response)['data']['permissions'] == []
+
+    def test_put_role_unknown_code_is_42200(self, client_for):
+        response = client_for('super_admin').put('/api/core/roles/2', {'permissions': ['nope.nope']}, format='json')
+        assert response.status_code == 422
+        assert_envelope(response, code=42200)
+
+    def test_builtin_role_cannot_be_deleted(self, client_for):
+        response = client_for('super_admin').delete('/api/core/roles/1')
+        assert response.status_code == 409
+        assert_envelope(response, code=40900)
+
+    def test_custom_role_delete_cascades_user_role(self, client_for, grant_roles, make_user):
+        from aoi.core.models import Role, UserRole
+
+        client = client_for('super_admin')
+        created = assert_envelope(client.post('/api/core/roles', {'code': 'qa', 'name_cn': 'QA'}, format='json'))
+        role_id = created['data']['id']
+
+        user = make_user()
+        grant_roles(user, 'qa')
+        assert UserRole.objects.filter(user_id=user.id, role_id=role_id).exists()
+
+        assert client.delete(f'/api/core/roles/{role_id}').status_code == 200
+        assert not UserRole.objects.filter(role_id=role_id).exists()
+        assert not Role.objects.filter(id=role_id).exists()
+
+    def test_assign_roles_is_full_overwrite(self, client_for):
+        created = assert_envelope(
+            client_for('super_admin').post('/api/core/roles', {'code': 'qa2', 'name_cn': 'QA2'}, format='json')
+        )
+        assert created['data']['code'] == 'qa2'
+
+        user_client = client_for('operator')
+        user_id = user_client.get('/api/core/permissions').json()['data']['user_id']
+        admin = client_for('super_admin')
+        assert admin.post(f'/api/core/users/{user_id}/roles', {'roles': ['qa2']}, format='json').status_code == 200
+        assert user_client.get('/api/core/permissions').json()['data']['roles'] == ['qa2']
+
+        assert admin.post(f'/api/core/users/{user_id}/roles', {'roles': []}, format='json').status_code == 200
+        assert user_client.get('/api/core/permissions').json()['data']['roles'] == []
+
+    def test_assign_unknown_role_is_42200(self, client_for):
+        response = client_for('super_admin').post('/api/core/users/1/roles', {'roles': ['nope']}, format='json')
+        assert response.status_code == 422
+        assert_envelope(response, code=42200)
+
+    def test_assign_to_missing_user_is_40401(self, client_for):
+        response = client_for('super_admin').post(
+            '/api/core/users/999999/roles', {'roles': ['operator']}, format='json'
+        )
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+
+@pytest.mark.django_db
+class TestGrantRoleCommand:
+    """``aoi_grant_role``（首个超管引导，契约 §3.1）。"""
+
+    def test_grant_is_full_overwrite_and_audited(self, make_user, capsys):
+        from aoi.audit.models import AuditLog
+        from aoi.core.models import UserRole
+        from django.core.management import call_command
+
+        user = make_user(email='ops@nbhx.com')
+        call_command('aoi_grant_role', 'ops@nbhx.com', 'operator')
+        assert UserRole.objects.filter(user_id=user.id).count() == 1
+        assert AuditLog.objects.filter(action='user.roles.assign', object_id=str(user.id)).exists()
+
+        call_command('aoi_grant_role', 'ops@nbhx.com', 'admin', 'super_admin')
+        assert UserRole.objects.filter(user_id=user.id).count() == 2
+
+        call_command('aoi_grant_role', 'ops@nbhx.com', '--clear')
+        assert UserRole.objects.filter(user_id=user.id).count() == 0
+
+    def test_list_outputs_mapping(self, make_user, grant_roles, capsys):
+        from django.core.management import call_command
+
+        user = make_user(email='listed@nbhx.com')
+        grant_roles(user, 'operator')
+        call_command('aoi_grant_role', '--list')
+        out = capsys.readouterr().out
+        assert 'listed@nbhx.com' in out
+        assert 'operator' in out
+
+    def test_unknown_role_fails(self, make_user):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        make_user(email='ops2@nbhx.com')
+        with pytest.raises(CommandError):
+            call_command('aoi_grant_role', 'ops2@nbhx.com', 'nope')
+
+    def test_unknown_email_fails(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with pytest.raises(CommandError):
+            call_command('aoi_grant_role', 'ghost@nbhx.com', 'operator')
+
+
+@pytest.mark.django_db
+class TestSeedRbac:
+    """播种语义（契约 §3.1）：幂等 + 内置角色不覆盖 + super_admin 只加不减。"""
+
+    def test_seed_is_idempotent(self):
+        from aoi.core.models import Permission, Role, RolePermission
+        from aoi.core.permissions import seed_rbac
+
+        before = (Permission.objects.count(), Role.objects.count(), RolePermission.objects.count())
+        stats = seed_rbac()
+        assert stats == {'permissions_created': 0, 'permissions_updated': 0, 'roles_created': 0, 'grants_created': 0}
+        assert (Permission.objects.count(), Role.objects.count(), RolePermission.objects.count()) == before
+
+    def test_builtin_role_grants_are_not_reapplied(self):
+        from aoi.core.models import Permission, Role, RolePermission
+        from aoi.core.permissions import seed_rbac
+
+        admin = Role.objects.get(code='admin')
+        target = Permission.objects.get(code='datasets.export')
+        RolePermission.objects.filter(role_id=admin.id, permission_id=target.id).delete()
+
+        seed_rbac()
+        # 人工调整（这里是撤销）不被重启回滚
+        assert not RolePermission.objects.filter(role_id=admin.id, permission_id=target.id).exists()
+
+    def test_super_admin_grants_are_backfilled(self):
+        from aoi.core.models import Permission, Role, RolePermission
+        from aoi.core.permissions import PERMISSION_CODES, seed_rbac
+
+        super_admin = Role.objects.get(code='super_admin')
+        target = Permission.objects.get(code='system.labels')
+        RolePermission.objects.filter(role_id=super_admin.id, permission_id=target.id).delete()
+
+        stats = seed_rbac()
+        assert stats['grants_created'] == 1
+        granted = set(
+            Permission.objects.filter(
+                id__in=RolePermission.objects.filter(role_id=super_admin.id).values_list('permission_id', flat=True)
+            ).values_list('code', flat=True)
+        )
+        assert granted == set(PERMISSION_CODES)
+
+
+@pytest.mark.django_db
+class TestUserAdminApi:
+    """组织管理端点语义（契约 §4.0，D5）。"""
+
+    def test_non_super_admin_is_40300(self, client_for, make_user):
+        target = make_user()
+        operator = client_for('operator')
+        for method, url in [
+            ('get', '/api/core/users'),
+            ('post', f'/api/core/users/{target.id}/deactivate'),
+            ('post', f'/api/core/users/{target.id}/activate'),
+        ]:
+            response = getattr(operator, method)(url)
+            assert response.status_code == 403, url
+            assert_envelope(response, code=40300)
+        # 无角色用户同样拒绝
+        assert client_for().get('/api/core/users').status_code == 403
+
+    def test_list_users_includes_aoi_roles(self, client_for, make_user, grant_roles):
+        user = make_user()
+        grant_roles(user, 'operator')
+        body = assert_envelope(client_for('super_admin').get('/api/core/users'))
+        items = {item['id']: item for item in body['data']['items']}
+        assert items[user.id] == {'id': user.id, 'email': user.email, 'is_active': True, 'roles': ['operator']}
+
+    def test_admin_and_operator_toggle_take_effect_immediately(self, client_for):
+        """前端任免语义：读取现有角色 → 独立增删 admin/operator → 全量覆盖提交。"""
+        user_client = client_for('operator')
+        user_id = user_client.get('/api/core/permissions').json()['data']['user_id']
+        admin = client_for('super_admin')
+
+        ok = admin.post(f'/api/core/users/{user_id}/roles', {'roles': ['admin', 'operator']}, format='json')
+        assert ok.status_code == 200
+        assert sorted(user_client.get('/api/core/permissions').json()['data']['roles']) == ['admin', 'operator']
+
+        ok = admin.post(f'/api/core/users/{user_id}/roles', {'roles': ['operator']}, format='json')
+        assert ok.status_code == 200
+        assert user_client.get('/api/core/permissions').json()['data']['roles'] == ['operator']
+
+    def test_deactivate_combo_and_jwt_rejected(self, client_for, make_user, grant_roles):
+        """停用组合拳：is_active=False + 清角色 + 软移除组织成员；已签发 JWT 立即失效。"""
+        from aoi.audit.models import AuditLog
+        from aoi.core.models import UserRole
+        from organizations.models import Organization, OrganizationMember
+
+        user = make_user()
+        grant_roles(user, 'admin')
+        login = APIClient().post('/api/auth/login', {'email': user.email, 'password': 'rbac-pass-123'}, format='json')
+        access = assert_envelope(login)['data']['access']
+        Organization.create_organization(created_by=user, title='deactivate-combo')
+        assert OrganizationMember.objects.filter(user=user, deleted_at__isnull=True).exists()
+
+        response = client_for('super_admin').post(f'/api/core/users/{user.id}/deactivate')
+        assert response.status_code == 200
+        assert assert_envelope(response)['data'] == {'user_id': user.id, 'is_active': False}
+
+        user.refresh_from_db()
+        assert user.is_active is False
+        assert user.active_organization_id is None
+        assert UserRole.objects.filter(user_id=user.id).count() == 0
+        assert not OrganizationMember.objects.filter(user=user, deleted_at__isnull=True).exists()
+
+        rejected = APIClient().get('/api/core/permissions', HTTP_AUTHORIZATION=f'Bearer {access}')
+        assert rejected.status_code == 401
+        assert_envelope(rejected, code=40100)
+
+        assert AuditLog.objects.filter(action='user.deactivate', object_id=str(user.id)).exists()
+
+    def test_activate_restores_access_but_not_roles(self, client_for, make_user, grant_roles):
+        from aoi.audit.models import AuditLog
+        from aoi.core.models import UserRole
+        from organizations.models import Organization, OrganizationMember
+
+        user = make_user()
+        grant_roles(user, 'admin')
+        Organization.create_organization(created_by=user, title='activate-restore')
+        admin = client_for('super_admin')
+        assert admin.post(f'/api/core/users/{user.id}/deactivate').status_code == 200
+
+        login = APIClient().post('/api/auth/login', {'email': user.email, 'password': 'rbac-pass-123'}, format='json')
+        assert login.status_code == 401
+
+        assert admin.post(f'/api/core/users/{user.id}/activate').status_code == 200
+        user.refresh_from_db()
+        assert user.is_active is True
+        assert OrganizationMember.objects.filter(user=user, deleted_at__isnull=True).exists()
+        assert user.active_organization_id is not None
+        assert UserRole.objects.filter(user_id=user.id).count() == 0  # 角色不回补，需重新任命
+        assert AuditLog.objects.filter(action='user.activate', object_id=str(user.id)).exists()
+
+        login = APIClient().post('/api/auth/login', {'email': user.email, 'password': 'rbac-pass-123'}, format='json')
+        assert login.status_code == 200
+
+    def test_deactivate_missing_user_is_40401(self, client_for):
+        response = client_for('super_admin').post('/api/core/users/999999/deactivate')
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+
+@pytest.mark.django_db
+class TestLastSuperAdminGuard:
+    """最后超管守卫（契约 §3.1，D5）：活跃超管不可归零。
+
+    注意：``client_for('super_admin')`` 每次调用都会**新建**一个超管，
+    会改变"最后一个超管"的前提——守卫用例一律以既有账号身份行动。
+    """
+
+    @staticmethod
+    def _bootstrap_user():
+        from aoi.core.bootstrap import BOOTSTRAP_SUPER_ADMIN_EMAIL
+        from django.contrib.auth import get_user_model
+
+        return get_user_model().objects.get(email__iexact=BOOTSTRAP_SUPER_ADMIN_EMAIL)
+
+    def test_cannot_deactivate_last_super_admin(self, client_for):
+        target = self._bootstrap_user()
+        response = client_for(user=target).post(f'/api/core/users/{target.id}/deactivate')
+        assert response.status_code == 409
+        assert_envelope(response, code=40900)
+
+    def test_cannot_clear_roles_of_last_super_admin(self, client_for):
+        target = self._bootstrap_user()
+        response = client_for(user=target).post(f'/api/core/users/{target.id}/roles', {'roles': []}, format='json')
+        assert response.status_code == 409
+        assert_envelope(response, code=40900)
+
+        # 自保持 super_admin 的重授不受守卫影响
+        response = client_for(user=target).post(
+            f'/api/core/users/{target.id}/roles', {'roles': ['super_admin']}, format='json'
+        )
+        assert response.status_code == 200
+
+    def test_second_super_admin_allows_demote_then_blocks_last(self, client_for, make_user, grant_roles):
+        other = make_user()
+        grant_roles(other, 'super_admin')
+        acting = client_for(user=other)
+        target = self._bootstrap_user()
+
+        # 仍有 other 在位：降级 bootstrap 允许
+        assert acting.post(f'/api/core/users/{target.id}/roles', {'roles': []}, format='json').status_code == 200
+
+        # other 成为最后一个活跃超管：停用被拒
+        response = acting.post(f'/api/core/users/{other.id}/deactivate')
+        assert response.status_code == 409
+        assert_envelope(response, code=40900)
+
+
+@pytest.mark.django_db
+class TestBootstrapSuperAdmin:
+    """固定超管播种（契约 §3.1 超管引导，D5）。"""
+
+    @staticmethod
+    def _user():
+        from aoi.core.bootstrap import BOOTSTRAP_SUPER_ADMIN_EMAIL
+        from django.contrib.auth import get_user_model
+
+        return get_user_model().objects.get(email__iexact=BOOTSTRAP_SUPER_ADMIN_EMAIL)
+
+    def test_seeded_with_org_wiring_and_role(self):
+        from aoi.core.bootstrap import ensure_bootstrap_super_admin
+        from aoi.core.models import Role, UserRole
+        from organizations.models import OrganizationMember
+
+        # post_migrate 已播种；重跑幂等
+        assert ensure_bootstrap_super_admin() is False
+        user = self._user()
+        assert user.is_active
+        assert user.username == user.email.split('@')[0]
+        assert OrganizationMember.objects.filter(user=user, deleted_at__isnull=True).exists()
+        assert user.active_organization_id is not None
+        super_admin = Role.objects.get(code='super_admin')
+        assert UserRole.objects.filter(user_id=user.id, role_id=super_admin.id).exists()
+
+    def test_rerun_does_not_reset_password(self):
+        from aoi.core.bootstrap import ensure_bootstrap_super_admin
+
+        user = self._user()
+        user.set_password('changed-by-admin-999')
+        user.save()
+        ensure_bootstrap_super_admin()
+        user.refresh_from_db()
+        assert user.check_password('changed-by-admin-999')
+
+    def test_recreates_when_missing(self):
+        from aoi.core.bootstrap import BOOTSTRAP_SUPER_ADMIN_PASSWORD, ensure_bootstrap_super_admin
+        from django.contrib.auth import get_user_model
+        from organizations.models import OrganizationMember
+
+        get_user_model().objects.filter(email__iexact='superadmin@nbhx.com').delete()
+        assert ensure_bootstrap_super_admin() is True
+        user = self._user()
+        assert user.check_password(BOOTSTRAP_SUPER_ADMIN_PASSWORD)
+        assert OrganizationMember.objects.filter(user=user, deleted_at__isnull=True).exists()
+        assert user.active_organization_id is not None
+
+
+@pytest.mark.django_db
+class TestAoiSpaPages:
+    """aoi SPA 页面路由（契约 §2.2，H22 结项）。"""
+
+    @staticmethod
+    def _session_client(client, user):
+        """带 ``last_login`` 的会话客户端。
+
+        LS 登录包装（``users/functions/common.py::login``）会写 ``session['last_login']``；
+        不写会被 ``InactivitySessionTimeoutMiddleWare`` 当成长时间未活动登出。
+        会话引擎为 signed-cookie：``save()`` 把数据编码进新 session key，
+        必须回写 cookie，否则客户端仍发送旧值。
+        """
+        import time
+
+        from django.conf import settings
+
+        client.force_login(user)
+        session = client.session
+        session['last_login'] = time.time()
+        session.save()
+        client.cookies[settings.SESSION_COOKIE_NAME] = session.session_key
+        return client
+
+    @pytest.mark.parametrize(
+        'path',
+        ['/datasets', '/datasets/', '/training', '/review', '/system', '/organization-admin', '/organization-admin/'],
+    )
+    def test_page_routes_render_shell(self, client, test_user, path):
+        response = self._session_client(client, test_user).get(path)
+        assert response.status_code == 200, (path, response.content[:200])
+
+    def test_anonymous_redirects_to_login(self, client):
+        response = client.get('/organization-admin')
+        assert response.status_code == 302
+        assert '/user/login/' in response['Location']
+
+    def test_spa_routes_do_not_shadow_upstream(self):
+        """点名路由而非泛 catch-all：上游路由不受影响（aoi.urls 无前缀 include 优先级最高）。"""
+        from django.urls import resolve
+
+        assert resolve('/admin/').view_name == 'admin:index'
+        assert resolve('/docs/').view_name == 'docs-redirect'
+        assert resolve('/heidi-tips/').view_name == 'aoi-heidi-tips'
+        assert resolve('/api/auth/export/').view_name == 'data_export:project-export-files-auth-check'
+        assert resolve('/api/core/users/1/roles/').view_name == 'aoi-slash-fallback'
+
+
+@pytest.mark.django_db
+class TestNativeGate:
+    """LS 原生闸门（契约 §3.1.1）：deny-list 4 类高危 + 前缀陷阱。"""
+
+    DENIED_FOR_OPERATOR = (
+        ('delete', '/api/projects/1/'),
+        ('patch', '/api/projects/1/'),
+        ('post', '/api/projects/1/summary/reset/'),
+        ('post', '/api/projects/1/exports/'),
+        ('get', '/api/auth/export/'),
+        ('post', '/api/storages/localfiles/'),
+        ('post', '/api/ml/'),
+        ('post', '/api/users/'),
+    )
+
+    def test_operator_is_blocked(self, client_for):
+        client = client_for('operator')
+        for method, path in self.DENIED_FOR_OPERATOR:
+            response = (
+                getattr(client, method)(path, {}, format='json') if method == 'post' else getattr(client, method)(path)
+            )
+            assert response.status_code == 403, (method, path, response.content[:200])
+            # LS 方言错误体（非 aoi 信封）
+            assert 'detail' in response.json()
+
+    def test_admin_can_delete_project_but_not_touch_infra(self, client_for):
+        admin = client_for('admin')
+        assert admin.delete('/api/projects/1/').status_code != 403  # datasets.delete ✅
+        assert admin.post('/api/ml/', {}, format='json').status_code == 403  # system.ml ❌
+        assert admin.post('/api/storages/localfiles/', {}, format='json').status_code == 403
+
+    def test_super_admin_passes_the_gate(self, client_for):
+        client = client_for('super_admin')
+        for method, path in self.DENIED_FOR_OPERATOR:
+            response = (
+                getattr(client, method)(path, {}, format='json') if method == 'post' else getattr(client, method)(path)
+            )
+            assert response.status_code != 403, (method, path, response.content[:200])
+
+    def test_reads_are_not_gated(self, client_for):
+        client = client_for('operator')
+        assert client.get('/api/projects/').status_code != 403
+        assert client.get('/api/projects/1/').status_code != 403
+        assert client.get('/api/organizations/').status_code != 403
+        assert client.get('/api/storages/').status_code != 403
+
+    def test_auth_prefix_trap(self, client_for):
+        """aoi 的 /api/auth/login|logout 放行，上游 /api/auth/export/ 拦截。"""
+        client = client_for('operator')
+        assert client.post('/api/auth/login', {'email': 'x@y.z', 'password': 'nope'}, format='json').status_code != 403
+        assert client.post('/api/auth/logout', {}, format='json').status_code != 403
+        assert client.get('/api/auth/export/').status_code == 403
+
+    def test_readonly_import_retrieval_is_not_gated(self, client_for):
+        """`ProjectImportAPI`/`ProjectReimportAPI` 是 RetrieveAPIView（只读），不得拦。"""
+        client = client_for('operator')
+        assert client.get('/api/projects/1/imports/1/').status_code != 403
+        assert client.get('/api/projects/1/reimports/1/').status_code != 403
+
+    def test_project_create_is_an_anchor_not_a_block(self, client_for):
+        assert client_for('operator').post('/api/projects/', {'title': 't'}, format='json').status_code != 403
+
+
+@pytest.mark.django_db
+class TestNativeGateAnnotationFlow:
+    """标注主流程绝不能被闸门误拦（最高优先级回归，契约 §3.1.1）。"""
+
+    EXEMPT_CALLS = (
+        ('post', '/api/token/', True),
+        ('get', '/api/current-user/whoami', False),
+        ('post', '/api/tasks/1/annotations/', True),
+        ('patch', '/api/tasks/1', True),
+        ('post', '/api/dm/views/', True),
+        ('get', '/api/projects/1/next/', False),
+        ('post', '/api/prelabel/1/health', True),
+        ('post', '/api/ingest/findings', True),
+    )
+
+    @pytest.mark.parametrize('method,path,with_body', EXEMPT_CALLS)
+    def test_exempt_paths_are_never_403(self, client_for, method, path, with_body):
+        client = client_for('operator')
+        call = getattr(client, method)
+        response = call(path, {}, format='json') if with_body else call(path)
+        assert response.status_code != 403, (method, path, response.content[:200])
+
+    def test_annotations_post_reaches_the_view(self, client_for):
+        """POST 任务标注不被闸门拦：应落到视图（无该 task → 404），而不是 403。"""
+        response = client_for('operator').post('/api/tasks/1/annotations/', {}, format='json')
+        assert response.status_code == 404
+
+
+# --------------------------------------------------------------------------- 前端素材（D4）
+@pytest.mark.django_db
+class TestHeidiTipsRoute:
+    """遮蔽上游 ``/heidi-tips``：返回平台自有集合，链接为绝对地址。"""
+
+    def test_returns_platform_collections(self, api_client):
+        response = api_client.get('/heidi-tips/')
+        assert response.status_code == 200
+        body = response.json()
+        assert set(body) == {'projectCreation', 'projectSettings', 'organizationPage'}
+        for collection, tips in body.items():
+            # 空集合会让前端 getRandomTip 返回 null（tips 全部消失），必须非空
+            assert tips, collection
+            for tip in tips:
+                assert tip['title'] and tip['content']
+                assert tip['link']['url'].startswith('http'), tip['link']['url']
+
+    def test_contains_no_upstream_marketing_copy(self, api_client):
+        raw = api_client.get('/heidi-tips/').content.decode('utf-8')
+        for banned in ('Enterprise', 'Starter Cloud', 'humansignal', 'labelstud.io'):
+            assert banned not in raw, banned
+
+
+@pytest.mark.django_db
+class TestLoginPageBranding:
+    """登录页品牌覆盖（仓库根 templates/ 遮蔽上游模板，D4）。"""
+
+    def test_login_page_is_rebranded(self, client):
+        response = client.get('/user/login/')
+        assert response.status_code == 200
+        html = response.content.decode('utf-8')
+        assert '宁波华翔' in html
+        assert 'AOI 数智检测' in html
+        assert '<title>AOI 数智检测</title>' in html
+        assert 'Human Signal' not in html
+        assert 'Label Studio' not in html
+        # 不再加载外站追踪/分析
+        assert 'googletagmanager' not in html
+        assert 'labelstud.io' not in html
+
+    def test_login_page_serves_the_brand_logo(self, client):
+        html = client.get('/user/login/').content.decode('utf-8')
+        # 断言 alt 与 staticfiles 可发现性：manifest 存储下 DEBUG=False 时 URL 需 collectstatic 后才有哈希名
+        assert re.search(r'<img[^>]*alt="宁波华翔 NBHX"', html), html[:2000]
+
+        from django.contrib.staticfiles import finders
+
+        assert finders.find('aoi/NBHX.png')
+
+
+class TestLsProjectTemplate:
+    """AOI 标注项目模板（契约 §4.1，D4 只交模板，真实创建在 D6）。"""
+
+    DATASET = '门板-A线'
+    VERSION = '1.0.0'
+    DICT_VERSION = 'd1'
+
+    def _kwargs(self):
+        from aoi.datasets.ls_project import build_project_kwargs
+
+        return build_project_kwargs(
+            dataset_name=self.DATASET,
+            version=self.VERSION,
+            dict_version=self.DICT_VERSION,
+            defects=label_config_sample_defects(),
+        )
+
+    def test_keys_are_exactly_the_pinned_set(self):
+        from aoi.datasets.ls_project import AOI_PROJECT_DEFAULTS
+
+        kwargs = self._kwargs()
+        expected = set(AOI_PROJECT_DEFAULTS) | {'title', 'description', 'label_config'}
+        assert set(kwargs) == expected
+
+    def test_every_key_exists_on_ls_project_model(self):
+        """防上游改字段名：模板里的键必须都能落在 LS ``Project`` 上。"""
+        from projects.models import Project
+
+        missing = [key for key in self._kwargs() if not hasattr(Project, key)]
+        assert not missing, f'unknown LS Project fields: {missing}'
+
+    def test_label_config_passes_ls_native_validator(self):
+        from core.label_config import validate_label_config
+
+        validate_label_config(self._kwargs()['label_config'])
+
+    def test_template_has_no_review_settings(self):
+        """LS OSS 无 Review 流（契约 §10.1）：模板不得出现任何 review 设置。"""
+        kwargs = self._kwargs()
+        assert not [key for key in kwargs if 'review' in key.lower()]
+        assert not [key for key in kwargs if 'require_comment' in key.lower()]
+
+    def test_pinned_defaults(self):
+        kwargs = self._kwargs()
+        assert kwargs['maximum_annotations'] == 1
+        assert kwargs['enable_empty_annotation'] is True  # OK 图必须能提交空标注
+        assert kwargs['color'] == '#FFFFFF'  # 不使用品牌色
+        assert kwargs['title'] == self.DATASET
+        assert self.VERSION in kwargs['description'] and self.DICT_VERSION in kwargs['description']
+        assert kwargs['expert_instruction']

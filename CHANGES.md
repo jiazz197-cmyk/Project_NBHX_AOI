@@ -412,3 +412,129 @@ import，含 `converter` 导出引擎），不可移除，只能换源。
   已被清理的 `label_studio.tests.conftest.aws_credentials`，收集即错（绕开 fsm 后另有 10 例存量失败，见 §3.2）；
 - 本机默认 uv 缓存 `~/.cache/uv/sdists-v9/.git`（0 字节异常文件）导致 uv 无法初始化缓存，
   本机需 `UV_CACHE_DIR` 指仓库内 `.uv-cache`。
+
+## D4：自研 RBAC 真实化 + LS 原生闸门 + LS 项目模板 + 前端素材更换（2026-09-14）
+
+> 依据 `docs/contracts/平台A_接口与数据契约.md` §2.4/§3.1/§3.1.1/§4.0/§4.1/§10.1/§13.1（本次同步修改）
+> 与 `.dsh/D4-D5_B线施工计划_RBAC-LS项目模板-素材更换.md`。**契约先行**：文档先于代码改完。
+
+### 1. RBAC：进程内 stub → `aoi_core` 五表 + 真判定
+
+| 文件 | 说明 |
+|---|---|
+| `label_studio/aoi/core/models.py` | 4 张 RBAC 表（`role`/`permission`/`role_permission`/`user_role`，复合主键用 Django 5.2 `CompositePrimaryKey`）+ **`authz_state`**（单行授权版本号） |
+| `label_studio/aoi/core/migrations/0001_initial.py` | 首条 `CREATE SCHEMA IF NOT EXISTS aoi_core`（沿用其余 aoi app 模式）+ 末条插入 `authz_state(id=1, version=0)` |
+| `label_studio/aoi/core/permissions.py` | 权限码表 **38 码**（`ACTIONS` 不扩，新增 6 码进 `EXTRA_PERMISSIONS`：`datasets.delete`/`datasets.config`/`system.storage`/`system.ml`/`system.webhook`/`system.labels`）+ 中文名表 + `DEFAULT_ROLE_MATRIX` + `seed_rbac()` |
+| `label_studio/aoi/core/apps.py` | `post_migrate` 播种（**不在 `ready()` 写库**：`ready()` 会在 `check`/`shell`/`collectstatic` 时触发）；失败只告警不阻断 migrate |
+| `label_studio/aoi/core/authz.py`（新增） | `current_version`（每请求一次 PK 查询）/ `bump_version` / `resolve_user_perms`（按 `(user_id, version)` 缓存 300s）/ `role_codes_for_user` |
+| `label_studio/aoi/common/permissions.py` | `AoiPermission.has_permission` 接真判定；`aoi_permission()` 工厂**未知码导入即失败**（配置期错误）+ 工厂产物缓存（每请求 `get_permissions()` 不再重复 `type()`） |
+| `label_studio/aoi/core/views.py` | `/api/core/*` 四端点真实化：`PUT /roles/{id}` 支持 `permissions` **全量覆盖**、`POST /users/{id}/roles` **全量覆盖**、`GET /roles` 带 `permissions`；写操作**同事务 bump 版本号** + 审计 |
+| `label_studio/aoi/core/management/commands/aoi_seed_rbac.py`、`aoi_grant_role.py`（新增） | 幂等播种兜底；首个超管引导（全量覆盖 + `--list` + `--clear` + 写审计） |
+| `label_studio/aoi/common/audit.py` | H10 最小部分：失败日志 `debug → warning`，`request_id` 截断到列宽 64（超长头会把审计整条吞掉） |
+| `tests/contracts/conftest.py` | 删 `reset_aoi_stub_state`（stub 数据已不存在）；新增 `reset_authz_cache`（LocMemCache 跨用例共享，而用例回滚会让版本号与缓存错配）；`test_user` 默认授 `super_admin` |
+
+**播种语义**（契约 §3.1）：权限点全量 upsert；内置三角色矩阵**仅首次创建时**写入（人工调整不被重启回滚）；`super_admin` 每次**只加不减补授**；授权变更**零延迟生效**（版本号每请求读一次，故 `CACHES` 未配置、LocMemCache 多 worker 不共享也正确）。
+
+实测（本机 PG16）：`migrate aoi_core` → 自动播种 `permissions_created=38, roles_created=3, grants_created=63`；`aoi_seed_rbac` 连跑两次均 `+0`；库内 `operator=7 / admin=18 / super_admin=38`。
+
+### 2. LS 原生闸门（契约 §3.1.1，**红线改口**）
+
+- `label_studio/aoi/common/native_gate.py`（新增）：`AoiNativeGatePermission`，**deny-list、默认放行、fail-open**（异常放行 + `warning`），拦 4 类高危写操作 + 1 条权限锚点；命中缺码抛 DRF `PermissionDenied` → 上游 handler 返回 **LS 方言 `{"detail": …}`**（非 aoi 信封）。
+- `label_studio/core/settings/base.py`（**注入点 1**）：`DEFAULT_PERMISSION_CLASSES` 首位插入闸门。**红线改口**：原「不改全局 `REST_FRAMEWORK`（权限类是上游语义）」修正为「仅允许在 `DEFAULT_PERMISSION_CLASSES` 首位插入 aoi 闸门类，其余项不得改」。
+- 不用 Django 中间件的原因：D3 已移除 `jwt_auth.middleware.JWTAuthenticationMiddleware`，中间件里 `request.user` 只有 session 身份，Bearer/`X-Api-Key` 调用者不可见。
+
+### 3. 施工中发现并修复的既有缺陷：`slash_fallback` 吞掉上游 `/api/auth/export/`
+
+- 现象：`GET /api/auth/export/` 返回 **HTML 404**，上游 `ProjectExportFilesAuthCheck` 自 D3 起**不可达**。
+- 根因：`label_studio/aoi/urls.py` 的兜底正则把 `auth` 并进 aoi 前缀通配，`/api/auth/export/` 先命中兜底 → `resolve('/api/auth/export')` 不存在 → `Resolver404`。`resolve()` 命中即终止，上游路由再无机会。
+- 修法：兜底前缀**去掉 `auth`**，aoi 的两个 auth 端点（`login`/`logout`）逐个点名。契约测试已加专项断言（`/api/auth/export/` 被闸门拦=`403`，`/api/auth/login|logout` 放行）。
+
+### 4. LS 项目模板（D4 只交模块，真实创建留 D6）
+
+`label_studio/aoi/datasets/ls_project.py`（新增）：`AOI_PROJECT_DEFAULTS` + `project_title/project_description/build_project_kwargs`，字段**全部显式钉死**（`maximum_annotations=1`、`sampling=Project.SEQUENCE`、`skip_queue=Project.SkipQueue.REQUEUE_FOR_OTHERS`、**`enable_empty_annotation=True`**（OK 图负样本）、`color='#FFFFFF'`（不使用品牌色）），取值直接引用上游 `Project` 常量而非硬编码副本；**不含任何 review 设置**。
+
+### 5. 前端素材更换
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `label_studio/templates/users/new-ui/user_base.html` | **新增覆盖文件** | 位于 `TEMPLATES['DIRS']`（`label_studio/templates/`），DIRS 先于 APP_DIRS → 遮蔽上游同名模板，**上游模板一行未改**。改动 5 处：平台标题、去掉 GA 与外站追踪 iframe、NBHX logo、平台描述、公司署名；登录页营销 tips 改为静态平台提示 |
+| `label_studio/aoi/common/static/aoi/NBHX.png` | 新增 | 品牌字标（须落在**已安装 app** 的 `static/` 下，`AppDirectoriesFinder` 才扫得到）；生产由 Dockerfile 的 `collectstatic` 收集 |
+| `web/.../src/assets/images/logo.svg` | **新注入点** | LS+HumanSignal 组合 logo → NBHX 字标（位图内嵌，保持 `ReactComponent` 导出与 Menubar 调用点不变） |
+| `web/.../src/index.html` | **新注入点** | `<title>Labelstudio</title>` → `AOI 数智检测` |
+| `web/.../components/HeidiTips/content.ts` | **新注入点** | 三集合文案中文化（去 Enterprise/Starter Cloud/humansignal 链接） |
+| `label_studio/aoi/core/heidi_tips.py`（新增）+ `aoi/urls.py` | aoi 自有文件 | 注册 `heidi-tips/` **遮蔽**上游 GitHub 代理路由，返回平台自有集合 |
+
+**遮蔽路由的三条硬约束**（实测于 `web/.../HeidiTips/utils.ts`）：必须 **200 + 完整集合**（返回 `{}` → `getRandomTip` 返回 `null` → tips 全消失；返回 404 → 前端不更新缓存、**永久沿用旧缓存**）；`link.url` **必须是绝对地址**（`createURL` 内部 `new URL(base)`，相对路径抛错）；集合键名须与 `TipCollectionKey` 一致。
+
+### 6. 验证
+
+- **契约测试**：`tests/contracts/test_platform_a_api.py` **191 passed**（新增 12 组：`TestPermissionCodeRegistry`/`TestRbacMatrix`/`TestRbacForbidden40300`/`TestPermCacheInvalidation`/`TestRoleAdminApi`/`TestGrantRoleCommand`/`TestSeedRbac`/`TestNativeGate`/`TestNativeGateAnnotationFlow`/`TestHeidiTipsRoute`/`TestLoginPageBranding`/`TestLsProjectTemplate`）。
+- **A 侧子集**（`tests/contracts` 排除 B 侧模块）：**263 passed / 8 skipped**；余下 4 个失败在 `test_cross_platform.py`，报 `ModuleNotFoundError: No module named 'fastapi'`——A 侧 venv 未装 fastapi（实测确认），该文件需按自身文档用 `infer-platform/backend` 的 venv 跑，**与本次改动无关**。
+- **三角色矩阵硬编码断言**：38 码全表 + `operator=7`/`admin=18`/`super_admin=38` 逐码比对（期望值写在测试里，不读实现常量）。
+- **前端构建**：`cd web && bun run build` ✅ 23s；产物 `dist/apps/labelstudio/index.html` 标题为 `AOI 数智检测`，bundle 内已含 NBHX 位图与中文 Heidi 文案，且**不再含** `Did you know?`/`Starter Cloud`/`A full-fledged open source`。
+- **biome**：改动的 3 个前端文件 check 通过；**ruff**：改动文件 check/format 全绿（`test_pipeline_core.py`/`test_platform_b_api.py` 有 3 处**存量** lint 漂移，非本次引入，未顺手改）。
+- **迁移**：`migrate aoi_core` 在干净库建出 5 表；`sqlmigrate` 含 `CREATE SCHEMA`；`aoi_seed_rbac` 幂等。
+
+### 7. 残留项与未做项（需人工决策）
+
+| # | 项 | 说明 |
+|---|---|---|
+| R1 | favicon 未替换 | `NBHX.png` 是 161×32 横版字标，直接当 32×32 favicon 会严重变形；等 32×32/64×64 图标 |
+| R2 | 登录页右下角装饰图形 | `core/static/images/login-bg.svg` 仍是上游品牌色（抽象几何，无 logo/文字）。如需中性化：在 `label_studio/static/images/` 放同路径覆盖文件（`FileSystemFinder` 优先） |
+| R3 | 注册页残留文案 | `users/new-ui/user_signup.html:47` 有 `How did you hear about Label Studio?`；本轮只覆盖登录页，未 fork 注册页模板 |
+| R4 | 暗色主题下 logo 对比度 | NBHX 为红黑字标 + 透明底，Menubar 暗色主题下深色笔画可能不可见，需目视确认 |
+| R5 | `web/libs/editor/public/images/{logo,ls_logo}.*` | 三个未被代码引用的静态文件（`Choices.jsx:61` 仅注释示例），未清理 |
+| R6 | H9（`Idempotency-Key` CAS 表） | 卫生清单标 D4 但**非本轮三件事**，未做，建议单独排期 |
+| R7 | H23（Menubar 按 `perms` 显隐） | 本轮未做（计划里为第一个可砍项），仍属 D4~D7 |
+| R8 | 构建副作用 | `bun run build` 会覆写 `label_studio/core/static/js/sw.js` 并生成 `sw.js.map`（红线目录内的文件）；已 `git checkout` 回退并删除产物，**后续构建后需复查** |
+
+## D5：组织管理页（仅超管）+ 屏蔽 LS 原生组织页 + SPA 深链修复（2026-09-15）
+
+> 依据 `docs/contracts/平台A_接口与数据契约.md` §2.2/§3.1/§4.0/§13.1/§14（本次同步修改）与
+> `.dsh/新需求_组织管理页面_交接.md`。裁定：删除=**停用组合拳**；新用户走登录页自助注册
+> （`DISABLE_SIGNUP_WITHOUT_LINK=False`，不做邀请）；独立菜单项；超管唯一且固定账号；
+> 原生组织页**彻底摘除**；H22/H23 一并结项。
+
+### 1. 后端（`aoi/core` + `aoi/pages`，权限点沿用 `system.users`，未扩码表）
+
+| 文件 | 说明 |
+|---|---|
+| `label_studio/aoi/core/views.py` | 新增 3 视图：`GET /api/core/users`（分页列表，每项 `{id, email, is_active, roles}`）、`POST .../deactivate`（停用组合拳）、`POST .../activate`（恢复账号与成员关系，角色不回补）；`UserRolesView` 增加最后超管守卫 |
+| `label_studio/aoi/core/urls.py` | +3 路由 |
+| `label_studio/aoi/core/bootstrap.py`（新增） | 固定超管 `superadmin@nbhx.com` 幂等播种：按 LS 注册链路接线（`username` 取邮箱前缀 + `OrganizationMember` + `active_organization`，无组织则创建）+ 补授 `super_admin`；已存在不重置密码 |
+| `label_studio/aoi/core/apps.py`、`aoi_seed_rbac.py` | `post_migrate` 与兜底命令在 `seed_rbac()` 后追加 `ensure_bootstrap_super_admin()` |
+| `label_studio/aoi/pages.py`（新增）+ `aoi/urls.py` | 点名注册 5 个 SPA 页面路由（`datasets\|training\|review\|system\|organization-admin`，带可选尾斜杠）→ `@login_required` 壳模板视图（H22） |
+| `label_studio/templates/aoi/page.html`（新增） | 壳模板（`extends base.html`，形态同 `projects/list.html`）；落在 `TEMPLATES['DIRS']`，上游零改动 |
+
+**停用语义**（契约 §3.1）：`is_active=False`（已签发 JWT 立即失效）+ 清空 aoi 角色（同事务 `bump_version`）+ 全部 `OrganizationMember.deleted_at` 置当前时间（`active_organization` 镜像上游成员软删行为）。**硬删不做**：`htx_user` 35 个 FK 全 `NO ACTION`，ORM 级联会连带删项目/标注。
+
+**最后超管守卫**：`deactivate` 与 `POST users/{id}/roles` 两路都拦——任何变更导致活跃超管（`is_active=True` 且持 `super_admin`）归零 → `40900`。
+
+**SPA 路由不用泛 catch-all**：`aoi.urls` 在 `core/urls.py` 第 60 行**无前缀** include，其后还有 30+ 条上游路由（`admin/`、`docs/`、`heidi-tips/` 等），泛 `^.*$` 会全部吞掉；故逐个点名。`/organization/` 上游遗留路由（旧 Vue 模板）不动——上游只读。
+
+### 2. 前端（`web/apps/labelstudio/src`）
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `aoi/usePerms.ts`（新增） | aoi 自有 | **前端首条 aoi API 调用**：react-query 缓存 `GET /api/core/permissions`，`usePerms()` → `{perms, has}`；失败视为无权限（fail-closed）；后续页面复用此模式 |
+| `pages/OrganizationAdmin/OrganizationAdminPage.jsx`（新增） | aoi 自有 | 用户表（邮箱/状态/角色）+ 设为/取消 `admin`、设为/取消 `operator`（全量覆盖语义，前端读现有角色增删后提交）+ 禁用/启用（`confirm` 二次确认）；`super_admin` 持有者行不提供任免按钮（守卫后端兜底） |
+| `components/Menubar/Menubar.jsx` | **注入点 3** | 删除原生「Organization」入口；5 个 aoi 入口按 `perms` 显隐：`datasets.view`/`training.view`/`review.view`/`system.view`/`system.users`（H23 结项） |
+| `pages/index.js` | **注入点 4** | 摘除 `OrganizationPage` 注册（`/organization` SPA 路由消失，超管也不可达）；新增 `OrganizationAdminPage`；`ModelsPage` 及 `Organization/` 目录文件保留（`HomePage` 仍引用其 `InviteLink`、`ModelsPage` 独立注册） |
+
+SPA 调用鉴权：session cookie（DRF `SessionAuthentication`）；CSRF 由上游 `core.middleware.DisableCSRF` 对 API 请求豁免（`?enforce_csrf_checks` 可强制）。
+
+### 3. 测试与夹具
+
+- `tests/contracts/fixtures/aoi_api_paths.json`：+3 路径（`GET /api/core/users`、`POST /api/core/users/{id}/deactivate|activate`），版本 `d5-20260915`。
+- `tests/contracts/test_platform_a_api.py`：新增 `TestUserAdminApi` / `TestLastSuperAdminGuard` / `TestBootstrapSuperAdmin` / `TestAoiSpaPages`（见契约 §13.1）。
+
+### 4. 卫生清单结项
+
+- **H22**（SPA 深链 404）：点名路由落地，契约 §2.2 已回写。
+- **H23**（Menubar 无权限门控）：`usePerms` + 5 入口显隐落地。
+
+## 开发环境：前端构建组合目标（2026-09-14）
+
+故障现象：改前端后重新 build，登录后页面 JS/CSS 全部 400（请求 `/react-app/main-sCLm4fB-.js` 等旧 hash）。根因：Django 运行时只读 `STATIC_ROOT/js/manifest.json`（`label_studio/core/static_build/`，由 collectstatic 生成），不读 `web/dist` 里的 manifest；只 build 不 collectstatic → 服务端继续引用上一次构建的 hash，而旧 hash 文件已被新构建覆盖清除。缺失文件本应 404，但 `static_serve.py` 剥 `/react-app` 前缀后残留前导 `/`，`safe_join` 抛 `SuspiciousFileOperation` → 400（上游 bug，暂不改）。
+
+处理：Makefile 新增 `frontend-build-collect`（= `frontend-build` + `collectstatic --noinput`），宿主机开发侧一条命令出齐两份产物；Dockerfile 构建链本就 build→collectstatic 顺序执行，无需改。注意 manifest 在进程启动时一次性加载（`manifest_assets.py` 模块级 `_MANIFEST`），collectstatic 后仍需重启后端。

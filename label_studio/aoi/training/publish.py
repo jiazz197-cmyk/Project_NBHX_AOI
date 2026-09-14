@@ -394,7 +394,9 @@ def materialize_artifacts(
     (artifacts_dir / 'config.json').write_bytes(artifacts.config_bytes)
     (artifacts_dir / 'manifest.json').write_bytes(artifacts.manifest_bytes)
     (artifacts_dir / 'digest.txt').write_text(
-        json.dumps(artifacts.summary(image=image, tag=tag, model_ref=model_ref, mode=mode), indent=2, ensure_ascii=False),
+        json.dumps(
+            artifacts.summary(image=image, tag=tag, model_ref=model_ref, mode=mode), indent=2, ensure_ascii=False
+        ),
         encoding='utf-8',
     )
 
@@ -492,7 +494,9 @@ class RegistryPushClient:
     def _auth_headers(self) -> dict[str, str]:
         if not self.username:
             raise RegistryPushError('MODEL_REGISTRY_USER / MODEL_REGISTRY_PASSWORD not configured')
-        challenge = _parse_bearer_challenge(self._request('GET', f'{self.api_base}/v2/').headers.get('WWW-Authenticate', ''))
+        challenge = _parse_bearer_challenge(
+            self._request('GET', f'{self.api_base}/v2/').headers.get('WWW-Authenticate', '')
+        )
         realm = challenge.get('realm')
         if not realm:
             # 无 Bearer challenge 的仓库（basic auth）：直接带 Basic 头
@@ -519,9 +523,7 @@ class RegistryPushClient:
         return {'Authorization': f'Bearer {token}'}
 
     def _upload_blob(self, data: bytes, digest: str, headers: dict[str, str]) -> None:
-        response = self._request(
-            'POST', f'{self.api_base}/v2/{self.repository}/blobs/uploads/', headers=headers
-        )
+        response = self._request('POST', f'{self.api_base}/v2/{self.repository}/blobs/uploads/', headers=headers)
         if response.status_code not in (201, 202):
             raise RegistryPushError(f'blob upload init failed: HTTP {response.status_code} {response.text[:200]}')
         # 若仓库认为该 blob 已存在，可能直接 201 返回且不带 Location（Registry v2 允许）：
@@ -547,7 +549,9 @@ class RegistryPushClient:
             headers=put_headers,
         )
         if response.status_code not in (201, 202):
-            raise RegistryPushError(f'blob upload failed ({digest}): HTTP {response.status_code} {response.text[:200]}')
+            raise RegistryPushError(
+                f'blob upload failed ({digest}): HTTP {response.status_code} {response.text[:200]}'
+            )
         received = _content_digest(response)
         if received and received != digest:
             raise RegistryPushError(
