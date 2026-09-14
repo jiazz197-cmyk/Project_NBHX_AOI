@@ -4,10 +4,10 @@
  * 列表 + 筛选（工位/判定/时间/回传状态）+ 图片与框预览
  */
 import { useEffect, useState } from 'react';
-import { Table, Tag, Select, DatePicker, Space, Typography, Drawer, Descriptions } from 'antd';
+import { Table, Tag, Select, DatePicker, Space, Typography, Drawer, Descriptions, Tabs } from 'antd';
 import { SearchOutlined } from '@ant-design/icons';
-import { mockInspections } from '../../api/mock';
-import type { InspectionRecord } from '../../api/types';
+import { mockInspections, mockBadImages, mockErrorStats } from '../../api/mock';
+import type { InspectionRecord, BadImage } from '../../api/types';
 import dayjs from 'dayjs';
 
 const { RangePicker } = DatePicker;
@@ -40,14 +40,25 @@ const pushedStatusLabels: Record<string, string> = {
   dead: '已死信',
 };
 
+// error_code 取值（跨平台契约 §3.2）
+const errorCodeLabels: Record<string, string> = {
+  capture_failed: '采集失败',
+  decode_failed: '解码失败',
+  timeout: '超时',
+  model_error: '模型异常',
+  disk_error: '磁盘错误',
+};
+
 export default function Inspections() {
   const [records, setRecords] = useState<InspectionRecord[]>([]);
+  const [badImages, setBadImages] = useState<BadImage[]>([]);
   const [selected, setSelected] = useState<InspectionRecord | null>(null);
   const [verdictFilter, setVerdictFilter] = useState<string | undefined>();
   const [stationFilter, setStationFilter] = useState<string | undefined>();
 
   useEffect(() => {
     setRecords(mockInspections);
+    setBadImages(mockBadImages);
   }, []);
 
   const filtered = records.filter(r => {
@@ -86,45 +97,107 @@ export default function Inspections() {
     },
   ];
 
+  const badImageColumns = [
+    { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
+    { title: '工位', dataIndex: 'station_code', key: 'station_code', width: 80 },
+    { title: '序号', dataIndex: 'seq', key: 'seq', width: 70 },
+    {
+      title: '错误码', dataIndex: 'error_code', key: 'error_code', width: 110,
+      render: (v: string) => <Tag color="red">{errorCodeLabels[v] ?? v}</Tag>,
+    },
+    { title: '备注', dataIndex: 'note', key: 'note', render: (v?: string) => v ?? '-' },
+    {
+      title: '回传', dataIndex: 'pushed_status', key: 'pushed_status', width: 90,
+      render: (v: string) => <Tag color={pushedStatusColors[v]}>{pushedStatusLabels[v]}</Tag>,
+    },
+    { title: '采集时间', dataIndex: 'captured_at', key: 'captured_at', width: 170, render: (v?: string) => (v ? dayjs(v).format('YYYY-MM-DD HH:mm:ss') : '-') },
+  ];
+
+  const suspiciousByCodeRows = Object.entries(mockErrorStats.suspicious_by_code).map(([code, count]) => ({
+    code,
+    count,
+  }));
+
+  const suspiciousColumns = [
+    { title: '缺陷码', dataIndex: 'code', key: 'code' },
+    { title: '可疑图数', dataIndex: 'count', key: 'count', width: 120 },
+  ];
+
   return (
     <div>
       <div className="page-header">
         <Typography.Title level={4}>检测记录</Typography.Title>
       </div>
 
-      {/* 筛选栏 */}
-      <Space style={{ marginBottom: 16 }} wrap>
-        <Select
-          placeholder="工位筛选"
-          allowClear
-          style={{ width: 140 }}
-          value={stationFilter}
-          onChange={setStationFilter}
-          options={['ST01', 'ST02', 'ST03', 'ST04', 'ST05', 'ST06', 'ST07', 'ST08'].map(s => ({ value: s, label: s }))}
-        />
-        <Select
-          placeholder="判定筛选"
-          allowClear
-          style={{ width: 130 }}
-          value={verdictFilter}
-          onChange={setVerdictFilter}
-          options={[
-            { value: 'auto_pass', label: '合格' },
-            { value: 'recheck', label: '待复审' },
-            { value: 'manual', label: '人工介入' },
-          ]}
-        />
-        <RangePicker
-          placeholder={['开始时间', '结束时间']}
-        />
-      </Space>
+      <Tabs
+        items={[
+          {
+            key: 'list',
+            label: '检测记录',
+            children: (
+              <>
+                {/* 筛选栏 */}
+                <Space style={{ marginBottom: 16 }} wrap>
+                  <Select
+                    placeholder="工位筛选"
+                    allowClear
+                    style={{ width: 140 }}
+                    value={stationFilter}
+                    onChange={setStationFilter}
+                    options={['ST01', 'ST02', 'ST03', 'ST04', 'ST05', 'ST06', 'ST07', 'ST08'].map(s => ({ value: s, label: s }))}
+                  />
+                  <Select
+                    placeholder="判定筛选"
+                    allowClear
+                    style={{ width: 130 }}
+                    value={verdictFilter}
+                    onChange={setVerdictFilter}
+                    options={[
+                      { value: 'auto_pass', label: '合格' },
+                      { value: 'recheck', label: '待复审' },
+                      { value: 'manual', label: '人工介入' },
+                    ]}
+                  />
+                  <RangePicker
+                    placeholder={['开始时间', '结束时间']}
+                  />
+                </Space>
 
-      <Table
-        columns={columns}
-        dataSource={filtered}
-        rowKey="id"
-        size="small"
-        pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (total: number) => `共 ${total} 条` }}
+                <Table
+                  columns={columns}
+                  dataSource={filtered}
+                  rowKey="id"
+                  size="small"
+                  pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (total: number) => `共 ${total} 条` }}
+                />
+              </>
+            ),
+          },
+          {
+            key: 'errors',
+            label: '错图统计',
+            children: (
+              <>
+                <Typography.Title level={5} style={{ marginTop: 0 }}>坏图（按 error_code）</Typography.Title>
+                <Table
+                  columns={badImageColumns}
+                  dataSource={badImages}
+                  rowKey="id"
+                  size="small"
+                  pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (total: number) => `共 ${total} 条` }}
+                />
+                <Typography.Title level={5} style={{ marginTop: 16 }}>可疑图（按 object_code）</Typography.Title>
+                <Table
+                  columns={suspiciousColumns}
+                  dataSource={suspiciousByCodeRows}
+                  rowKey="code"
+                  size="small"
+                  pagination={false}
+                />
+              </>
+            ),
+          },
+        ]}
       />
 
       {/* 详情抽屉 */}

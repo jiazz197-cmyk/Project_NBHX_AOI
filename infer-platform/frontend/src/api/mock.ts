@@ -13,7 +13,7 @@
  *   - §3.7 日报: GET /reports/daily
  */
 
-import type { HealthData, ModelInfo, StationInfo, StationTemplate, InspectionRecord, StatsSummary, TrendPoint, ErrorStats, DailyReport } from './types';
+import type { HealthData, ModelInfo, StationInfo, InspectionRecord, StatsSummary, TrendPoint, ErrorStats, DailyReport, OutboxItem, BadImage } from './types';
 
 // ============ 健康检查 (§3.1) ============
 export const mockHealth: HealthData = {
@@ -62,36 +62,6 @@ export const mockStations: StationInfo[] = [
   { code: 'ST06', name: '3号线-右门板', enabled: true, channel_id: 'ch06', status: 'online', last_capture_at: '2026-09-08T08:30:45Z', template_version: 3 },
   { code: 'ST07', name: '4号线-左门板', enabled: false, channel_id: 'ch07', status: 'offline', template_version: 0 },
   { code: 'ST08', name: '4号线-右门板', enabled: false, channel_id: 'ch08', status: 'offline', template_version: 0 },
-];
-
-// ============ '2026-09-01T10:00:00Z',
-  },
-  {
-    id: 'tpl-interior',
-    name: '内饰件-通用检测',
-    model_ref: '3-yolo@ds1',
-    skillname: 'ObjectDetection',
-    tile_size: 1024,
-    overlap: 0.25,
-    objects: [
-      { code: 'object_fault_type_01', class_map: { '0': 'object_fault_type_01' }, thresholds: { recheck_min: 0.50, auto_min: 0.85 }, risk_level: 3 },
-      { code: 'object_fault_type_02', class_map: { '1': 'object_fault_type_02' }, thresholds: { recheck_min: 0.50, auto_min: 0.85 }, risk_level: 2 },
-    ],
-    updated_at: '2026-09-05T14:00:00Z',
-  },
-  {
-    id: 'tpl-highp',
-    name: '高精度复检模板',
-    model_ref: '3-yolo@ds1',
-    skillname: 'ObjectDetection',
-    tile_size: 1920,
-    overlap: 0.3,
-    objects: [
-      { code: 'object_fault_type_01', class_map: { '0': 'object_fault_type_01' }, thresholds: { recheck_min: 0.75, auto_min: 0.95 }, risk_level: 3 },
-      { code: 'object_fault_type_02', class_map: { '1': 'object_fault_type_02' }, thresholds: { recheck_min: 0.70, auto_min: 0.93 }, risk_level: 2 },
-    ],
-    updated_at: '2026-09-07T16:00:00Z',
-  },
 ];
 
 // ============ 检测记录 (§3.5) ============
@@ -146,4 +116,19 @@ export const mockReports: DailyReport[] = [
   { day: '2026-09-08', total: 12480, auto_pass: 11232, recheck: 936, manual: 312, bad_count: 45, html_path: '/data/reports/2026-09-08.html', csv_path: '/data/reports/2026-09-08.csv' },
   { day: '2026-09-07', total: 11800, auto_pass: 10620, recheck: 880, manual: 300, bad_count: 40, html_path: '/data/reports/2026-09-07.html', csv_path: '/data/reports/2026-09-07.csv' },
   { day: '2026-09-06', total: 12100, auto_pass: 10890, recheck: 910, manual: 300, bad_count: 42, html_path: '/data/reports/2026-09-06.html', csv_path: '/data/reports/2026-09-06.csv' },
+];
+
+// ============ 回传队列 (§3.1 system/outbox) ============
+export const mockOutbox: OutboxItem[] = [
+  { id: 31, kind: 'suspicious', ref_id: 98762, idempotency_key: 'ST03-3041-suspicious', attempts: 0, status: 'pending', created_at: '2026-09-08T08:30:50Z' },
+  { id: 30, kind: 'suspicious', ref_id: 98763, idempotency_key: 'ST02-2041-suspicious', attempts: 2, next_retry_at: '2026-09-08T08:32:00Z', status: 'pushing', created_at: '2026-09-08T08:30:55Z' },
+  { id: 29, kind: 'suspicious', ref_id: 98761, idempotency_key: 'ST05-5041-suspicious', attempts: 5, next_retry_at: '2026-09-08T09:30:00Z', status: 'dead', last_error: 'connect timeout after 60s', created_at: '2026-09-08T08:20:00Z' },
+  { id: 28, kind: 'bad', ref_id: 12, idempotency_key: 'ST05-5040-bad', attempts: 5, next_retry_at: '2026-09-08T09:20:00Z', status: 'dead', last_error: '40100 internal token rejected', created_at: '2026-09-08T08:19:58Z' },
+];
+
+// ============ 坏图清单 (§3.5 bad-images) ============
+export const mockBadImages: BadImage[] = [
+  { id: 12, station_code: 'ST05', seq: 5040, captured_at: '2026-09-08T08:19:58Z', error_code: 'capture_failed', note: '相机断连', pushed_status: 'dead', created_at: '2026-09-08T08:19:58Z' },
+  { id: 11, station_code: 'ST02', seq: 2040, captured_at: '2026-09-08T08:19:50Z', error_code: 'decode_failed', image_md5: 'c4d2...a9', pushed_status: 'pending', created_at: '2026-09-08T08:19:50Z' },
+  { id: 10, station_code: 'ST01', seq: 1040, captured_at: '2026-09-08T08:19:42Z', error_code: 'timeout', pushed_status: 'pushed', pushed_at: '2026-09-08T08:20:10Z', created_at: '2026-09-08T08:19:42Z' },
 ];

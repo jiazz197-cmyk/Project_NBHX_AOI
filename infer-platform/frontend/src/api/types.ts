@@ -119,3 +119,55 @@ export interface DailyReport {
   html_path: string;
   csv_path: string;
 }
+
+// ============ 回传队列 (§3.1 system/outbox，对应 b_outbox 表) ============
+export interface OutboxItem {
+  id: number;
+  kind: string; // suspicious/bad
+  ref_id: number; // b_inspection.id / b_bad_image.id
+  idempotency_key: string; // {station}-{seq}-{kind}
+  attempts: number;
+  next_retry_at?: string;
+  status: string; // pending/pushing/pushed/dead
+  last_error?: string;
+  created_at: string;
+  pushed_at?: string;
+}
+
+export interface OutboxData {
+  pending: number;
+  pushing: number;
+  dead: number;
+  items: OutboxItem[];
+}
+
+// ============ 坏图清单 (§3.5 bad-images，对应 b_bad_image 表) ============
+export interface BadImage {
+  id: number;
+  station_code: string;
+  seq: number;
+  captured_at?: string;
+  error_code: string; // capture_failed/decode_failed/timeout/model_error/disk_error
+  image_path?: string;
+  image_md5?: string;
+  note?: string;
+  pushed_status: string; // pending/pushing/pushed/dead
+  pushed_at?: string;
+  created_at: string;
+}
+
+// ============ 远端模型列表 (§3.2 /models/remote，一键拉取数据源) ============
+export interface RemoteModelItem {
+  tag: string;
+  model_ref: string | null;
+  precision: string;
+  image: string;
+  local: boolean;
+  local_status?: string | null;
+}
+
+export interface RemoteModelsData {
+  registry: string;
+  repository: string;
+  items: RemoteModelItem[];
+}
