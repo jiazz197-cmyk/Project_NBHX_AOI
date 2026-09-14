@@ -92,8 +92,11 @@ uv run python label_studio/manage.py runserver 0.0.0.0:8080
 后端默认开发地址：`http://localhost:8080`
 
 > 本地裸跑前请确保 PostgreSQL 和 MinIO 已启动，且 MinIO 中已创建 `aoi-images` bucket。
-> 模型发布变量（`MODEL_REGISTRY`、`MODEL_IMAGE_REPO`、`MODEL_REGISTRY_USER`、`MODEL_REGISTRY_PASSWORD`、`INTERNAL_TOKEN`）在骨架落地后追加到 `.env`，
-> 见 `docs/P0骨架设计_双平台.md` §6。
+> 模型发布变量（`MODEL_REGISTRY`、`MODEL_IMAGE_REPO`、`MODEL_REGISTRY_USER`、`MODEL_REGISTRY_PASSWORD`、`INTERNAL_TOKEN`）在骨架落地后追加到 `.env`；
+> **D3 起**发布服务另有 `AOI_PUBLISH_MODE`（`fake` 离线假推送 / `registry` 走 Registry v2 真推）、
+> `AOI_REGISTRY_PROXY`（只作用于 registry 出网的代理，内网示例 `http://127.0.0.1:7897`）、
+> `AOI_PUBLISH_ARTIFACTS_DIR`（产物落盘目录，默认 `tmp/publish`，已被 `.gitignore` 忽略）。
+> 全部配置键见 `docs/P0骨架设计_双平台.md` §6，仓库/账号分配见 `docs/docker-registry-setup.md`。
 
 ### 3.2 前端本地开发
 
@@ -127,17 +130,24 @@ Vite 开发服务器监听 `http://localhost:8010`，但它只是**模块/HMR �
 cp .env.example .env
 # 编辑 .env，至少确认：
 #   DJANGO_DB=default
-#   POSTGRE_HOST=db
 #   POSTGRE_USER=postgres
-#   POSTGRE_PASSWORD=...
+#   POSTGRE_PASSWORD=postgres
 #   POSTGRE_NAME=postgres
+#   （POSTGRE_HOST 不用改：app 服务已固定 POSTGRE_HOST=db；
+#     docker-compose.yml 会把 POSTGRE_* 映射为 db 容器的 POSTGRES_*，
+#     即 app 与 db 共用 .env 里这一套凭据，不再硬编码。）
 #   MINIO_STORAGE_ENDPOINT=http://minio:9000
 #   MINIO_STORAGE_BUCKET_NAME=aoi-images
-#   MINIO_STORAGE_ACCESS_KEY=minioadmin
-#   MINIO_STORAGE_SECRET_KEY=minioadmin
+#   MINIO_STORAGE_ACCESS_KEY=minioadmin   # 必须与 MINIO_ROOT_USER 一致
+#   MINIO_STORAGE_SECRET_KEY=minioadmin   # 必须与 MINIO_ROOT_PASSWORD 一致
+#   INTERNAL_TOKEN=<32+ 随机字节>         # B→A 错图回传令牌；容器形态必填（未配置则 /api/ingest 一律 40100）
+#     生成：python -c "import secrets;print(secrets.token_urlsafe(32))"
 # 注意：全容器/交付形态下请关闭本地开发开关（.env 默认值）：
 #   FRONTEND_HMR=false
-#   DEBUG=false
+#   DEBUG=false        # compose 默认已是 false；DEBUG=true 且未配 INTERNAL_TOKEN 时会回落到开发默认令牌
+# 交付前务必修改 Postgres/MinIO 的默认口令（POSTGRE_PASSWORD / MINIO_ROOT_PASSWORD）。
+# 若沿用旧的 ./postgres-data 卷（此前为 trust 认证），Postgres 只在数据目录首次初始化时应用密码，
+# 需要改密码或重建卷（docker compose down -v 会删除数据，谨慎）。
 
 # 2. 启动 PostgreSQL + MinIO + Label Studio
 docker compose -f docker-compose.yml -f docker-compose.minio.yml up -d --build
@@ -145,6 +155,9 @@ docker compose -f docker-compose.yml -f docker-compose.minio.yml up -d --build
 # 3. 在 MinIO 控制台创建 bucket：aoi-images
 #    控制台默认 http://localhost:9009
 ```
+
+> 若宿主机已有 PostgreSQL/MinIO 占用 5432/9000（例如独立的基础设施 compose 栈），
+> 这套 compose 会端口冲突，二选一即可。
 
 启用后，Label Studio 的上传文件/图片默认存储会切到 MinIO bucket `aoi-images`；用户、项目、标注等业务数据仍在 PostgreSQL。
 
@@ -194,8 +207,8 @@ bun install && bun run dev
 
 平台间链路（跨机器，详见 [`docs/contracts/跨平台契约_A-B.md`](docs/contracts/跨平台契约_A-B.md)）：
 
-- **A → 镜像仓库**：`POST /api/train/models/{id}/publish` 构建并推送模型镜像（`/model/model.onnx` + `model.yaml` + `.sha256`）；
-- **镜像仓库 → B**：`POST /api/v1/models/pull` 拉取 manifest/层 → 解包 → sha256 校验 → 解析 `model.yaml` → 注册；
+- **A → 镜像仓库**：在模型库中**勾选模型**（支持多选批量，逐条独立）→ `POST /api/train/models/publish` 构建并推送模型镜像（`/model/model.onnx` + `model.yaml` + `.sha256`）；已上传记录可**下线 / 软删 / 恢复**（软删只清 A 侧记录，仓库镜像保留）；
+- **镜像仓库 → B**：`GET /api/v1/models/remote` 列出远端可用 tag → **一键拉取** → `POST /api/v1/models/pull` 拉 manifest/层 → 解包 → sha256 校验 → 解析 `model.yaml` → 注册；
 - **B → A**：错图回传（`POST /api/ingest/findings`，仅可疑图/坏图，outbox 重试）。
 - **A 从不主动连接 B**：无实例管理、无心跳、无方案下发。
 

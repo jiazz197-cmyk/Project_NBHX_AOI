@@ -1,0 +1,50 @@
+{# 平台 B 日报模板 —— 对齐平台B契约 §7 #}
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>产线检测日报 {{ day }}</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; color: #333; }
+    h1 { font-size: 20px; }
+    .cards { display: flex; gap: 16px; margin: 16px 0; }
+    .card { border: 1px solid #e5e5e5; border-radius: 8px; padding: 12px 16px; min-width: 100px; }
+    .card .v { font-size: 24px; font-weight: 600; }
+    table { border-collapse: collapse; margin-top: 8px; width: 100%; }
+    th, td { border: 1px solid #e5e5e5; padding: 6px 10px; text-align: left; }
+    th { background: #f7f7f7; }
+  </style>
+</head>
+<body>
+  <h1>产线检测日报 {{ day }}</h1>
+  <div class="cards">
+    <div class="card"><div class="v">{{ total }}</div><div>今日检测量</div></div>
+    <div class="card"><div class="v">{{ pass_rate }}%</div><div>合格率</div></div>
+    <div class="card"><div class="v">{{ auto_pass }}</div><div>合格</div></div>
+    <div class="card"><div class="v">{{ recheck }}</div><div>待复审</div></div>
+    <div class="card"><div class="v">{{ manual }}</div><div>人工介入</div></div>
+    <div class="card"><div class="v">{{ bad_count }}</div><div>坏图</div></div>
+    <div class="card"><div class="v">{{ p95_latency_ms }}ms</div><div>时延 P95</div></div>
+  </div>
+
+  <h2>缺陷 TopN</h2>
+  <table>
+    <tr><th>缺陷编码</th><th>框数</th></tr>
+    {% for code, count in defect_topn %}
+    <tr><td>{{ code }}</td><td>{{ count }}</td></tr>
+    {% else %}
+    <tr><td colspan="2">无</td></tr>
+    {% endfor %}
+  </table>
+
+  <h2>坏图分布（error_code）</h2>
+  <table>
+    <tr><th>错误码</th><th>数量</th></tr>
+    {% for code, count in error_items %}
+    <tr><td>{{ code }}</td><td>{{ count }}</td></tr>
+    {% else %}
+    <tr><td colspan="2">无</td></tr>
+    {% endfor %}
+  </table>
+</body>
+</html>

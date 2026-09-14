@@ -1,0 +1,16 @@
+{
+  "source": "LS 1.24.0.dev0 data_export YOLO 实测（D2）",
+  "entries": [
+    "images/",
+    "labels/",
+    "classes.txt",
+    "notes.json"
+  ],
+  "has_data_yaml": false,
+  "classes_source": "classes.txt",
+  "classes_order": [
+    "object_fault_type_01",
+    "object_fault_type_02"
+  ],
+  "data_yaml": "由 aoi 训练包裹（D9）在训练时按需生成，不作为导出 zip 的必备产物"
+}

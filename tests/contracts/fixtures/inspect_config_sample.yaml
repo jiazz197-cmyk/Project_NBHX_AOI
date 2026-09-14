@@ -1,0 +1,22 @@
+# inspect_config_sample.yaml —— 检测配置样例（pipeline-core.load_config 用）
+# A 预标与 B 工位模板共用；结构对齐 平台B契约 §3.3 工位模板。
+template_version: 3
+model_ref: "3-yolo@ds1"
+skillname: "ObjectDetection"
+tile_size: 1280
+overlap: 0.2
+objects:
+  - code: "object_fault_type_01"
+    class_map:
+      "0": "object_fault_type_01"
+    thresholds:
+      recheck_min: 0.60
+      auto_min: 0.90
+    risk_level: 3
+  - code: "object_fault_type_02"
+    class_map:
+      "1": "object_fault_type_02"
+    thresholds:
+      recheck_min: 0.55
+      auto_min: 0.88
+    risk_level: 2

@@ -1,0 +1,107 @@
+{
+  "description": "预标三桶→人工复审→数据集落版样例（契约 §3.4/§4.4/§10）",
+  "scope": "unlabeled_only",
+  "thresholds_priority": [
+    "model.yaml.recommended",
+    "prelabel_task.route_config"
+  ],
+  "dataset_version": {
+    "status": "draft",
+    "phase": "reviewing"
+  },
+  "bucket_colors": {
+    "high": "#52C41A",
+    "medium": "#FAAD14",
+    "low": "#FF4D4F"
+  },
+  "workitems": [
+    {
+      "id": 1,
+      "source": "prelabel",
+      "bucket": "high",
+      "verdict": "auto_pass",
+      "forced": false,
+      "status": "finalized",
+      "ls_task_id": 101,
+      "ls_prediction_id": 9001,
+      "model_ref": "3-yolo@ds1",
+      "bucket_reason": {
+        "reasons": [
+          "high_score"
+        ],
+        "scores": {
+          "object_fault_type_01": 0.96
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": "prelabel",
+      "bucket": "medium",
+      "verdict": "recheck",
+      "forced": false,
+      "status": "pending",
+      "ls_task_id": 102,
+      "ls_prediction_id": 9002,
+      "model_ref": "3-yolo@ds1",
+      "bucket_reason": {
+        "reasons": [
+          "mid_score"
+        ],
+        "scores": {
+          "object_fault_type_01": 0.72
+        }
+      }
+    },
+    {
+      "id": 3,
+      "source": "prelabel",
+      "bucket": "low",
+      "verdict": "manual",
+      "forced": true,
+      "status": "pending",
+      "ls_task_id": 103,
+      "ls_prediction_id": 9003,
+      "model_ref": "3-yolo@ds1",
+      "bucket_reason": {
+        "reasons": [
+          "low_score"
+        ],
+        "scores": {
+          "object_fault_type_01": 0.41
+        }
+      }
+    }
+  ],
+  "finalize_requests": {
+    "high": {
+      "action": "accepted_prediction",
+      "final_reason": "auto_pass"
+    },
+    "medium": {
+      "action": "edited",
+      "verdict": "defect_confirmed",
+      "boxes": [
+        {
+          "object_code": "object_fault_type_01",
+          "score": 0.72,
+          "xyxy": [
+            10,
+            12,
+            30,
+            27
+          ]
+        }
+      ],
+      "final_reason": "misdetection"
+    },
+    "low": {
+      "action": "relabeled",
+      "verdict": "defect_confirmed",
+      "annotation": {
+        "result": []
+      },
+      "final_reason": "annotation_issue"
+    }
+  }
+}
