@@ -1,6 +1,6 @@
 {
- "version": "d5-20260915",
- "note": "T2.9 datasets CRUD 路径裁定为 /api/datasets + /api/datasets/{id}；旧 /api/datasets/datasets* 不存在；D3 新增 /api/auth/login（匿名）与 /api/auth/logout（jwt）；D5 新增 /api/core/users 与 /api/core/users/{id}/deactivate|activate（组织管理，契约 §4.0）",
+ "version": "d5-20260920-2",
+ "note": "T2.9 datasets CRUD 路径裁定为 /api/datasets + /api/datasets/{id}；旧 /api/datasets/datasets* 不存在；D3 新增 /api/auth/login（匿名）与 /api/auth/logout（jwt）；D5 新增 /api/core/users 与 /api/core/users/{id}/deactivate|activate（组织管理，契约 §4.0）；D5 收尾新增 GET/DELETE /api/datasets/images/{id}（图片删除）",
  "paths": [
   {
    "method": "POST",
@@ -95,6 +95,18 @@
   {
    "method": "GET",
    "path": "/api/datasets/images/{id}/download",
+   "tag": "aoi-datasets",
+   "auth": "jwt"
+  },
+  {
+   "method": "GET",
+   "path": "/api/datasets/images/{id}",
+   "tag": "aoi-datasets",
+   "auth": "jwt"
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/datasets/images/{id}",
    "tag": "aoi-datasets",
    "auth": "jwt"
   },

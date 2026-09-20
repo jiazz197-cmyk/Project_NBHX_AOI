@@ -1,6 +1,18 @@
-# Run Django dev server with Sqlite
+# Default dev entry: Django dev server + Celery worker together（D5 导入必须有 worker；
+# Ctrl+C 同时退出两条进程；日志会交错输出）。Redis 需另行可用（见 .env.example 的 CELERY_BROKER_URL）。
 run-dev:
-	DJANGO_DB=default LOG_DIR=tmp DEBUG=true LOG_LEVEL=DEBUG DJANGO_SETTINGS_MODULE=core.settings.label_studio uv run python label_studio/manage.py runserver
+	$(MAKE) -j2 run-django run-celery
+
+# Run Django dev server only（不带 worker；导入不可用，仅供单进程调试）
+# 端口固定 8082：本机 8000/8080/8081 被 Dify / SearXNG 等其它服务占用
+run-django:
+	DJANGO_DB=default LOG_DIR=tmp DEBUG=true LOG_LEVEL=DEBUG DJANGO_SETTINGS_MODULE=core.settings.label_studio uv run python label_studio/manage.py runserver 0.0.0.0:8082
+
+# Run Celery worker for aoi async tasks (D5 import package; needs Redis on CELERY_BROKER_URL)
+# PYTHONPATH 必须指向 label_studio（celery -A aoi 不像 manage.py 会自带工程路径）；
+# 开发用 --pool=solo 单进程池：本地导入量级足够，且不依赖 /dev/shm（prefork 在受限环境会 PermissionError）。
+run-celery:
+	PYTHONPATH=label_studio DJANGO_DB=default LOG_DIR=tmp DEBUG=true LOG_LEVEL=DEBUG DJANGO_SETTINGS_MODULE=core.settings.label_studio uv run celery -A aoi worker --queues=default --pool=solo --concurrency=1 --loglevel=info
 
 # Run Django dev migrations with Sqlite
 migrate-dev:

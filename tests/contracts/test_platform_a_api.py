@@ -134,6 +134,14 @@ class TestEnvelopeAndAuth:
         assert set(body['data']) == {'total', 'items'}
 
     def test_idempotency_key_accepted(self, auth_client):
+        # D5：POST /api/datasets 服务端创建 LS 项目，前置是已发布缺陷字典版本（无 → 42200）
+        from aoi.datasets import label_config
+        from aoi.datasets.models import DefectDictVersion
+
+        DefectDictVersion.objects.create(
+            version='21000101-1',
+            snapshot=label_config.snapshot_from_defects(label_config_sample_defects()),
+        )
         response = auth_client.post(
             '/api/datasets', {'name': 'with-idem'}, format='json', HTTP_IDEMPOTENCY_KEY='idem-1'
         )
@@ -497,6 +505,38 @@ class TestAllStubs:
             },
         )
 
+    @pytest.fixture(autouse=True)
+    def _seed_import_surface(self, db, test_user):
+        """D5：导入/数据集创建真实化后，兜底端点巡检需要真实字典版本与数据集（含 LS 项目）。
+
+        - ``POST /api/datasets`` 要求已发布缺陷字典版本（无 → 42200）；
+        - ``POST /api/datasets/import`` 要求 dataset 已有 LS 项目（无 → 42200）。
+        """
+        from aoi.datasets import label_config
+        from aoi.datasets.ls_project import build_project_kwargs
+        from aoi.datasets.models import Dataset, DefectDictVersion
+        from organizations.models import Organization
+        from projects.models import Project
+
+        org = Organization.create_organization(created_by=test_user, title='AOI Regression')
+        test_user.active_organization = org
+        test_user.save(update_fields=['active_organization'])
+
+        defects = label_config_sample_defects()
+        dict_version = DefectDictVersion.objects.create(
+            version='21000101-1',
+            snapshot=label_config.snapshot_from_defects(defects),
+            published_by=test_user.id,
+        )
+        kwargs = build_project_kwargs(
+            dataset_name='stub-dataset',
+            version='draft',
+            dict_version=dict_version.version,
+            defects=defects,
+        )
+        project = Project.objects.create(organization=org, created_by=test_user, **kwargs)
+        Dataset.objects.create(name='stub-dataset', ls_project_id=project.id, created_by=test_user.id)
+
     def test_all_aoi_endpoints_return_200(self, api_client, test_user, jpeg_bytes):
         baseline = load_json('aoi_api_paths.json')
         predict_request = ml_backend_sample()['endpoints']['predict']['request']
@@ -531,6 +571,38 @@ class TestAllStubs:
                 )
                 assert response.status_code == 200, (method, path, response.content[:200])
                 assert_envelope(response)
+                continue
+
+            if path == '/api/datasets/import/{job_id}':
+                # D5：未知 job → 40401（stub 已移除）
+                client.force_authenticate(user=test_user)
+                response = client.get(url)
+                assert response.status_code == 404, (method, path, response.content[:200])
+                assert_envelope(response, code=40401)
+                continue
+
+            if path == '/api/datasets/import' and method == 'POST':
+                # D5：multipart 导入（eager Celery 在请求内同步完成）
+                from aoi.datasets.models import Dataset
+
+                dataset = Dataset.objects.order_by('id').first()
+                client.force_authenticate(user=test_user)
+                response = client.post(
+                    url,
+                    {
+                        'dataset_id': str(dataset.id),
+                        'source': 'manual_real',
+                        'files[]': SimpleUploadedFile('a.jpg', jpeg_bytes, content_type='image/jpeg'),
+                    },
+                    format='multipart',
+                )
+                assert response.status_code == 200, (method, path, response.content[:200])
+                body = assert_envelope(response)
+                job_id = body['data']['job_id']
+                detail = client.get(f'/api/datasets/import/{job_id}')
+                assert detail.status_code == 200, detail.content[:200]
+                detail_body = assert_envelope(detail)
+                assert detail_body['data']['status'] == 'succeeded', detail_body['data']
                 continue
 
             if path == '/api/auth/login':
@@ -3114,3 +3186,573 @@ class TestLsProjectTemplate:
         assert kwargs['title'] == self.DATASET
         assert self.VERSION in kwargs['description'] and self.DICT_VERSION in kwargs['description']
         assert kwargs['expert_instruction']
+
+
+# --------------------------------------------------------------- D5：标注项目创建（自 D6 提前）
+def _seed_published_dict(defects=None):
+    """发布一个缺陷字典版本，返回 (DefectDictVersion, defects)。"""
+    from aoi.datasets import label_config
+    from aoi.datasets.models import DefectDictVersion
+
+    defects = defects if defects is not None else label_config_sample_defects()
+    dict_version = DefectDictVersion.objects.create(
+        version='21000101-1',
+        snapshot=label_config.snapshot_from_defects(defects),
+    )
+    return dict_version, defects
+
+
+@pytest.mark.django_db
+class TestDatasetProjectCreation:
+    """D5：``POST /api/datasets`` 服务端创建 LS 项目（``ls_project_id`` 不再由客户端传入）。"""
+
+    @pytest.fixture
+    def with_dict(self, test_user):
+        """已发布字典 + 用户组织（项目归属）。"""
+        from organizations.models import Organization
+
+        org = Organization.create_organization(created_by=test_user, title='AOI Dataset Creation')
+        test_user.active_organization = org
+        test_user.save(update_fields=['active_organization'])
+        dict_version, defects = _seed_published_dict()
+        return {'org': org, 'dict_version': dict_version, 'defects': defects}
+
+    def test_post_creates_ls_project_from_template(self, auth_client, test_user, with_dict):
+        from aoi.audit.models import AuditLog
+        from aoi.datasets import label_config
+        from aoi.datasets.models import Dataset
+        from projects.models import Project
+
+        response = auth_client.post('/api/datasets', {'name': '门板-A线'}, format='json')
+        assert response.status_code == 200, response.content[:300]
+        data = assert_envelope(response)['data']
+        assert data['name'] == '门板-A线'
+        assert isinstance(data['ls_project_id'], int) and data['ls_project_id'] > 0
+
+        dataset = Dataset.objects.get(pk=data['id'])
+        project = Project.objects.get(pk=data['ls_project_id'])
+        assert dataset.ls_project_id == project.id
+        # 模板钉死字段逐项断言（契约 §4.1）
+        assert project.title == '门板-A线'
+        assert project.maximum_annotations == 1
+        assert project.enable_empty_annotation is True
+        assert project.color == '#FFFFFF'
+        assert project.label_config == label_config.render_label_config(with_dict['defects'])
+        assert str(with_dict['dict_version'].version) in project.description
+        assert project.organization_id == with_dict['org'].id
+        assert project.created_by_id == test_user.id
+        # 审计：datasets.create
+        assert AuditLog.objects.filter(action='datasets.create', object_id=str(dataset.id)).exists()
+
+    def test_post_without_published_dict_is_42200(self, auth_client):
+        from aoi.datasets.models import DefectDictVersion
+
+        DefectDictVersion.objects.all().delete()
+        response = auth_client.post('/api/datasets', {'name': 'no-dict'}, format='json')
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'defects' in body['data']['detail']['fields']
+
+    def test_post_with_client_ls_project_id_is_42200(self, auth_client, with_dict):
+        response = auth_client.post('/api/datasets', {'name': 'x', 'ls_project_id': 123}, format='json')
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'ls_project_id' in body['data']['detail']['fields']
+
+    def test_post_without_name_is_42200(self, auth_client, with_dict):
+        response = auth_client.post('/api/datasets', {}, format='json')
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'name' in body['data']['detail']['fields']
+
+    def test_put_ls_project_id_is_42200(self, auth_client, with_dict):
+        dataset_id = assert_envelope(auth_client.post('/api/datasets', {'name': 'ds'}, format='json'))['data']['id']
+        response = auth_client.put(f'/api/datasets/{dataset_id}', {'ls_project_id': 999}, format='json')
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'ls_project_id' in body['data']['detail']['fields']
+
+    def test_put_still_allows_name_and_cur_version(self, auth_client, with_dict):
+        created = assert_envelope(auth_client.post('/api/datasets', {'name': 'ds'}, format='json'))['data']
+        response = auth_client.put(
+            f'/api/datasets/{created["id"]}', {'name': 'ds2', 'cur_version': '1.0.0'}, format='json'
+        )
+        assert response.status_code == 200
+        data = assert_envelope(response)['data']
+        assert data['name'] == 'ds2' and data['cur_version'] == '1.0.0'
+        # ls_project_id 保持服务端生成的值，未被改动
+        assert data['ls_project_id'] == created['ls_project_id']
+
+
+# ------------------------------------------------------------------ D5：导入包裹
+@pytest.mark.django_db
+class TestImportPackage:
+    """D5：``POST /api/datasets/import``（复用 LS 上传 + Celery eager，契约 §4.1/§5.2）。"""
+
+    @pytest.fixture
+    def surface(self, test_user):
+        """已发布字典 + 数据集（含真实 LS 项目）。"""
+        from aoi.datasets.ls_project import build_project_kwargs
+        from aoi.datasets.models import Dataset
+        from organizations.models import Organization
+        from projects.models import Project
+
+        org = Organization.create_organization(created_by=test_user, title='AOI Import')
+        test_user.active_organization = org
+        test_user.save(update_fields=['active_organization'])
+        dict_version, defects = _seed_published_dict()
+        kwargs = build_project_kwargs(
+            dataset_name='import-ds',
+            version='draft',
+            dict_version=dict_version.version,
+            defects=defects,
+        )
+        project = Project.objects.create(organization=org, created_by=test_user, **kwargs)
+        dataset = Dataset.objects.create(name='import-ds', ls_project_id=project.id, created_by=test_user.id)
+        return {'dataset': dataset, 'project': project, 'dict_version': dict_version}
+
+    def _import(self, client, surface, files, extra=None):
+        data = {'dataset_id': str(surface['dataset'].id), 'source': 'manual_real'}
+        data.update(extra or {})
+        for name, content, ctype in files:
+            data['files[]'] = SimpleUploadedFile(name, content, content_type=ctype)
+        return client.post('/api/datasets/import', data, format='multipart')
+
+    def _job(self, client, job_id):
+        response = client.get(f'/api/datasets/import/{job_id}')
+        assert response.status_code == 200, response.content[:300]
+        return assert_envelope(response)['data']
+
+    def test_import_ok_registers_image_and_ls_task(self, auth_client, surface, jpeg_bytes):
+        from aoi.datasets.models import Image, ImportJob
+        from tasks.models import Task
+
+        response = self._import(auth_client, surface, [('a.jpg', jpeg_bytes, 'image/jpeg')])
+        assert response.status_code == 200, response.content[:300]
+        job_id = assert_envelope(response)['data']['job_id']
+
+        job = ImportJob.objects.get(job_id=job_id)
+        assert job.status == ImportJob.STATUS_SUCCEEDED  # eager：请求内同步完成
+        assert (job.total, job.ok, job.dup, job.bad) == (1, 1, 0, 0)
+
+        image = Image.objects.get(md5=hashlib.md5(jpeg_bytes).hexdigest())
+        assert image.object_key.startswith(f'upload/{surface["project"].id}/')  # LS 上传路径
+        assert image.qc_status == 'ok' and image.source == 'manual_real'
+        assert Task.objects.filter(project=surface['project']).count() == job.ok
+        task = Task.objects.filter(project=surface['project']).first()
+        assert 'image' in task.data
+        # D5 收尾：任务里的图片值必须是浏览器可直接加载的同源 URL（裸对象键 → ERR_LOADING_HTTP）
+        assert task.data['image'].startswith('/data/'), task.data['image']
+        # D5 收尾（第二轮）：标注页读任务时 resolve_uri 会用 file.url 重写任务 data，
+        # 该值曾因 HOSTNAME 为空拼出 https:///data/... 空主机绝对地址 → 同样 ERR_LOADING_HTTP
+        from data_import.models import FileUpload
+
+        file_upload = FileUpload.objects.get(project=surface['project'])
+        assert file_upload.url == f'/data/{image.object_key}', file_upload.url
+        assert task.resolve_uris(dict(task.data), task.project)['image'].startswith('/data/')
+
+    def test_import_same_file_twice_is_dup(self, auth_client, surface, jpeg_bytes):
+        from aoi.datasets.models import ImportJob
+        from tasks.models import Task
+
+        first = self._import(auth_client, surface, [('a.jpg', jpeg_bytes, 'image/jpeg')])
+        assert first.status_code == 200
+        second = self._import(auth_client, surface, [('a.jpg', jpeg_bytes, 'image/jpeg')])
+        assert second.status_code == 200
+        job = ImportJob.objects.get(job_id=assert_envelope(second)['data']['job_id'])
+        assert job.status == ImportJob.STATUS_SUCCEEDED
+        assert (job.ok, job.dup) == (0, 1)
+        # md5 全局去重：不建第二个任务
+        assert Task.objects.filter(project=surface['project']).count() == 1
+
+    def test_import_bad_bytes_is_decode_failed(self, auth_client, surface):
+        from aoi.datasets.models import Image, ImportJob
+
+        response = self._import(auth_client, surface, [('bad.jpg', b'not-a-jpeg', 'image/jpeg')])
+        assert response.status_code == 200
+        job = ImportJob.objects.get(job_id=assert_envelope(response)['data']['job_id'])
+        assert job.status == ImportJob.STATUS_SUCCEEDED
+        assert job.bad == 1
+        assert job.bad_items == [{'filename': 'bad.jpg', 'reason': 'decode_failed'}]
+        image = Image.objects.get(qc_reason='decode_failed')
+        assert image.qc_status == 'rejected'
+
+    def test_import_txt_is_unsupported_extension(self, auth_client, surface):
+        from aoi.datasets.models import ImportJob
+
+        response = self._import(auth_client, surface, [('note.txt', b'hello', 'text/plain')])
+        assert response.status_code == 200
+        job = ImportJob.objects.get(job_id=assert_envelope(response)['data']['job_id'])
+        assert job.bad == 1
+        assert job.bad_items == [{'filename': 'note.txt', 'reason': 'unsupported_extension'}]
+        assert job.file_upload_ids == []  # 预检拒绝：不产生 LS 上传
+        assert job.status == ImportJob.STATUS_SUCCEEDED
+
+    def test_unknown_job_is_40401(self, auth_client):
+        response = auth_client.get('/api/datasets/import/does-not-exist')
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+    def test_missing_dataset_id_is_42200(self, auth_client, surface):
+        response = auth_client.post(
+            '/api/datasets/import',
+            {'files[]': SimpleUploadedFile('a.jpg', b'x', content_type='image/jpeg')},
+            format='multipart',
+        )
+        assert response.status_code == 422
+        assert_envelope(response, code=42200)
+
+    def test_dataset_without_project_is_42200(self, auth_client, surface):
+        from aoi.datasets.models import Dataset
+
+        orphan = Dataset.objects.create(name='orphan', ls_project_id=None)
+        response = self._import(auth_client, {'dataset': orphan}, [])
+        assert response.status_code == 422
+        assert_envelope(response, code=42200)
+
+    def test_dataset_not_found_is_40401(self, auth_client, surface):
+        response = auth_client.post(
+            '/api/datasets/import',
+            {
+                'dataset_id': '999999',
+                'files[]': SimpleUploadedFile('a.jpg', b'x', content_type='image/jpeg'),
+            },
+            format='multipart',
+        )
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+    def test_invalid_source_is_42200(self, auth_client, surface):
+        response = self._import(auth_client, surface, [('a.jpg', b'x', 'image/jpeg')], extra={'source': 'camera'})
+        assert response.status_code == 422
+        assert_envelope(response, code=42200)
+
+    def test_empty_files_is_42200(self, auth_client, surface):
+        response = auth_client.post(
+            '/api/datasets/import', {'dataset_id': str(surface['dataset'].id)}, format='multipart'
+        )
+        assert response.status_code == 422
+        assert_envelope(response, code=42200)
+
+    def test_no_role_user_is_40300(self, api_client, db, surface):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        user = User.objects.create_user(email='no-role@import.test', password='pass-123456')
+        api_client.force_authenticate(user=user)
+        response = api_client.post('/api/datasets/import', {'dataset_id': '1'}, format='multipart')
+        assert response.status_code == 403
+        assert_envelope(response, code=40300)
+
+
+# ------------------------------------------------------------------ D5 收尾实测修复
+@pytest.fixture
+def import_surface(test_user):
+    """模块级「已发布字典 + 数据集（含真实 LS 项目）」种子：TestImportPackage.surface 的模块版。
+
+    D5 收尾的删除类用例（TestImageDelete/TestDatasetDeleteCascade）不在该类内，无法复用类内 fixture。
+    """
+    from aoi.datasets import label_config
+    from aoi.datasets.ls_project import build_project_kwargs
+    from aoi.datasets.models import Dataset
+    from organizations.models import Organization
+    from projects.models import Project
+
+    org = Organization.create_organization(created_by=test_user, title='AOI Import Surface')
+    test_user.active_organization = org
+    test_user.save(update_fields=['active_organization'])
+    dict_version, defects = _seed_published_dict()
+    kwargs = build_project_kwargs(
+        dataset_name='import-surface-ds',
+        version='draft',
+        dict_version=dict_version.version,
+        defects=defects,
+    )
+    project = Project.objects.create(organization=org, created_by=test_user, **kwargs)
+    dataset = Dataset.objects.create(name='import-surface-ds', ls_project_id=project.id, created_by=test_user.id)
+    return {'dataset': dataset, 'project': project, 'dict_version': dict_version}
+
+
+@pytest.mark.django_db
+class TestDefectPatchUpdate:
+    """D5 收尾：``PUT /api/datasets/defects`` 部分更新语义（启停开关 ``{code, active}`` 不再 42200）。"""
+
+    def _create(self, client, code='object_fault_type_07', name='气泡', risk=2):
+        response = client.post(
+            '/api/datasets/defects', {'code': code, 'name_cn': name, 'risk_level': risk}, format='json'
+        )
+        assert response.status_code == 200, response.content[:300]
+        return assert_envelope(response)['data']
+
+    def test_put_active_only_toggles(self, auth_client):
+        created = self._create(auth_client)
+        response = auth_client.put('/api/datasets/defects', {'code': created['code'], 'active': False}, format='json')
+        assert response.status_code == 200, response.content[:300]
+        data = assert_envelope(response)['data']
+        assert data['active'] is False
+        # 未携带字段保持原值（部分更新语义）
+        assert data['name_cn'] == '气泡' and data['risk_level'] == 2
+
+        toggle_back = auth_client.put(
+            '/api/datasets/defects', {'code': created['code'], 'active': True}, format='json'
+        )
+        assert assert_envelope(toggle_back)['data']['active'] is True
+
+    def test_put_full_payload_still_works(self, auth_client):
+        created = self._create(auth_client)
+        response = auth_client.put(
+            '/api/datasets/defects',
+            {'code': created['code'], 'name_cn': '气泡改', 'risk_level': 3, 'aliases': ['blisters'], 'active': False},
+            format='json',
+        )
+        assert response.status_code == 200, response.content[:300]
+        data = assert_envelope(response)['data']
+        assert (data['name_cn'], data['risk_level'], data['aliases'], data['active']) == (
+            '气泡改',
+            3,
+            ['blisters'],
+            False,
+        )
+
+    def test_put_partial_still_validates_present_fields(self, auth_client):
+        created = self._create(auth_client)
+        response = auth_client.put('/api/datasets/defects', {'code': created['code'], 'risk_level': 9}, format='json')
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'risk_level' in body['data']['detail']['fields']
+
+    def test_put_unknown_code_is_40401(self, auth_client):
+        response = auth_client.put(
+            '/api/datasets/defects', {'code': 'object_fault_type_99', 'active': False}, format='json'
+        )
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+
+@pytest.mark.django_db
+class TestDatasetDraftDictionaryFallback:
+    """D5 收尾：未发布字典先建数据集（无已发布版本时回退当前启用缺陷，draft 语义）。"""
+
+    @pytest.fixture
+    def org(self, test_user):
+        from organizations.models import Organization
+
+        org = Organization.create_organization(created_by=test_user, title='AOI Draft Dict')
+        test_user.active_organization = org
+        test_user.save(update_fields=['active_organization'])
+        return org
+
+    def test_post_with_active_defects_and_no_published_dict_creates_draft_project(self, auth_client, org):
+        from aoi.datasets import label_config
+        from aoi.datasets.models import DefectClass, DefectDictVersion
+        from projects.models import Project
+
+        DefectDictVersion.objects.all().delete()
+        defects = [
+            DefectClass.objects.create(code='object_fault_type_01', name_cn='划伤', risk_level=3),
+            DefectClass.objects.create(code='object_fault_type_02', name_cn='凹坑', risk_level=1),
+        ]
+
+        response = auth_client.post('/api/datasets', {'name': '先建数据集'}, format='json')
+        assert response.status_code == 200, response.content[:300]
+        data = assert_envelope(response)['data']
+        project = Project.objects.get(pk=data['ls_project_id'])
+        expected = label_config.render_label_config(
+            [{'code': defect.code, 'name_cn': defect.name_cn, 'risk_level': defect.risk_level} for defect in defects]
+        )
+        assert project.label_config == expected
+        # 字典版本以 draft 标记，项目描述可追溯
+        assert 'draft' in project.description
+        assert data['versions'] == []
+
+    def test_post_without_any_defects_is_42200(self, auth_client, org):
+        from aoi.datasets.models import DefectClass, DefectDictVersion
+
+        DefectDictVersion.objects.all().delete()
+        DefectClass.objects.all().delete()
+        response = auth_client.post('/api/datasets', {'name': '无缺陷'}, format='json')
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'defects' in body['data']['detail']['fields']
+
+    def test_published_dict_still_wins_over_active_defects(self, auth_client, org):
+        from aoi.datasets import label_config
+        from aoi.datasets.models import DefectClass
+        from projects.models import Project
+
+        DefectClass.objects.create(code='object_fault_type_09', name_cn='仅启用未发布', risk_level=1)
+        dict_version, defects = _seed_published_dict()
+        response = auth_client.post('/api/datasets', {'name': '发布优先'}, format='json')
+        assert response.status_code == 200, response.content[:300]
+        data = assert_envelope(response)['data']
+        project = Project.objects.get(pk=data['ls_project_id'])
+        assert project.label_config == label_config.render_label_config(defects)
+        assert str(dict_version.version) in project.description
+
+
+@pytest.mark.django_db
+class TestImageDelete:
+    """D5 收尾：``DELETE /api/datasets/images/{id}`` 级联清理登记/LS 任务/上传字节。"""
+
+    @pytest.fixture
+    def imported(self, auth_client, import_surface, jpeg_bytes):
+        """导入 1 张图，返回 (image, project)。"""
+        from aoi.datasets.models import Image
+
+        data = {'dataset_id': str(import_surface['dataset'].id), 'source': 'manual_real'}
+        data['files[]'] = SimpleUploadedFile('a.jpg', jpeg_bytes, content_type='image/jpeg')
+        response = auth_client.post('/api/datasets/import', data, format='multipart')
+        assert response.status_code == 200, response.content[:300]
+        image = Image.objects.get(md5=hashlib.md5(jpeg_bytes).hexdigest())
+        return image, import_surface['project']
+
+    def test_get_image_detail(self, auth_client, imported):
+        image, _project = imported
+        response = auth_client.get(f'/api/datasets/images/{image.id}')
+        assert response.status_code == 200, response.content[:300]
+        assert assert_envelope(response)['data']['object_key'] == image.object_key
+
+    def test_delete_image_removes_registration_task_and_upload(self, auth_client, imported):
+        from aoi.datasets.models import Image
+        from data_import.models import FileUpload
+        from tasks.models import Task
+
+        image, project = imported
+        # D5 收尾：任务 data.image 已是 /data/upload/... 同源 URL，以 object_key 后缀关联
+        task = Task.objects.get(project=project)
+        assert task.data['image'].endswith(image.object_key)
+        task_id = task.id
+        upload_id = FileUpload.objects.get(file=image.object_key).id
+
+        response = auth_client.delete(f'/api/datasets/images/{image.id}')
+        assert response.status_code == 200, response.content[:300]
+        body = assert_envelope(response)['data']
+        assert body['deleted'] is True
+        assert (body['tasks_deleted'], body['images_deleted']) == (1, 1)
+
+        assert Image.objects.filter(pk=image.id).exists() is False
+        assert Task.objects.filter(pk=task_id).exists() is False
+        assert FileUpload.objects.filter(pk=upload_id).exists() is False
+        assert Task.objects.filter(project=project).count() == 0
+
+    def test_delete_unknown_image_is_40401(self, auth_client):
+        response = auth_client.delete('/api/datasets/images/999999')
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+
+@pytest.mark.django_db
+class TestDatasetDeleteCascade:
+    """D5 收尾：``DELETE /api/datasets/{id}`` 级联清理 LS 项目/任务/图片/版本。"""
+
+    def test_delete_dataset_cascades_ls_project_and_images(self, auth_client, import_surface, jpeg_bytes):
+        from aoi.datasets.models import Dataset, DatasetVersion, Image
+        from projects.models import Project
+        from tasks.models import Task
+
+        dataset, project = import_surface['dataset'], import_surface['project']
+        data = {
+            'dataset_id': str(dataset.id),
+            'source': 'manual_real',
+            'files[]': SimpleUploadedFile('a.jpg', jpeg_bytes, content_type='image/jpeg'),
+        }
+        assert auth_client.post('/api/datasets/import', data, format='multipart').status_code == 200
+        assert auth_client.post(f'/api/datasets/{dataset.id}/versions', {}, format='json').status_code == 200
+        image = Image.objects.first()
+        assert image is not None
+        assert Task.objects.filter(project=project).count() == 1
+
+        response = auth_client.delete(f'/api/datasets/{dataset.id}')
+        assert response.status_code == 200, response.content[:300]
+        body = assert_envelope(response)['data']
+        assert body['deleted'] is True and body['stub'] is False
+        assert body['ls_project_deleted'] is True
+        assert (body['tasks_deleted'], body['images_deleted'], body['versions_deleted']) == (1, 1, 1)
+
+        assert Dataset.objects.filter(pk=dataset.id).exists() is False
+        assert Project.objects.filter(pk=project.id).exists() is False
+        assert Task.objects.filter(project_id=project.id).exists() is False
+        assert Image.objects.filter(pk=image.pk).exists() is False
+        assert DatasetVersion.objects.filter(dataset_id=dataset.id).exists() is False
+
+    def test_delete_stub_dataset_stays_idempotent(self, auth_client):
+        response = auth_client.delete('/api/datasets/999999')
+        assert response.status_code == 200
+        body = assert_envelope(response)['data']
+        assert body['deleted'] is True and body['stub'] is True
+
+
+# ------------------------------------------------------------------ D5：字典权限映射
+@pytest.mark.django_db
+class TestDefectPermMapping:
+    """D5 权限澄清（契约 §4.1）：POST=datasets.create、PUT=datasets.update、publish=datasets.publish。"""
+
+    def test_perm_anchors(self):
+        from aoi.datasets.views import DefectListCreateUpdateView, DefectPublishView
+
+        assert DefectListCreateUpdateView.aoi_perm == 'datasets.view'
+        assert DefectListCreateUpdateView.aoi_perm_by_method == {
+            'POST': 'datasets.create',
+            'PUT': 'datasets.update',
+        }
+        assert DefectPublishView.aoi_perm == 'datasets.publish'
+
+    def test_get_permissions_resolves_by_method(self):
+        from aoi.datasets.views import DefectListCreateUpdateView
+
+        class _Request:
+            method = 'POST'
+            user = None
+
+        view = DefectListCreateUpdateView()
+        view.request = _Request()
+        assert view.get_permissions()[0].perm_code == 'datasets.create'
+
+        view.request.method = 'PUT'
+        assert view.get_permissions()[0].perm_code == 'datasets.update'
+
+    def test_operator_can_post_defect(self, api_client, db):
+        from aoi.core.models import Role, UserRole
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        user = User.objects.create_user(email='operator@defect.test', password='pass-123456')
+        role = Role.objects.get(code='operator')
+        UserRole.objects.create(user_id=user.id, role_id=role.id)
+        api_client.force_authenticate(user=user)
+        response = api_client.post(
+            '/api/datasets/defects',
+            {'code': 'object_fault_type_02', 'name_cn': '凹坑', 'risk_level': 2},
+            format='json',
+        )
+        assert response.status_code == 200
+        assert_envelope(response)
+
+
+# ------------------------------------------------------------------ D5：Celery 接线
+class TestCeleryWiring:
+    """D5：Celery app 与任务路由（契约 §5.2）。"""
+
+    def test_aoi_celery_app_importable(self):
+        from aoi.celery import app
+
+        assert app.main == 'aoi'
+
+    def test_process_import_job_task_registered(self):
+        from aoi.datasets.tasks import process_import_job
+
+        assert process_import_job.name.startswith('aoi.')  # 命中 aoi.* 路由前缀
+
+    def test_aoi_tasks_route_to_default_queue(self):
+        from aoi.celery import app
+        from aoi.datasets.tasks import process_import_job
+
+        route = app.amqp.router.route({}, process_import_job.name)
+        assert route is not None
+        assert route['queue'].name == 'default'
+
+    def test_broker_configured_and_isolated_from_rq(self, settings):
+        # 与 LS django_rq（Redis DB 0）隔离：aoi broker 必须指向 Redis DB 1（契约 §5.2）
+        assert settings.CELERY_BROKER_URL
+        assert settings.CELERY_BROKER_URL.rstrip('/').endswith('/1')
+        assert settings.CELERY_TASK_ROUTES == {'aoi.*': {'queue': 'default'}}

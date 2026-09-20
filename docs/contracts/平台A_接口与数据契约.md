@@ -234,7 +234,7 @@ CREATE TABLE aoi_core.authz_state (          -- 授权版本号（单行），�
 ```sql
 CREATE TABLE aoi_datasets.image (
   id SERIAL PRIMARY KEY,
-  object_key VARCHAR(128) UNIQUE NOT NULL,   -- images/{md5}.jpg
+  object_key VARCHAR(128) UNIQUE NOT NULL,   -- 两态：B 回传=images/{md5}.jpg；A 导入=LS 上传路径 upload/{project}/{uuid8}-{filename}
   md5 CHAR(32) NOT NULL,
   source VARCHAR(24) NOT NULL,               -- manual_real/camera/reflux_review/prelabel_model_{id}
   station_code VARCHAR(32), seq BIGINT, captured_at TIMESTAMPTZ,
@@ -287,6 +287,18 @@ CREATE TABLE aoi_datasets.prelabel_task (
   status VARCHAR(16) DEFAULT 'queued',       -- P1：queued/running/succeeded/failed/canceled，服务端控制
   route_bucket JSONB,                        -- A 侧产出，只读（客户端不可写）
   created_by INT
+);
+
+CREATE TABLE aoi_datasets.import_job (       -- D5：导入包裹任务（Celery 异步，契约 §4.1/§5.2）
+  id SERIAL PRIMARY KEY,
+  job_id VARCHAR(16) UNIQUE NOT NULL,        -- uuid12，对外标识（URL 中的 {job_id}）
+  status VARCHAR(16) DEFAULT 'queued',       -- queued/running/succeeded/failed
+  total INT DEFAULT 0, ok INT DEFAULT 0, dup INT DEFAULT 0, bad INT DEFAULT 0,
+  bad_items JSONB DEFAULT '[]',              -- [{filename, reason}]；reason ∈ unsupported_extension/too_large/decode_failed
+  file_upload_ids JSONB DEFAULT '[]',        -- 复用 LS 上传生成的 FileUpload 主键（任务侧消费）
+  source VARCHAR(24), station_code VARCHAR(32), dataset_id INT,
+  created_by INT, created_at TIMESTAMPTZ, finished_at TIMESTAMPTZ,
+  error_message TEXT
 );
 ```
 
@@ -464,18 +476,18 @@ CREATE TABLE aoi_audit.audit_log (
 
 | 方法/路径 | 权限 | 说明 |
 |---|---|---|
-| `POST /import` | datasets.create | **包裹 LS 上传**：走 LS Upload/预签名入 MinIO → aoi 去重(md5)/坏图质检/元数据登记 → 登记入 LS project 任务。multipart `files[]` + form `source`/`station_code` → `{job_id}` |
-| `GET /import/{job_id}` | datasets.view | `{status, total, ok, dup, bad, bad_items:[{filename, reason}]}` |
-| `GET /images`、`GET /images/{id}/download` | datasets.view | 筛选/预签名下载 |
-| `GET/POST/PUT /defects`、`POST /defects/publish` | `GET`=datasets.view；写=datasets.create/update；发布=**datasets.publish**（admin+super） | 字典 CRUD；发布 → 渲染 label config（RectangleLabels，code=`object_fault_type_XX`）+ 版本快照 |
-| `GET/POST /datasets`、`GET/PUT/DELETE /datasets/{id}`、`POST /datasets/{id}/versions` | `GET`=datasets.view；`POST`=datasets.create；`PUT`/`DELETE`=datasets.update | 数据集/版本；发布触发划分 + **测试集红线**（违反 → 42200）。注：`DELETE /datasets/{id}` 的视图锚点仍是 `datasets.update`（D4 不动视图锚点）；`datasets.delete` 专供 §3.1.1 闸门拦截 LS 原生项目删除 |
+| `POST /import` | datasets.create | **包裹 LS 上传（D5 真实化，Celery 异步）**：multipart `files[]` + form `dataset_id`（必填）/`source`（可选，默认 `manual_real`，其它值 → `42200`）/`station_code`（可选 ≤32）→ `{job_id}`。校验：dataset 不存在 → `40401`；dataset 无 `ls_project_id` 或 LS 项目不存在 → `42200`（提示先创建数据集）；`files` 全空 → `42200`。逐文件预检：扩展名 ∉ {`.jpg`,`.jpeg`,`.png`,`.bmp`} → `bad_items` 记 `unsupported_extension`（不上传）；>100MB → 记 `too_large`（不上传）；**部分成功语义**（单坏文件不卡整批）。合法文件复用 LS `data_import.uploader.create_file_upload` 入 LS 存储（生产=MinIO），再由 Celery `default` 队列任务（§5.2）登记 `aoi_datasets.image`（`object_key`=LS 上传路径）并建 LS 任务（镜像上游 `async_import_background`：`ProjectSummary` 行锁 + `ImportApiSerializer` 批量建任务 + `update_tasks_counters_and_task_states` + `update_data_columns`；不 emit webhook）；任务内逐文件结局：md5 **全局**去重命中 → `dup`（不建任务、不重复登记，其 FileUpload 字节保留为已知行为）；PIL 解码失败 → `bad_items` 记 `decode_failed` 并登记 `Image(qc_status='rejected')`；成功 → `Image(qc_status='ok')` + LS 任务。broker 不可用 → `50300`（job 留 queued，已上传 FileUpload 为已知孤儿字节） |
+| `GET /import/{job_id}` | datasets.view | `{status, total, ok, dup, bad, bad_items:[{filename, reason}]}`；未知 `job_id` → `40401`（D5 起查真实任务表，不再有 stub） |
+| `GET /images`、`GET /images/{id}/download`、`GET /images/{id}`、`DELETE /images/{id}` | `GET`=datasets.view；`DELETE`=datasets.update | 筛选/预签名下载；详情（D5 收尾新增）。`DELETE`（D5 收尾新增）：删除图片登记 + 其 LS 任务（镜像上游删任务路径，删后重算计数）+ 存储字节（`FileUpload`）+ 版本明细（`dataset_item`）；未知 id → `40401`。任务按 `data.image` 精确（裸对象键）或后缀（`/data/upload/...` 同源 URL）匹配，兼容存量数据 |
+| `GET/POST/PUT /defects`、`POST /defects/publish` | `GET`=datasets.view；`POST`=**datasets.create**；`PUT`=datasets.update；发布=**datasets.publish**（admin+super） | 字典 CRUD；发布 → 渲染 label config（RectangleLabels，code=`object_fault_type_XX`）+ 版本快照。（D5 权限澄清：写拆分为 POST=create / PUT=update，三角色对两码同持，行为无回退；**D5 收尾：`PUT` 为部分更新语义**——只校验/更新携带字段，启停开关只带 `{code, active}` 即可，`code` 仅用于定位不可改） |
+| `GET/POST /datasets`、`GET/PUT/DELETE /datasets/{id}`、`POST /datasets/{id}/versions` | `GET`=datasets.view；`POST`=datasets.create；`PUT`/`DELETE`=datasets.update | 数据集/版本。**D5 起 `ls_project_id` 由服务端生成**（标注项目创建自 D6 提前）：`POST` 必填 `name`，服务端取最新已发布缺陷字典版本并按 `aoi/datasets/ls_project.py` 模板创建真实 LS 项目；**无任何已发布版本时回退当前启用缺陷（`active=True`）以 `draft` 语义建项目（D5 收尾：支持未发布字典先建数据集）**，连启用缺陷都没有 → `42200`；客户端携带 `ls_project_id`（`POST`/`PUT`）→ `42200`。发布触发划分 + **测试集红线**（违反 → 42200）。`GET /datasets` 投影含 `versions:[{id,version,status,phase}]`（D5 收尾）。`DELETE /datasets/{id}`（D5 收尾改为级联清理）：删 LS 项目（含任务/标注，镜像上游 `perform_destroy` 断信号）、项目内导入的图片登记/任务/存储字节、版本与 `dataset_item`；视图锚点仍是 `datasets.update`（D4 不动视图锚点）；`datasets.delete` 专供 §3.1.1 闸门拦截 LS 原生项目删除 |
 | `GET /datasets/{id}/versions/{v}/export` | datasets.view | **复用 LS data_export（YOLO）** → zip 落 MinIO `datasets/exports/` |
 | `GET /annotation-stats` | datasets.view | LS 标注/审核状态只读投影（不建表） |
 
 **AOI 标注项目模板（D4，`aoi/datasets/ls_project.py`）**
 
 - 形态：**代码级常量模板 + 纯函数**（`AOI_PROJECT_DEFAULTS` / `build_project_kwargs(...)`），无表、无端点、无 IO。
-- **D4 不创建真实 LS 项目**：`POST /api/datasets` 的 `ls_project_id` 仍由客户端传入（现状不变）；真实创建在 D6「标注项目创建」接入，届时 `ls_project_id` 改为服务端生成（属 §4.1 入参语义变更，走变更窗口）。
+- **D5 起 `POST /api/datasets` 由服务端创建真实 LS 项目**（标注项目创建自 D6 提前，`ls_project_id` 改为服务端生成，见上表）；快照还原规则：取最新 `defect_dict_version.snapshot` 的 `{labels:{code:{index,color}}}` 按 `index` 排序还原 defects 后渲染 label config。
 - 模板钉住的 LS Project 字段（显式钉死，不依赖上游默认值漂移）：`label_config`（由缺陷字典渲染）、`title`=`{dataset_name}`、`description`（含 dataset/version/dict_version）、`color`=`#FFFFFF`（**不使用品牌色**，裁定 2026-09-14）、`maximum_annotations=1`、`show_overlap_first=False`、`sampling=SEQUENCE`、`skip_queue=REQUEUE_FOR_OTHERS`、`show_skip_button=True`、`expert_instruction`（标注规范文案）、`show_instruction=True`、`show_collab_predictions=True`、`evaluate_predictions_automatically=False`、`reveal_preannotations_interactively=True`、**`enable_empty_annotation=True`（OK 图必须能提交空标注，用于 YOLO 负样本）**、`show_annotation_history=False`、`show_ground_truth_first=False`、`min_annotations_to_start_training=0`。
 - **不含任何 review 设置**：LS OSS 无 Review 流（§10.1、§1 实测）。
 
@@ -598,8 +610,16 @@ A 侧登记：LS 原生 ML 设置页 `MLBackend(url={A}/api/prelabel/{task_id})`
 | 队列 | 用途 | 资源 |
 |---|---|---|
 | `training` | YOLO 训练 / ONNX 导出 / 金标准回归 | GPU |
-| `default` | 导入包裹 / 导出 / 统计 | CPU |
+| `default` | 导入包裹（D5 已落地）/ 导出 / 统计 | CPU |
 | `publish` | 模型发布（构建镜像 + docker push + 重试） | CPU + 网络 |
+
+**Celery 落地口径（D5）**：
+
+- broker = 环境变量 `CELERY_BROKER_URL`，默认 `redis://localhost:6379/1`——与 LS 自带 `django_rq` 的 Redis DB 0 **隔离**，LS 原生 RQ 保持不动。
+- app 定义在 `label_studio/aoi/celery.py`（`Celery('aoi')` + `config_from_object('django.conf:settings', namespace='CELERY')` + `autodiscover_tasks()`）；`aoi/__init__.py` 导入 `celery_app` 使 `@shared_task`/`.delay()` 绑定 aoi app。
+- `CELERY_TASK_ROUTES = {'aoi.*': {'queue': 'default'}}`：**仅 `default` 队列有真实任务**（导入包裹 `aoi.datasets.tasks.process_import_job`）；`training`/`publish` 队列暂无任务，路由待各自任务落地时再加（不配占位路由）。
+- 测试口径：契约测试 autouse fixture 强制 `CELERY_TASK_ALWAYS_EAGER=True` + `CELERY_TASK_EAGER_PROPAGATES=True`（eager 同步执行，任务异常直接外抛）。
+- worker 启动：`celery -A aoi worker --queues=default --loglevel=info`（docker-compose `worker` 服务 / 宿主机 `make run-celery`）。
 
 - LS 自带 `django_rq` 仅服务 LS 原生功能，保持不动；**aoi 二开任务统一 Celery**。
 - 任务幂等：`Idempotency-Key` + 状态机 CAS；失败可重试，重试不产生重复副作用。

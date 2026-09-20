@@ -9,6 +9,7 @@ __all__ = [
     'serialize_defect',
     'serialize_dataset',
     'serialize_dataset_version',
+    'serialize_import_job',
 ]
 
 
@@ -47,12 +48,23 @@ def serialize_defect(obj: Any) -> dict[str, Any]:
 
 
 def serialize_dataset(obj: Any) -> dict[str, Any]:
+    """数据集投影；D5 实测补 ``versions``（草稿版本创建后前端可见，修复「无反应」观感）。
+
+    ``dataset_id`` 是普通整型列（非 FK），无法 prefetch_related；列表页数据量小（≤200），
+    每行一查可接受。
+    """
+    from aoi.datasets.models import DatasetVersion
+
+    versions = list(
+        DatasetVersion.objects.filter(dataset_id=obj.id).order_by('id').values('id', 'version', 'status', 'phase')
+    )
     return {
         'id': obj.id,
         'name': obj.name,
         'cur_version': obj.cur_version,
         'ls_project_id': obj.ls_project_id,
         'created_by': obj.created_by,
+        'versions': versions,
     }
 
 
@@ -70,4 +82,23 @@ def serialize_dataset_version(obj: Any) -> dict[str, Any]:
         'dict_version': obj.dict_version,
         'note': obj.note,
         'created_by': obj.created_by,
+    }
+
+
+def serialize_import_job(obj: Any) -> dict[str, Any]:
+    """导入任务状态（契约 §4.1 ``GET /import/{job_id}``）。"""
+    return {
+        'job_id': obj.job_id,
+        'status': obj.status,
+        'total': obj.total,
+        'ok': obj.ok,
+        'dup': obj.dup,
+        'bad': obj.bad,
+        'bad_items': obj.bad_items or [],
+        'source': obj.source,
+        'station_code': obj.station_code,
+        'dataset_id': obj.dataset_id,
+        'error_message': obj.error_message,
+        'created_at': _iso(obj.created_at),
+        'finished_at': _iso(obj.finished_at),
     }

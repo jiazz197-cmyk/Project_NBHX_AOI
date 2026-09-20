@@ -63,6 +63,24 @@ def force_fake_publish_mode(request):
     yield
 
 
+@pytest.fixture(autouse=True)
+def force_celery_eager(request):
+    """契约测试一律强制 Celery eager（同步执行），导入任务在请求内完成（契约 §5.2）。
+
+    本地 ``.env``/环境变量可能开着真实 broker：测试不依赖 Redis/worker；
+    ``CELERY_TASK_EAGER_PROPAGATES=True`` 使任务内异常直接外抛，用例能感知失败原因。
+    pytest-django 不可用时直接放行（对齐 ``force_fake_publish_mode`` 写法）。
+    """
+    try:
+        settings = request.getfixturevalue('settings')
+    except Exception:  # pragma: no cover - 无 pytest-django 的测试环境
+        yield
+        return
+    settings.CELERY_TASK_ALWAYS_EAGER = True
+    settings.CELERY_TASK_EAGER_PROPAGATES = True
+    yield
+
+
 @pytest.fixture
 def fixtures_dir() -> Path:
     return FIXTURES_DIR

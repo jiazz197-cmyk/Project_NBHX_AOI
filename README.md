@@ -85,13 +85,19 @@ cp .env.example .env
 # 3. 初始化数据库
 uv run python label_studio/manage.py migrate
 
-# 4. 启动 Django
-uv run python label_studio/manage.py runserver 0.0.0.0:8080
+# 4. 启动开发栈（Ctrl+C 一并退出）
+uv run python label_studio/manage.py runserver 0.0.0.0:8082
+#    ↑ D5 起图片导入为异步任务：runserver 会自动带起一个受限 Celery worker（随服务启停、
+#      文件热重载时自动重建）。想单独观察 worker 日志可 AOI_AUTOSTART_CELERY=false 关闭，
+#      然后 make run-celery；或用 make run-dev 一条命令并发拉起 Django + worker。
 ```
 
-后端默认开发地址：`http://localhost:8080`
+后端默认开发地址：`http://localhost:8082`
 
 > 本地裸跑前请确保 PostgreSQL 和 MinIO 已启动，且 MinIO 中已创建 `aoi-images` bucket。
+> **D5 起**图片导入依赖 Redis + Celery worker（`uv run ... runserver` 已默认自动带起，无需手动单独启动；
+> docker-compose 部署时 `worker` 服务随 compose 自动启动。broker `CELERY_BROKER_URL`
+> 默认 `redis://localhost:6379/1`，与 LS 自带 django_rq 的 DB 0 隔离）；
 > 模型发布变量（`MODEL_REGISTRY`、`MODEL_IMAGE_REPO`、`MODEL_REGISTRY_USER`、`MODEL_REGISTRY_PASSWORD`、`INTERNAL_TOKEN`）在骨架落地后追加到 `.env`；
 > **D3 起**发布服务另有 `AOI_PUBLISH_MODE`（`fake` 离线假推送 / `registry` 走 Registry v2 真推）、
 > `AOI_REGISTRY_PROXY`（只作用于 registry 出网的代理，内网示例 `http://127.0.0.1:7897`）、
@@ -112,14 +118,14 @@ Vite 开发服务器监听 `http://localhost:8010`，但它只是**模块/HMR �
 
 - 后端 `.env` 中 `FRONTEND_HMR=true`（默认开启）时，Django 页面会自动从
   `http://localhost:8010/react-app/main.tsx` 加载前端模块与样式；
-- **浏览器入口始终是后端地址 `http://localhost:8080`**，打开后即可联调；
+- **浏览器入口始终是后端地址 `http://localhost:8082`**，打开后即可联调；
 - **不要直接打开 `http://localhost:8010`**：该地址返回的是 Vite 的裸 `index.html`，
   缺少 Django 注入的 `window.APP_SETTINGS` 与挂载 DOM（`.app-wrapper`/`#main-content`），
   React 会在渲染前抛 `ReferenceError`，表现为白屏；
 - `vite.config.ts` 中的 `/api`、`/static` 代理只在“直接打开 8010”这一不受支持的场景下
   才会被用到；正常联调时页面本身由 8080 提供，请求同源直达 Django。
 
-前端代码改动由 Vite 自动热更新（HMR），刷新 `http://localhost:8080` 页面即可看到效果。
+前端代码改动由 Vite 自动热更新（HMR），刷新 `http://localhost:8082` 页面即可看到效果。
 
 ### 3.3 使用 PostgreSQL + MinIO（推荐接近交付形态）
 

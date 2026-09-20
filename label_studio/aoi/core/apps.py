@@ -1,4 +1,5 @@
 import logging
+import os
 
 from django.apps import AppConfig
 
@@ -34,3 +35,11 @@ class AoiCoreConfig(AppConfig):
         from django.db.models.signals import post_migrate
 
         post_migrate.connect(_seed_rbac_on_migrate, sender=self, dispatch_uid='aoi_core.seed_rbac')
+
+        # D5：runserver 的 autoreload 子进程（RUN_MAIN）自动带起 aoi Celery worker；
+        # 其余命令（migrate/check/shell/测试/uwsgi）没有 RUN_MAIN，零影响（见 aoi/core/dev_worker.py）
+        if os.environ.get('RUN_MAIN') == 'true':
+            from aoi.core import dev_worker
+
+            if dev_worker.should_autostart_worker():
+                dev_worker.start_celery_worker()

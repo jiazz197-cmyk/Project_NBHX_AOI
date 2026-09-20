@@ -10,6 +10,7 @@ urlpatterns = [
     path('/import', views.ImportCreateView.as_view(), name='import-create'),
     path('/import/<str:job_id>', views.ImportDetailView.as_view(), name='import-detail'),
     path('/images', views.ImageListView.as_view(), name='image-list'),
+    path('/images/<int:id>', views.ImageDetailView.as_view(), name='image-detail'),
     path('/images/<int:id>/download', views.ImageDownloadView.as_view(), name='image-download'),
     path('/defects/publish', views.DefectPublishView.as_view(), name='defect-publish'),
     path('/defects', views.DefectListCreateUpdateView.as_view(), name='defect-list'),
