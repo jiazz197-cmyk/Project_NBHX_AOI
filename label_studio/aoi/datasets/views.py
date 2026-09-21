@@ -24,6 +24,7 @@ from aoi.datasets.serializers import (
     serialize_dataset,
     serialize_dataset_version,
     serialize_defect,
+    serialize_defect_version,
     serialize_image,
     serialize_import_job,
 )
@@ -412,7 +413,10 @@ class DefectListCreateUpdateView(AoiAPIView):
     aoi_perm_by_method = {'POST': 'datasets.create', 'PUT': 'datasets.update'}
 
     def get(self, request):
-        qs = DefectClass.objects.all().order_by('code')
+        # 按 id（创建序）而非 code 字典序：code 前缀已放宽为可变英文词（D5 收尾第二轮），
+        # 字典序不再等于「字典构建顺序」；id 序与 training/publish.py 的取数顺序一致，
+        # 也保证发布时默认 index（=列表位置）与调色板分配稳定（新增条目追加在末尾）
+        qs = DefectClass.objects.all().order_by('id')
         active = request.query_params.get('active')
         if active is not None:
             qs = qs.filter(active=str(active).lower() in {'1', 'true', 'yes'})
@@ -463,7 +467,7 @@ class DefectPublishView(AoiAPIView):
         if defects is None:
             defects = [
                 {'code': obj.code, 'name_cn': obj.name_cn, 'risk_level': obj.risk_level}
-                for obj in DefectClass.objects.filter(active=True).order_by('code')
+                for obj in DefectClass.objects.filter(active=True).order_by('id')
             ]
         label_config_xml = label_config.render_label_config(defects)
         snapshot = label_config.snapshot_from_defects(defects)
@@ -488,19 +492,89 @@ class DefectPublishView(AoiAPIView):
             detail={'version': version},
             request_id=self.request_id,
         )
-        return self.ok({'version': version, 'label_config': label_config_xml})
+        # D5 收尾 #2：把新字典（含中文展示名 html）回写到已建 AOI 标注项目，
+        # 否则老数据集标注页仍然显示 code
+        projects_synced = _sync_dataset_projects(label_config_xml)
+        return self.ok(
+            {'version': version, 'label_config': label_config_xml, 'projects_synced': projects_synced},
+            message='defect dictionary published',
+        )
+
+
+@extend_schema(tags=['aoi-datasets'])
+class DefectVersionListView(AoiAPIView):
+    """``GET /api/datasets/defects/versions`` → 缺陷字典发布历史（D5 收尾 #1）。
+
+    历史此前只写库不可见：前端发布后只拿到当次 ``{version, label_config}``，刷新即失，
+    无法回答「当前项目用的是哪一版、谁在什么时候改了什么」。
+    """
+
+    aoi_perm = 'datasets.view'
+
+    def get(self, request):
+        qs = list(DefectDictVersion.objects.all().order_by('-id'))
+        latest_id = qs[0].id if qs else None
+        publisher_names = _publisher_names({obj.published_by for obj in qs if obj.published_by})
+        items = [
+            serialize_defect_version(
+                obj,
+                labels=_defects_from_snapshot(obj.snapshot),
+                publisher_name=publisher_names.get(obj.published_by),
+                is_latest=obj.id == latest_id,
+            )
+            for obj in qs
+        ]
+        return self.ok(paginate(request, items))
+
+
+def _publisher_names(user_ids: set[int]) -> dict[int, str]:
+    """发布人 id → 展示名（邮箱优先，其次用户名）；已删用户回落 ``user#id``。"""
+    if not user_ids:
+        return {}
+    from django.contrib.auth import get_user_model
+
+    users = get_user_model().objects.filter(pk__in=user_ids)
+    names: dict[int, str] = {}
+    for user in users:
+        names[user.pk] = getattr(user, 'email', '') or getattr(user, 'username', '') or f'user#{user.pk}'
+    return names
 
 
 # -------------------------------------------------------------------------- datasets
 def _defects_from_snapshot(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """从字典发布快照 ``{labels:{code:{index,color}}}`` 按 index 还原 defects（供模板渲染）。"""
-    labels = (snapshot or {}).get('labels') or {}
-    defects = [
-        {'code': code, 'index': (meta or {}).get('index'), 'color': (meta or {}).get('color')}
-        for code, meta in labels.items()
-    ]
-    defects.sort(key=lambda item: item['index'] if item['index'] is not None else 0)
-    return defects
+    """从字典发布快照 ``{labels:{code:{index,color,name_cn,risk_level}}}`` 还原 defects（供模板渲染）。
+
+    D5 收尾 #2：旧快照只有 index/color，中文展示名回退查当前 ``DefectClass``
+    （**不改 code/index**，只补展示字段）。
+    """
+    codes = list(((snapshot or {}).get('labels') or {}).keys())
+    name_lookup = {
+        obj.code: {'name_cn': obj.name_cn, 'risk_level': obj.risk_level}
+        for obj in DefectClass.objects.filter(code__in=codes)
+    }
+    return label_config.defects_from_snapshot(snapshot, name_lookup)
+
+
+def _sync_dataset_projects(label_config_xml: str) -> int:
+    """把字典渲染出的 label config 回写到**已建成的 AOI 标注项目**（D5 收尾 #2）。
+
+    为什么需要：中文展示名（``html``）只在 label config 里生效，已建项目不会自动更新，
+    不回写的话老数据集标注页仍然显示 code。``value``（code）不变，只补 ``html``/背景色，
+    已有标注结果仍然合法。返回真正被更新的项目数。
+    """
+    from projects.models import Project
+
+    project_ids = list(Dataset.objects.exclude(ls_project_id__isnull=True).values_list('ls_project_id', flat=True))
+    if not project_ids:
+        return 0
+    updated = 0
+    for project in Project.objects.filter(pk__in=project_ids):
+        if project.label_config != label_config_xml:
+            project.label_config = label_config_xml
+            project.save(update_fields=['label_config'])
+            updated += 1
+    return updated
+
 
 
 @extend_schema(tags=['aoi-datasets'])
@@ -546,7 +620,7 @@ class DatasetListCreateView(AoiAPIView):
             # 无已发布字典版本：回退当前启用缺陷（draft 语义），允许先建数据集再发布字典
             defects = [
                 {'code': obj.code, 'name_cn': obj.name_cn, 'risk_level': obj.risk_level}
-                for obj in DefectClass.objects.filter(active=True).order_by('code')
+                for obj in DefectClass.objects.filter(active=True).order_by('id')
             ]
             dict_version_label = 'draft'
             if not defects:

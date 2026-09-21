@@ -42,7 +42,7 @@
 | 术语 | 定义 |
 |---|---|
 | `skillname` | 任务类型：`ObjectDetection`（MVP 唯一）→ LS 控件 `RectangleLabels` |
-| `object_fault_type_XX` | 缺陷对象 code，XX 两位数字（01~99），由缺陷字典配置 |
+| `<object>_<fault_type>_NN` | 缺陷对象 code：前缀是两段**可变英文词**（如 `panel_scratch`、`glass_dent`），后缀 `NN` 固定两位数字 01~99（`00` 非法），由缺陷字典配置。正则 `^[a-z][a-z0-9_]{0,27}_(0[1-9]|[1-9][0-9])$`（ASCII，前缀≤28 ⇒ 总长≤31 对齐 `VARCHAR(32)`）。历史写法 `object_fault_type_XX` 是其一个合法实例（超集放宽，D5 收尾第二轮）。**code 后缀是 code 自身编号，不是类别索引**——类别索引由字典顺序/显式 `index` 决定 |
 | `model_ref` | 模型注册版本号，格式 `{seq}-{framework}@ds{version}`，如 `3-yolo@ds1` |
 | `model.yaml` | 随模型镜像发布的**模型能力描述**（skillname/类别/推荐阈值/张量信息），见跨平台契约 §2.3 |
 | `station_code` | B 侧工位 code；A 只作**不透明字符串**存储（A 没有工位主数据） |
@@ -246,7 +246,7 @@ CREATE TABLE aoi_datasets.image (
 
 CREATE TABLE aoi_datasets.defect_class (
   id SERIAL PRIMARY KEY,
-  code VARCHAR(32) UNIQUE NOT NULL,          -- object_fault_type_XX
+  code VARCHAR(32) UNIQUE NOT NULL,          -- <object>_<fault_type>_NN（前缀≤28，总长≤31）
   name_cn VARCHAR(64) NOT NULL,
   risk_level SMALLINT NOT NULL,              -- 3=高 2=中 1=低
   aliases JSONB DEFAULT '[]', active BOOLEAN DEFAULT TRUE
@@ -479,7 +479,7 @@ CREATE TABLE aoi_audit.audit_log (
 | `POST /import` | datasets.create | **包裹 LS 上传（D5 真实化，Celery 异步）**：multipart `files[]` + form `dataset_id`（必填）/`source`（可选，默认 `manual_real`，其它值 → `42200`）/`station_code`（可选 ≤32）→ `{job_id}`。校验：dataset 不存在 → `40401`；dataset 无 `ls_project_id` 或 LS 项目不存在 → `42200`（提示先创建数据集）；`files` 全空 → `42200`。逐文件预检：扩展名 ∉ {`.jpg`,`.jpeg`,`.png`,`.bmp`} → `bad_items` 记 `unsupported_extension`（不上传）；>100MB → 记 `too_large`（不上传）；**部分成功语义**（单坏文件不卡整批）。合法文件复用 LS `data_import.uploader.create_file_upload` 入 LS 存储（生产=MinIO），再由 Celery `default` 队列任务（§5.2）登记 `aoi_datasets.image`（`object_key`=LS 上传路径）并建 LS 任务（镜像上游 `async_import_background`：`ProjectSummary` 行锁 + `ImportApiSerializer` 批量建任务 + `update_tasks_counters_and_task_states` + `update_data_columns`；不 emit webhook）；任务内逐文件结局：md5 **全局**去重命中 → `dup`（不建任务、不重复登记，其 FileUpload 字节保留为已知行为）；PIL 解码失败 → `bad_items` 记 `decode_failed` 并登记 `Image(qc_status='rejected')`；成功 → `Image(qc_status='ok')` + LS 任务。broker 不可用 → `50300`（job 留 queued，已上传 FileUpload 为已知孤儿字节） |
 | `GET /import/{job_id}` | datasets.view | `{status, total, ok, dup, bad, bad_items:[{filename, reason}]}`；未知 `job_id` → `40401`（D5 起查真实任务表，不再有 stub） |
 | `GET /images`、`GET /images/{id}/download`、`GET /images/{id}`、`DELETE /images/{id}` | `GET`=datasets.view；`DELETE`=datasets.update | 筛选/预签名下载；详情（D5 收尾新增）。`DELETE`（D5 收尾新增）：删除图片登记 + 其 LS 任务（镜像上游删任务路径，删后重算计数）+ 存储字节（`FileUpload`）+ 版本明细（`dataset_item`）；未知 id → `40401`。任务按 `data.image` 精确（裸对象键）或后缀（`/data/upload/...` 同源 URL）匹配，兼容存量数据 |
-| `GET/POST/PUT /defects`、`POST /defects/publish` | `GET`=datasets.view；`POST`=**datasets.create**；`PUT`=datasets.update；发布=**datasets.publish**（admin+super） | 字典 CRUD；发布 → 渲染 label config（RectangleLabels，code=`object_fault_type_XX`）+ 版本快照。（D5 权限澄清：写拆分为 POST=create / PUT=update，三角色对两码同持，行为无回退；**D5 收尾：`PUT` 为部分更新语义**——只校验/更新携带字段，启停开关只带 `{code, active}` 即可，`code` 仅用于定位不可改） |
+| `GET/POST/PUT /defects`、`POST /defects/publish`、`GET /defects/versions` | `GET`=datasets.view（含 `/defects/versions`）；`POST`=**datasets.create**；`PUT`=datasets.update；发布=**datasets.publish**（admin+super） | 字典 CRUD；发布 → 渲染 label config（RectangleLabels，`value`=code、`html`=中文展示名）+ 版本快照，并**回写已建 AOI 标注项目的 label config**（响应带 `projects_synced`；D5 收尾 #2）。（D5 权限澄清：写拆分为 POST=create / PUT=update，三角色对两码同持，行为无回退；**D5 收尾：`PUT` 为部分更新语义**——只校验/更新携带字段，启停开关只带 `{code, active}` 即可，`code` 仅用于定位不可改）。**`GET /defects/versions`（D5 收尾 #1 新增）**：发布历史（最新在前），条目 `{id, version, published_by, published_by_name, published_at, defect_count, labels:[{code,index,color,name_cn,risk_level}], is_latest}`；旧快照缺 `name_cn` 时回退查当前字典补展示名 |
 | `GET/POST /datasets`、`GET/PUT/DELETE /datasets/{id}`、`POST /datasets/{id}/versions` | `GET`=datasets.view；`POST`=datasets.create；`PUT`/`DELETE`=datasets.update | 数据集/版本。**D5 起 `ls_project_id` 由服务端生成**（标注项目创建自 D6 提前）：`POST` 必填 `name`，服务端取最新已发布缺陷字典版本并按 `aoi/datasets/ls_project.py` 模板创建真实 LS 项目；**无任何已发布版本时回退当前启用缺陷（`active=True`）以 `draft` 语义建项目（D5 收尾：支持未发布字典先建数据集）**，连启用缺陷都没有 → `42200`；客户端携带 `ls_project_id`（`POST`/`PUT`）→ `42200`。发布触发划分 + **测试集红线**（违反 → 42200）。`GET /datasets` 投影含 `versions:[{id,version,status,phase}]`（D5 收尾）。`DELETE /datasets/{id}`（D5 收尾改为级联清理）：删 LS 项目（含任务/标注，镜像上游 `perform_destroy` 断信号）、项目内导入的图片登记/任务/存储字节、版本与 `dataset_item`；视图锚点仍是 `datasets.update`（D4 不动视图锚点）；`datasets.delete` 专供 §3.1.1 闸门拦截 LS 原生项目删除 |
 | `GET /datasets/{id}/versions/{v}/export` | datasets.view | **复用 LS data_export（YOLO）** → zip 落 MinIO `datasets/exports/` |
 | `GET /annotation-stats` | datasets.view | LS 标注/审核状态只读投影（不建表） |

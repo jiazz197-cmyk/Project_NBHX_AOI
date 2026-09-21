@@ -102,7 +102,7 @@ CREATE TABLE b_station (
 );
 
 CREATE TABLE b_defect_class (                -- 展示用字典（从模型 config 派生，非主数据）
-  code TEXT PRIMARY KEY,                     -- object_fault_type_XX
+  code TEXT PRIMARY KEY,                     -- <object>_<fault_type>_NN（B 侧只存不解析）
   name_cn TEXT NOT NULL,
   risk_level INTEGER, color TEXT,
   source_model_ref TEXT, updated_at TEXT NOT NULL

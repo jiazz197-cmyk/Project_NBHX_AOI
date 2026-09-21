@@ -13,6 +13,7 @@ urlpatterns = [
     path('/images/<int:id>', views.ImageDetailView.as_view(), name='image-detail'),
     path('/images/<int:id>/download', views.ImageDownloadView.as_view(), name='image-download'),
     path('/defects/publish', views.DefectPublishView.as_view(), name='defect-publish'),
+    path('/defects/versions', views.DefectVersionListView.as_view(), name='defect-versions'),
     path('/defects', views.DefectListCreateUpdateView.as_view(), name='defect-list'),
     path('/annotation-stats', views.AnnotationStatsView.as_view(), name='annotation-stats'),
     # datasets CRUD（T2.9 裁定：/api/datasets 与 /api/datasets/{id}）

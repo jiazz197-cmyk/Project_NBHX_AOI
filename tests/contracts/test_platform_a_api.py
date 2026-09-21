@@ -339,6 +339,17 @@ class TestPathContract:
         assert auth_client.get('/api/datasets/datasets').status_code == 404
         assert auth_client.get('/api/datasets/datasets/1').status_code == 404
 
+    def test_fixture_matches_generator_source(self):
+        """防回归：仓库里的 `aoi_api_paths.json` 必须等于 `samples.aoi_api_paths()` 的输出。
+
+        历史教训（2026-09-21）：fixture 是 `make_fixtures.py` 的**生成物**，却被手工维护，
+        生成器停在 d2 基线（缺 7 条 D5 路径）——只有 fixture↔OpenAPI 的断言，跑一次生成器
+        就会把 fixture 覆盖回旧基线且全文件重排。本用例把「单一来源」钉死。
+        """
+        from samples import aoi_api_paths
+
+        assert load_json('aoi_api_paths.json') == aoi_api_paths()
+
     def test_route_and_openapi_baseline(self):
         from drf_spectacular.generators import SchemaGenerator
 
@@ -684,6 +695,35 @@ class TestLabelConfig:
         assert expected.startswith('<View><Image name="image" value="$image"/><RectangleLabels name="defect"')
         assert 'object_fault_type_01' in expected
         assert 'object_fault_type_02' in expected
+        # D5 收尾 #2：value=code（结果值/导出契约不变）+ html=中文展示名（标注页显示中文）
+        assert 'value="object_fault_type_01" html="划伤"' in expected
+        assert 'value="object_fault_type_02" html="凹坑"' in expected
+
+    def test_html_display_name_is_separate_from_result_value(self):
+        """展示名走 html，结果值仍是 code——用 alias 会污染标注结果（LSF selectedValues 取 alias）。"""
+        from aoi.datasets.label_config import render_label_config
+
+        xml = render_label_config([{'code': 'object_fault_type_01', 'name_cn': '划伤', 'index': 0}])
+        assert 'alias=' not in xml
+        assert 'value="object_fault_type_01"' in xml
+        assert 'html="划伤"' in xml
+        # 无 name_cn 时退回纯 value，保持向后兼容
+        xml_no_name = render_label_config([{'code': 'object_fault_type_01', 'index': 0}])
+        assert 'html=' not in xml_no_name
+
+    def test_defects_from_snapshot_falls_back_to_dictionary(self, auth_client):
+        """旧快照（只有 index/color）也能渲染出中文名：回退查当前缺陷字典。"""
+        from aoi.datasets import label_config
+        from aoi.datasets.models import DefectClass
+        from aoi.datasets.views import _defects_from_snapshot
+
+        DefectClass.objects.create(code='object_fault_type_01', name_cn='划伤', risk_level=3)
+        legacy = {'labels': {'object_fault_type_01': {'index': 0, 'color': '#FF4D4F'}}}
+        defects = _defects_from_snapshot(legacy)
+        assert defects == [
+            {'code': 'object_fault_type_01', 'index': 0, 'color': '#FF4D4F', 'name_cn': '划伤', 'risk_level': 3}
+        ]
+        assert label_config.render_label_config(defects).count('html="划伤"') == 1
 
     def test_label_config_passes_ls_native_validator(self):
         """T2.2 产出的 label config 必须通过 LS 自身解析器（不是自定义格式）。"""
@@ -702,12 +742,15 @@ class TestLabelConfig:
         assert body['data']['label_config'] == load_text('label_config_expected.xml')
 
         row = DefectDictVersion.objects.get(version=body['data']['version'])
+        # D5 收尾 #2：快照同时带展示字段（name_cn/risk_level），旧快照缺这些字段时读侧回退查字典
         assert row.snapshot == {
             'labels': {
-                'object_fault_type_01': {'index': 0, 'color': '#FF4D4F'},
-                'object_fault_type_02': {'index': 1, 'color': '#FA8C16'},
+                'object_fault_type_01': {'index': 0, 'color': '#FF4D4F', 'name_cn': '划伤', 'risk_level': None},
+                'object_fault_type_02': {'index': 1, 'color': '#FA8C16', 'name_cn': '凹坑', 'risk_level': None},
             }
         }
+        # 发布响应新增 projects_synced（回写已建标注项目的数量），便于前端提示
+        assert body['data']['projects_synced'] >= 0
 
     def test_invalid_code_42200(self, auth_client):
         response = auth_client.post(
@@ -2152,6 +2195,120 @@ class TestStateMachineInjection:
         assert response.status_code == 422
         body = assert_envelope(response, code=42200)
         assert 'code' in body['data']['detail']['fields']
+
+    def test_defect_accepts_variable_prefix_code(self, auth_client):
+        """D5 收尾第二轮：code 前缀是两段可变英文词 <object>_<fault_type>（超集，存量写法仍合法）。"""
+        response = auth_client.post(
+            '/api/datasets/defects',
+            {'code': 'panel_scratch_07', 'name_cn': '面板划伤', 'risk_level': 3},
+            format='json',
+        )
+        assert response.status_code == 200
+        created = assert_envelope(response)['data']
+        assert created['code'] == 'panel_scratch_07'
+
+        # 发布后 label config 用该 code 作 value，html 用中文名
+        published = assert_envelope(auth_client.post('/api/datasets/defects/publish', {}, format='json'))['data']
+        assert 'value="panel_scratch_07" html="面板划伤"' in published['label_config']
+
+        # 历史里也能看到（含旧式 object_fault_type_* 条目共存）
+        history = assert_envelope(auth_client.get('/api/datasets/defects/versions'))['data']['items'][0]
+        assert 'panel_scratch_07' in [label['code'] for label in history['labels']]
+
+    def test_defect_rejects_malformed_variable_prefix(self, auth_client):
+        for bad_code in ('Panel_scratch_01', 'panel-scratch_01', 'panel_scratch_1', 'panel_scratch_00'):
+            response = auth_client.post(
+                '/api/datasets/defects',
+                {'code': bad_code, 'name_cn': '非法', 'risk_level': 1},
+                format='json',
+            )
+            assert response.status_code == 422, bad_code
+            assert_envelope(response, code=42200)
+
+
+@pytest.mark.django_db
+class TestDefectPublishHistory:
+    """D5 收尾 #1：发布历史可见（此前只写库，前端刷新即失）。"""
+
+    def test_versions_list_after_publish(self, auth_client):
+        from aoi.datasets.models import DefectDictVersion
+
+        first = assert_envelope(
+            auth_client.post(
+                '/api/datasets/defects/publish',
+                {'defects': [{'code': 'object_fault_type_01', 'name_cn': '划伤', 'risk_level': 3, 'index': 0}]},
+                format='json',
+            )
+        )['data']
+        second = assert_envelope(
+            auth_client.post(
+                '/api/datasets/defects/publish',
+                {
+                    'defects': [
+                        {'code': 'object_fault_type_01', 'name_cn': '划伤', 'risk_level': 3, 'index': 0},
+                        {'code': 'object_fault_type_02', 'name_cn': '凹坑', 'risk_level': 2, 'index': 1},
+                    ]
+                },
+                format='json',
+            )
+        )['data']
+
+        response = auth_client.get('/api/datasets/defects/versions')
+        assert response.status_code == 200
+        body = assert_envelope(response)['data']
+        items = body['items']
+        assert [item['version'] for item in items] == [second['version'], first['version']]  # 最新在前
+        assert items[0]['is_latest'] is True and items[1]['is_latest'] is False
+        assert items[0]['defect_count'] == 2 and items[1]['defect_count'] == 1
+        assert items[0]['published_at'] is not None
+        assert items[0]['published_by_name']  # 发布人可读名（邮箱/用户名）
+        assert items[0]['labels'][0] == {
+            'code': 'object_fault_type_01',
+            'index': 0,
+            'color': '#FF4D4F',
+            'name_cn': '划伤',
+            'risk_level': 3,
+        }
+        assert DefectDictVersion.objects.count() == 2
+
+    def test_versions_empty_is_ok(self, auth_client):
+        from aoi.datasets.models import DefectDictVersion
+
+        DefectDictVersion.objects.all().delete()
+        body = assert_envelope(auth_client.get('/api/datasets/defects/versions'))['data']
+        assert body['items'] == []
+
+    def test_publish_resyncs_existing_projects(self, auth_client, test_user):
+        """发布要把新的 label config（含中文展示名 html）回写到已建 AOI 标注项目。"""
+        from aoi.datasets.models import Dataset
+        from projects.models import Project
+
+        project = Project.objects.create(
+            title='sync-target',
+            label_config='<View><Image name="image" value="$image"/></View>',
+            organization=test_user.active_organization,
+            created_by=test_user,
+        )
+        Dataset.objects.create(name='sync-ds', ls_project_id=project.id, created_by=test_user.id)
+
+        published = assert_envelope(
+            auth_client.post(
+                '/api/datasets/defects/publish',
+                {'defects': [{'code': 'object_fault_type_01', 'name_cn': '划伤', 'risk_level': 3, 'index': 0}]},
+                format='json',
+            )
+        )['data']
+        assert published['projects_synced'] == 1
+
+        project.refresh_from_db()
+        assert project.label_config == published['label_config']
+        assert 'html="划伤"' in project.label_config
+        # 结果值不变：value 仍是 code（已有标注不会失效）
+        assert 'value="object_fault_type_01"' in project.label_config
+
+    def test_publish_history_requires_auth(self, client):
+        """历史是只读查询，但同样要鉴权（匿名 → 401，不泄露字典版本）。"""
+        assert client.get('/api/datasets/defects/versions').status_code == 401
 
 
 @pytest.mark.django_db

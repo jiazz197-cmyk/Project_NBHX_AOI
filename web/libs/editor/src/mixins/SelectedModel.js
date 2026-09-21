@@ -57,6 +57,15 @@ const SelectedModelMixin = types
       return self.selectedLabels.filter((c) => c.alias).map((c) => c.alias);
     },
 
+    // AOI 二开（注入点 #5，D5 收尾 #2）：展示名优先 html（缺陷字典中文名），
+    // 结果值仍走 selectedValues()（= code），两者必须分离——alias 会污染结果值。
+    getSelectedDisplayString(joinstr = " ") {
+      return self.selectedLabels
+        .map((c) => c.html || c.value)
+        .filter((val) => isDefined(val))
+        .join(joinstr);
+    },
+
     getSelectedString(joinstr = " ") {
       return self.selectedValues().join(joinstr);
     },

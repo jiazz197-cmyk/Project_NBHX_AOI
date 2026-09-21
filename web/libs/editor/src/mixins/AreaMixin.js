@@ -95,7 +95,9 @@ export const AreaMixinBase = types
       const index = self.region_index;
       const label = self.labeling;
       const text = self.texting?.mainValue?.[0]?.replace(/\n\r|\n/, " ");
-      const labelNames = label?.getSelectedString(joinstr);
+      // AOI 二开（注入点 #5，D5 收尾 #2）：区域标签优先显示 html（缺陷字典中文名），
+      // 结果值不变（仍是 code）；老配置没有 html 时自动回落到原 getSelectedString。
+      const labelNames = label?.getSelectedDisplayString?.(joinstr) ?? label?.getSelectedString(joinstr);
       const labelText = [];
 
       if (index) labelText.push(String(index));

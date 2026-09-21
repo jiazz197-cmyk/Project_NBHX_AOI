@@ -70,7 +70,7 @@
 |---|---|
 | 平台 A / `aoi-train` | 训练与标注平台，LS 1.x 二开，中心侧部署；账户复用 LS、**RBAC 自研** |
 | 平台 B / `aoi-infer` | 推理与检测平台，独立前后端，产线侧部署，**无 RBAC / 无用户认证** |
-| `skillname` | 公共包：跨平台任务类型与标签词汇（`ObjectDetection`、`object_fault_type_XX`、`model_ref` 规范） |
+| `skillname` | 公共包：跨平台任务类型与标签词汇（`ObjectDetection`、缺陷 code `<object>_<fault_type>_NN`、`model_ref` 规范） |
 | `pipeline-core` | 公共包：切片/NMS 合并/类别映射/三档判定/检测配置解析（`load_config`），推理后端由调用方注入 |
 | `model_ref` | 模型注册版本号，格式 `{seq}-{framework}@ds{version}`，如 `3-yolo@ds1`；镜像 tag 由其派生（`3-yolo-ds1`） |
 | `model.yaml` | 随模型镜像发布的模型能力描述（skillname/类别/推荐阈值/张量契约 + 预留字段，B 原样保存） |

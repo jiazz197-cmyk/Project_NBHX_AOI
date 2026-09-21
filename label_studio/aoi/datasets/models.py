@@ -46,7 +46,7 @@ class Image(models.Model):
 
 
 class DefectClass(models.Model):
-    """缺陷字典条目：``code = object_fault_type_XX``。"""
+    """缺陷字典条目：``code = <object>_<fault_type>_NN``（前缀可变英文词，后缀 01~99）。"""
 
     id = models.AutoField(primary_key=True)
     code = models.CharField(max_length=32, unique=True)

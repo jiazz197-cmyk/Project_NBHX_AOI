@@ -310,6 +310,9 @@ def aoi_api_paths() -> dict[str, Any]:
         return {'method': method, 'path': path, 'tag': tag, 'auth': auth}
 
     paths = [
+        # auth（契约 §4.0；login 匿名，logout 需 jwt）
+        entry('POST', '/api/auth/login', 'aoi-auth', auth='public'),
+        entry('POST', '/api/auth/logout', 'aoi-auth'),
         # core（契约 §4.0）
         entry('GET', '/api/core/permissions', 'aoi-core'),
         entry('GET', '/api/core/roles', 'aoi-core'),
@@ -318,15 +321,24 @@ def aoi_api_paths() -> dict[str, Any]:
         entry('PUT', '/api/core/roles/{id}', 'aoi-core'),
         entry('DELETE', '/api/core/roles/{id}', 'aoi-core'),
         entry('POST', '/api/core/users/{id}/roles', 'aoi-core'),
+        # D5 组织管理（契约 §4.0）：列表 + 停用/启用
+        entry('GET', '/api/core/users', 'aoi-core'),
+        entry('POST', '/api/core/users/{id}/deactivate', 'aoi-core'),
+        entry('POST', '/api/core/users/{id}/activate', 'aoi-core'),
         # datasets（契约 §4.1；T2.9 裁定路径）
         entry('POST', '/api/datasets/import', 'aoi-datasets'),
         entry('GET', '/api/datasets/import/{job_id}', 'aoi-datasets'),
         entry('GET', '/api/datasets/images', 'aoi-datasets'),
         entry('GET', '/api/datasets/images/{id}/download', 'aoi-datasets'),
+        # D5 收尾：图片详情/删除
+        entry('GET', '/api/datasets/images/{id}', 'aoi-datasets'),
+        entry('DELETE', '/api/datasets/images/{id}', 'aoi-datasets'),
         entry('GET', '/api/datasets/defects', 'aoi-datasets'),
         entry('POST', '/api/datasets/defects', 'aoi-datasets'),
         entry('PUT', '/api/datasets/defects', 'aoi-datasets'),
         entry('POST', '/api/datasets/defects/publish', 'aoi-datasets'),
+        # D5 收尾：缺陷字典发布历史
+        entry('GET', '/api/datasets/defects/versions', 'aoi-datasets'),
         entry('GET', '/api/datasets', 'aoi-datasets'),
         entry('POST', '/api/datasets', 'aoi-datasets'),
         entry('GET', '/api/datasets/{id}', 'aoi-datasets'),
@@ -370,7 +382,12 @@ def aoi_api_paths() -> dict[str, Any]:
         entry('POST', '/api/ingest/findings', 'aoi-ingest', auth='internal-token'),
     ]
     return {
-        'version': 'd2-20260909',
-        'note': 'T2.9 datasets CRUD 路径裁定为 /api/datasets + /api/datasets/{id}；旧 /api/datasets/datasets* 不存在',
+        'version': 'd5-20260921-1',
+        'note': (
+            'T2.9 datasets CRUD 路径裁定为 /api/datasets + /api/datasets/{id}；旧 /api/datasets/datasets* 不存在；'
+            'D3 新增 /api/auth/login（匿名）与 /api/auth/logout（jwt）；'
+            'D5 新增 /api/core/users 与 /api/core/users/{id}/deactivate|activate（组织管理，契约 §4.0）；'
+            'D5 收尾新增 GET/DELETE /api/datasets/images/{id}（图片删除）与 GET /api/datasets/defects/versions（发布历史）'
+        ),
         'paths': paths,
     }

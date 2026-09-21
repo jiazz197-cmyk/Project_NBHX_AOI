@@ -59,7 +59,19 @@ class TestSkillName:
 
 
 class TestFaultCodes:
-    @pytest.mark.parametrize('code', ['object_fault_type_01', 'object_fault_type_99'])
+    @pytest.mark.parametrize(
+        'code',
+        [
+            # 历史字面量写法（超集：仍然合法，存量数据零迁移）
+            'object_fault_type_01',
+            'object_fault_type_99',
+            # D5 收尾第二轮：前缀改为两段可变英文词 <object>_<fault_type>
+            'panel_scratch_01',
+            'glass_dent_02',
+            'inner_surface_oil_stain_07',
+            'outer_panel_surface_scratch_99',
+        ],
+    )
     def test_valid_codes(self, code):
         assert is_valid_fault_code(code) is True
 
@@ -79,6 +91,17 @@ class TestFaultCodes:
             'object_fault_type_０１',
             'object_fault_type_٠١',
             'object_fault_type_⁰¹',
+            # 放宽后仍需拒绝：大写/连字符/中划线/无编号/编号越界/00/超长前缀
+            'Panel_scratch_01',
+            'panel-scratch_01',
+            'panel scratch_01',
+            'panel_scratch',
+            'panel_scratch_1',
+            'panel_scratch_100',
+            'panel_scratch_00',
+            '_panel_scratch_01',
+            'panel_scratch_0１',
+            f'{"p" * 29}_scratch_01',  # 前缀 29 > 28（VARCHAR(32) 预算）
         ],
     )
     def test_invalid_codes(self, code):
@@ -87,9 +110,22 @@ class TestFaultCodes:
     def test_format_and_index_roundtrip(self):
         for index in (1, 2, 9, 10, 99):
             code = format_fault_code(index)
-            assert code == f'object_fault_type_{index:02d}'
+            assert code == f'object_fault_type_{index:02d}'  # 缺省前缀向后兼容
             assert is_valid_fault_code(code)
             assert fault_code_index(code) == index
+
+    def test_format_with_variable_prefix(self):
+        """D5 收尾第二轮：前缀可传 <object>_<fault_type>，编号后缀保持 01~99。"""
+        code = format_fault_code(3, prefix='panel_scratch')
+        assert code == 'panel_scratch_03'
+        assert is_valid_fault_code(code)
+        # fault_code_index 返回 code 自身编号，与类别索引无关
+        assert fault_code_index(code) == 3
+
+    @pytest.mark.parametrize('prefix', ['', 'Panel_scratch', 'panel-scratch', 'panel_', 'p' * 29, None, 3])
+    def test_format_invalid_prefix(self, prefix):
+        with pytest.raises((ValueError, TypeError)):
+            format_fault_code(1, prefix=prefix)
 
     @pytest.mark.parametrize('index', [0, 100, -1, 1.5, True])
     def test_format_out_of_range(self, index):

@@ -10,6 +10,7 @@ __all__ = [
     'serialize_dataset',
     'serialize_dataset_version',
     'serialize_import_job',
+    'serialize_defect_version',
 ]
 
 
@@ -82,6 +83,30 @@ def serialize_dataset_version(obj: Any) -> dict[str, Any]:
         'dict_version': obj.dict_version,
         'note': obj.note,
         'created_by': obj.created_by,
+    }
+
+
+def serialize_defect_version(
+    obj: Any,
+    *,
+    labels: list[dict[str, Any]] | None = None,
+    publisher_name: str | None = None,
+    is_latest: bool = False,
+) -> dict[str, Any]:
+    """缺陷字典发布历史条目（契约 §4.1 ``GET /defects/versions``，D5 收尾 #1）。
+
+    ``labels`` 由调用方用 ``label_config.defects_from_snapshot`` 还原（含中文名兜底），
+    这里不重复实现快照解析；``snapshot`` 原样返回，便于前端/排障对照。
+    """
+    return {
+        'id': obj.id,
+        'version': obj.version,
+        'published_by': obj.published_by,
+        'published_by_name': publisher_name,
+        'published_at': _iso(obj.published_at),
+        'defect_count': len(labels) if labels is not None else len((obj.snapshot or {}).get('labels') or {}),
+        'labels': labels or [],
+        'is_latest': is_latest,
     }
 
 

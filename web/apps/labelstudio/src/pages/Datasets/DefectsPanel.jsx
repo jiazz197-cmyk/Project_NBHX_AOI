@@ -1,12 +1,13 @@
 /**
  * 缺陷字典面板（契约 §4.1，D5）。
- * 列表（code/中文名/风险档/别称/启停）+ 新增与编辑 + 停用/启用 + 发布字典（预览 label config XML）。
+ * 列表（code/中文名/风险档/别称/启停）+ 新增与编辑 + 停用/启用 + 发布字典（预览 label config XML）
+ * + 发布历史（D5 收尾 #1：版本/时间/发布人/条目快照）。
  * 权限：新增/编辑/停启用 = `datasets.update`（operator 起可写，前端按码显隐）；
  * 发布 = `datasets.publish`（admin+）。
  * 样式：语义 token + 共享常量（aoi/uiTokens），暗色自动适配。
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { Button, ToastType, useToast } from "@humansignal/ui";
 import { Spinner } from "../../components/Spinner/Spinner";
 import { aoiFetch } from "../../aoi/api";
@@ -27,8 +28,11 @@ import {
 } from "../../aoi/uiTokens";
 
 const DEFECTS_QUERY_KEY = ["aoi", "defects"];
+const VERSIONS_QUERY_KEY = ["aoi", "defect-versions"];
 const RISK_LABELS = { 1: "低", 2: "中", 3: "高" };
 const RISK_BADGE_KIND = { 1: "positive", 2: "primary", 3: "negative" };
+
+const formatTime = (value) => (value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—");
 
 const EMPTY_FORM = { code: "", name_cn: "", risk_level: "1", aliases: "", active: true };
 
@@ -54,10 +58,10 @@ const DefectForm = ({ initial, editing, busy, onSubmit, onCancel }) => {
       }}
     >
       <label className="flex flex-col gap-1 text-xs text-neutral-content-subtle">
-        code（object_fault_type_XX）
+        code（&lt;对象&gt;_&lt;缺陷类型&gt;_NN，如 panel_scratch_01）
         <input
           className={`${INPUT} w-56`}
-          placeholder="object_fault_type_11"
+          placeholder="panel_scratch_01"
           value={form.code}
           onChange={set("code")}
           readOnly={editing}
@@ -97,7 +101,9 @@ export const DefectsPanel = () => {
   const queryClient = useQueryClient();
   const { has } = usePerms();
   const [formState, setFormState] = useState(null); // null | {mode: 'create'} | {mode: 'edit', code}
-  const [published, setPublished] = useState(null); // {version, label_config}
+  const [published, setPublished] = useState(null); // {version, label_config, projects_synced}
+  const [expandedVersion, setExpandedVersion] = useState(null); // 展开快照的版本 id
+  const [showAllVersions, setShowAllVersions] = useState(false); // 发布历史：默认只显示最新一条
 
   const onError = (error) => toast.show({ message: error.message, type: ToastType.error });
   const invalidateDefects = () => queryClient.invalidateQueries({ queryKey: DEFECTS_QUERY_KEY });
@@ -105,6 +111,11 @@ export const DefectsPanel = () => {
   const defectsQuery = useQuery({
     queryKey: DEFECTS_QUERY_KEY,
     queryFn: () => aoiFetch("/api/datasets/defects?page_size=200"),
+  });
+  // D5 收尾 #1：发布历史（此前只写库不可见）
+  const versionsQuery = useQuery({
+    queryKey: VERSIONS_QUERY_KEY,
+    queryFn: () => aoiFetch("/api/datasets/defects/versions?page_size=50"),
   });
 
   const saveDefect = useMutation({
@@ -129,11 +140,18 @@ export const DefectsPanel = () => {
   });
   const publish = useMutation({
     mutationFn: () => aoiFetch("/api/datasets/defects/publish", { method: "POST", body: JSON.stringify({}) }),
-    onSuccess: (data) => setPublished(data),
+    onSuccess: (data) => {
+      setPublished(data);
+      queryClient.invalidateQueries({ queryKey: VERSIONS_QUERY_KEY });
+      toast.show({ message: `字典 ${data.version} 已发布`, type: ToastType.success });
+    },
     onError,
   });
 
   const defects = defectsQuery.data?.items ?? [];
+  const versions = versionsQuery.data?.items ?? [];
+  // 最新一条常显（且在第一条），其余默认折叠 —— 发布次数多了列表不会淹没页面
+  const visibleVersions = showAllVersions ? versions : versions.slice(0, 1);
   const canWrite = has("datasets.update");
   const canPublish = has("datasets.publish");
   const busy = saveDefect.isPending || toggleActive.isPending || publish.isPending;
@@ -248,9 +266,11 @@ export const DefectsPanel = () => {
         <div className={`${CARD} mt-5 p-5`}>
           <div className="mb-2 flex items-center gap-2">
             <h3 className={SECTION_TITLE}>已发布字典版本：{published.version}</h3>
-            {badge("positive", "已同步标注项目")}
+            {badge("positive", `已同步 ${published.projects_synced ?? 0} 个标注项目`)}
           </div>
-          <p className={`${HINT} mb-2`}>生成的 label config（已同步为标注项目模板）：</p>
+          <p className={`${HINT} mb-2`}>
+            生成的 label config（value=code 不变，html=中文展示名，已回写到已建标注项目）：
+          </p>
           <pre className="overflow-x-auto rounded-lg bg-neutral-surface-inset p-4 font-mono text-xs leading-5 text-neutral-content-subtle">
             {published.label_config}
           </pre>
@@ -261,6 +281,96 @@ export const DefectsPanel = () => {
           </div>
         </div>
       ) : null}
+
+      <div className={`${CARD} mt-5 overflow-hidden`}>
+        <div className="flex flex-wrap items-center justify-between gap-2 p-4">
+          <h3 className={SECTION_TITLE}>发布历史</h3>
+          <div className="flex items-center gap-2">
+            <span className={HINT}>{versionsQuery.isLoading ? "加载中…" : `共 ${versions.length} 版（最新在前）`}</span>
+            {versions.length > 1 ? (
+              <Button size="compact" look="outlined" onClick={() => setShowAllVersions((prev) => !prev)}>
+                {showAllVersions ? "收起历史版本" : `展开其余 ${versions.length - 1} 版`}
+              </Button>
+            ) : null}
+          </div>
+        </div>
+        {versionsQuery.isError ? (
+          <div className={`${ERROR_BOX} m-4`}>发布历史加载失败：{versionsQuery.error.message}</div>
+        ) : (
+          <table className={TABLE}>
+            <thead className="bg-neutral-surface-inset">
+              <tr>
+                <th className={TABLE_HEAD_CELL}>版本</th>
+                <th className={TABLE_HEAD_CELL}>发布时间</th>
+                <th className={TABLE_HEAD_CELL}>发布人</th>
+                <th className={TABLE_HEAD_CELL}>缺陷数</th>
+                <th className={TABLE_HEAD_CELL}>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleVersions.map((version) => (
+                <Fragment key={version.id}>
+                  <tr className={TABLE_ROW}>
+                    <td className={`${TABLE_BODY_CELL} font-mono text-xs`}>
+                      {version.version} {version.is_latest ? badge("positive", "最新") : null}
+                    </td>
+                    <td className={TABLE_BODY_CELL}>{formatTime(version.published_at)}</td>
+                    <td className={TABLE_BODY_CELL}>{version.published_by_name ?? "—"}</td>
+                    <td className={TABLE_BODY_CELL}>{version.defect_count}</td>
+                    <td className={TABLE_BODY_CELL}>
+                      <Button
+                        size="compact"
+                        look="outlined"
+                        onClick={() => setExpandedVersion(expandedVersion === version.id ? null : version.id)}
+                      >
+                        {expandedVersion === version.id ? "收起快照" : "查看快照"}
+                      </Button>
+                    </td>
+                  </tr>
+                  {expandedVersion === version.id ? (
+                    <tr>
+                      <td colSpan={5} className="bg-neutral-surface-inset p-4">
+                        <table className={TABLE}>
+                          <thead>
+                            <tr>
+                              <th className={TABLE_HEAD_CELL}>索引</th>
+                              <th className={TABLE_HEAD_CELL}>code</th>
+                              <th className={TABLE_HEAD_CELL}>中文名</th>
+                              <th className={TABLE_HEAD_CELL}>颜色</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {version.labels.map((label) => (
+                              <tr key={label.code} className={TABLE_ROW}>
+                                <td className={TABLE_BODY_CELL}>{label.index}</td>
+                                <td className={`${TABLE_BODY_CELL} font-mono text-xs`}>{label.code}</td>
+                                <td className={TABLE_BODY_CELL}>{label.name_cn ?? "—"}</td>
+                                <td className={TABLE_BODY_CELL}>
+                                  <span
+                                    className="inline-block h-3 w-6 rounded-sm align-middle"
+                                    style={{ background: label.color ?? "#cccccc" }}
+                                  />
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </td>
+                    </tr>
+                  ) : null}
+                </Fragment>
+              ))}
+              {!versions.length && !versionsQuery.isLoading ? (
+                <tr>
+                  <td className={EMPTY} colSpan={5}>
+                    暂无发布记录，点击「发布字典」生成第一版。
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 };

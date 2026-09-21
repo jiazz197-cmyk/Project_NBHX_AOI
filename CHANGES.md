@@ -633,3 +633,44 @@ SPA 调用鉴权：session cookie（DRF `SessionAuthentication`）；CSRF 由上
 - **现象**：混合批次（1 好图 + 1 个 `.txt` 预检拒绝）导入成功后 `ok=1, dup=2`，而图片因 md5 全局去重并未登记——ok/dup 被预检 bad 数虚增。
 - **根因**：`tasks.py::process_import_job` 的 `ok = dup = bad = job.bad` 链式赋值把预检拒绝数同时灌进 `ok`/`dup` 初值。
 - **修复**：拆开初值——`ok=0; dup=0; bad=job.bad`（预检拒绝只进 bad）。
+
+## D5 收尾第二轮：缺陷字典发布历史 / 标注页中文名 / 缺陷 code 方案评估（2026-09-21）
+
+### 1. 缺陷字典发布历史不可见
+
+- **根因**：`DefectDictVersion` 每次发布都在写（dev 库已有 4 版），但**没有任何读接口**，前端发布后只拿到当次 `{version, label_config}`，刷新即失——无法回答「当前项目用的哪一版、谁在什么时候改了什么」。
+- **后端**：新增 `GET /api/datasets/defects/versions`（`datasets.view`，契约 §4.1）：最新在前，条目 `{id, version, published_by, published_by_name, published_at, defect_count, labels:[{code,index,color,name_cn,risk_level}], is_latest}`；`serialize_defect_version` 落 `aoi/datasets/serializers.py`；发布人在 `views._publisher_names` 批量解析（邮箱优先）。
+- **前端**：`DefectsPanel` 新增「发布历史」区：版本/发布时间/发布人/缺陷数 + 「查看快照」行内展开（索引、code、中文名、色块），最新版打标；发布成功后自动刷新历史 + toast。
+
+### 2. 打标签时显示编号而非中文名
+
+- **根因**：`render_label_config` 只渲染 `<Label value="{code}"/>`，标注页只能显示 code；且发布快照只存 `{index,color}`，中文名在建项目/重同步链路上丢失。
+- **修复（value/展示名分离）**：
+  - label config 改为 `<Label value="{code}" html="{name_cn}" background="…"/>`——`value` 仍是 code（标注结果、导出、`classes.txt`、`model.yaml`、B 侧契约完全不变），`html` 只影响按钮/区域文本（LSF 原生 `Label.html`）。
+  - **明确不用 `alias`**：LSF `SelectedModel.selectedValues()` 是 `alias ? alias : value`，设 alias 会把标注结果值写成中文名，直接破坏 code 契约（已实测确认）。
+  - 快照补 `name_cn`/`risk_level`；`label_config.defects_from_snapshot` 对旧快照（无 name_cn）回退查当前字典补展示名——存量 4 个版本无需重建。
+  - 发布时把新 label config **回写到已建 AOI 标注项目**（`views._sync_dataset_projects`，`value` 不变故已有标注仍合法），响应带 `projects_synced`；老数据集点一次「发布字典」即生效。
+  - **注入点 #5**（新增，登记于本文件顶部注入点清单）：`web/libs/editor/src/mixins/SelectedModel.js` 加 `getSelectedDisplayString()`（展示名优先 `html`）、`mixins/AreaMixin.js::getLabelText` 与 `components/SidePanels/OutlinerPanel/RegionLabel.tsx` 改用它——否则标签按钮显示中文、而画布框标签和右侧区域列表仍显示 code。三处都只改**展示**，结果值仍走 `selectedValues()`。
+- **前端**：发布结果卡片文案改为「已同步 N 个标注项目」，label config 预览提示 `value=code / html=中文名`。
+- **测试**：golden fixture `label_config_expected.xml` 重新生成（含 `html`），新增 `test_html_display_name_is_separate_from_result_value`、`test_defects_from_snapshot_falls_back_to_dictionary`、`TestDefectPublishHistory`（4）。
+
+### 3. fixture 生成器与文件不同步（本轮暴露并修掉）
+
+- **现象**：跑 `tests/contracts/make_fixtures.py` 会把 `aoi_api_paths.json` 覆盖回 `d2-20260909` 基线，丢掉 D5 的 7 条路径（`/api/auth/login|logout`、`/api/core/users*`、`GET|DELETE /api/datasets/images/{id}`），且把 1 空格缩进重排成 2 空格。
+- **根因**：`samples.py::aoi_api_paths()` 才是生成源，但历史上只手工改了 fixture，生成器停在 d2。
+- **修复**：把 7 条缺失路径 + 本轮新增的 `GET /api/datasets/defects/versions` 补进 `samples.py`，版本升 `d5-20260921-1`；`make_fixtures.py` 对该文件改用 `indent=1`（与仓库既有风格一致，消除全文件重排）。复跑生成后 fixture 与 OpenAPI aoi 路径集合**完全一致**（47 == 47，方法集合无差异）。
+
+### 4. 缺陷 code 方案（`object_fault_type_XX`）影响面评估
+
+- **结论**：**契约级、非局部改动**——见下方「缺陷 code 放宽方案」小节（待产品确认目标格式后实施）。当前未改动任何 code 相关逻辑。
+
+### 5. 缺陷 code 放宽为 `<object>_<fault_type>_NN`（产品确认方案 A：超集，存量零迁移）
+
+- **背景**：原正则把模板占位符当字面量写死：`^object_fault_type_(0[1-9]|[1-9][0-9])$`，实际语义应是 `<object>_<fault_type>` **两段可变英文词** + 两位编号。
+- **改动**：`packages/skillname/skillname/codes.py`
+  - 正则 → `^[a-z][a-z0-9_]{0,27}_(?:0[1-9]|[1-9][0-9])$`（ASCII；`00` 仍非法；前缀≤28 ⇒ 总长≤31，落在 `defect_class.code VARCHAR(32)` 内）；新增 `FAULT_CODE_PREFIX_MAX_LENGTH` / `FAULT_CODE_MAX_LENGTH` / `FAULT_CODE_DEFAULT_PREFIX` 并导出。
+  - `format_fault_code(index, prefix='object_fault_type')` 支持前缀（缺省保持历史输出，向后兼容）；`fault_code_index()` 文档澄清它取的是 **code 自身编号，不是类别索引**。
+  - 超集性质：`object_fault_type_11` 等历史 code 仍合法 ⇒ 字典、已发布快照、LS label config、已有标注、`model.yaml`、B 侧 `b_defect_class` **全部无需迁移**。
+- **排序假设修正**：`views.py` 三处 `DefectClass.objects...order_by('code')` 改为 `order_by('id')`——前缀可变后字典序不再等于「字典构建顺序」，而发布时默认 `index`（=列表位置）与调色板分配依赖这个顺序；id 序与 `training/publish.py` 的取数顺序一致，且新增条目追加在末尾、不扰动既有 index/颜色。
+- **前端**：`DefectsPanel` 表单提示改为 `code（<对象>_<缺陷类型>_NN，如 panel_scratch_01）`，placeholder 同步。
+- **文档/测试**：契约 §2.1 词表 + §4.1 DDL 注释、B 契约 DDL 注释、`docs/双平台架构与拆分方案.md` 伪代码、`docs/P0骨架设计_双平台.md`、`docs/设计_预标三桶复审流程.md`、`docs/README.md`、`packages/skillname/README.md`、`tests/contracts/README.md` 全量同步；`test_skillname.py` 增可变前缀正/负例与 `format_fault_code(prefix=…)`，`test_platform_a_api.py` 增 `test_defect_accepts_variable_prefix_code`（含发布 XML `value=panel_scratch_07 html=面板划伤`）与 `test_defect_rejects_malformed_variable_prefix`。

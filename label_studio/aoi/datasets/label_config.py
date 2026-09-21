@@ -15,9 +15,19 @@
   对齐）；LS 预设示例使用 ``name="label"``。**D2 裁定：保持 ``defect``**（见 plan §10）。
 
 输入 ``defects`` 元素支持 dict 或对象，字段：
-``code``（必填，``object_fault_type_XX``，01~99）、``index``（可选，0-based，缺省＝列表位置；
+``code``（必填，``<object>_<fault_type>_NN``，如 ``panel_scratch_01``）、``index``（可选，0-based，缺省＝列表位置；
 一旦显式给出则必须唯一且**连续 0..n-1**，保证与 ``classes.txt`` / ``model.yaml`` 的类别序一致）、
-``color``（可选，缺省 ``skillname.color_for_index(index)``）。
+``color``（可选，缺省 ``skillname.color_for_index(index)``）、``name_cn``（可选，展示名）。
+
+展示名与结果值分离（D5 收尾 #2）
+--------------------------------
+标注页此前只显示 code（``object_fault_type_11``），标注员看到的全是编号。现在渲染为
+``<Label value="code" html="划伤" background="…"/>``：``value`` 仍是 code（结果值、导出、
+``class_map``、B 侧契约全部不变），``html`` 只影响**按钮/区域上的展示文本**，由 LSF 原生
+``html`` 属性消费（``tags/control/Label.jsx``）。
+
+**不可改用 ``alias``**：LSF ``SelectedModel.selectedValues()`` 是 ``alias ? alias : value``，
+设 alias 会把标注结果值写成中文名，直接破坏 code 契约（已实测确认）。
 """
 
 from __future__ import annotations
@@ -28,7 +38,7 @@ from typing import Any, Iterable
 from aoi.common.errors import CODE_UNPROCESSABLE, AoiError
 from skillname import SkillName, color_for_index, is_valid_fault_code, ls_control_for
 
-__all__ = ['normalize_defects', 'render_label_config', 'snapshot_from_defects']
+__all__ = ['normalize_defects', 'render_label_config', 'snapshot_from_defects', 'defects_from_snapshot']
 
 LS_CONTROL = ls_control_for(SkillName.OBJECT_DETECTION)  # "RectangleLabels"
 LABEL_NAME = 'defect'
@@ -107,7 +117,10 @@ def normalize_defects(defects: Iterable[Any] | None) -> list[dict[str, Any]]:
 
 
 def render_label_config(defects: Iterable[Any] | None) -> str:
-    """渲染 label config XML（golden fixture：``tests/contracts/fixtures/label_config_expected.xml``）。"""
+    """渲染 label config XML（golden fixture：``tests/contracts/fixtures/label_config_expected.xml``）。
+
+    ``html`` 属性＝中文展示名（缺失则退回只渲染 ``value``，兼容无 name_cn 的旧快照）。
+    """
     normalized = normalize_defects(defects)
     parts = [
         '<View>',
@@ -117,13 +130,60 @@ def render_label_config(defects: Iterable[Any] | None) -> str:
     for entry in normalized:
         code = escape(entry['code'], quote=True)
         color = escape(entry['color'], quote=True)
-        parts.append(f'<Label value="{code}" background="{color}"/>')
+        name_cn = entry.get('name_cn')
+        display = f' html="{escape(str(name_cn), quote=True)}"' if name_cn else ''
+        parts.append(f'<Label value="{code}"{display} background="{color}"/>')
     parts.append(f'</{LS_CONTROL}>')
     parts.append('</View>')
     return ''.join(parts)
 
 
 def snapshot_from_defects(defects: Iterable[Any] | None) -> dict[str, Any]:
-    """生成 ``defect_dict_version.snapshot``：``{labels:{code:{index,color}}}``。"""
+    """生成 ``defect_dict_version.snapshot``：``{labels:{code:{index,color,name_cn,risk_level}}}``。
+
+    快照必须自带 ``name_cn``：数据集建项目／发布重同步都从快照渲染 label config，
+    旧快照（只有 index/color）会丢中文名（``defects_from_snapshot`` 会回退查当前字典兜底）。
+    """
     normalized = normalize_defects(defects)
-    return {'labels': {entry['code']: {'index': entry['index'], 'color': entry['color']} for entry in normalized}}
+    return {
+        'labels': {
+            entry['code']: {
+                'index': entry['index'],
+                'color': entry['color'],
+                'name_cn': entry.get('name_cn'),
+                'risk_level': entry.get('risk_level'),
+            }
+            for entry in normalized
+        }
+    }
+
+
+def defects_from_snapshot(snapshot: dict[str, Any] | None, name_lookup: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """从字典发布快照还原 defects（按 ``index`` 排序），供模板渲染与发布历史展示。
+
+    ``name_lookup``：``{code: {'name_cn':…, 'risk_level':…}}``（通常来自当前 ``DefectClass``），
+    用于兜底旧快照缺失的展示名——**不改变 code/index**，只补展示字段。
+    """
+    labels = (snapshot or {}).get('labels') or {}
+    lookup = name_lookup or {}
+    defects: list[dict[str, Any]] = []
+    for code, meta in labels.items():
+        meta = meta or {}
+        fallback = lookup.get(code) or {}
+        if isinstance(fallback, dict):
+            fallback_name = fallback.get('name_cn')
+            fallback_risk = fallback.get('risk_level')
+        else:  # 允许直接传模型对象
+            fallback_name = getattr(fallback, 'name_cn', None)
+            fallback_risk = getattr(fallback, 'risk_level', None)
+        defects.append(
+            {
+                'code': code,
+                'index': meta.get('index'),
+                'color': meta.get('color'),
+                'name_cn': meta.get('name_cn') or fallback_name,
+                'risk_level': meta.get('risk_level') or fallback_risk,
+            }
+        )
+    defects.sort(key=lambda item: item['index'] if item['index'] is not None else 0)
+    return defects
