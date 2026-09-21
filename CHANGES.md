@@ -674,3 +674,115 @@ SPA 调用鉴权：session cookie（DRF `SessionAuthentication`）；CSRF 由上
 - **排序假设修正**：`views.py` 三处 `DefectClass.objects...order_by('code')` 改为 `order_by('id')`——前缀可变后字典序不再等于「字典构建顺序」，而发布时默认 `index`（=列表位置）与调色板分配依赖这个顺序；id 序与 `training/publish.py` 的取数顺序一致，且新增条目追加在末尾、不扰动既有 index/颜色。
 - **前端**：`DefectsPanel` 表单提示改为 `code（<对象>_<缺陷类型>_NN，如 panel_scratch_01）`，placeholder 同步。
 - **文档/测试**：契约 §2.1 词表 + §4.1 DDL 注释、B 契约 DDL 注释、`docs/双平台架构与拆分方案.md` 伪代码、`docs/P0骨架设计_双平台.md`、`docs/设计_预标三桶复审流程.md`、`docs/README.md`、`packages/skillname/README.md`、`tests/contracts/README.md` 全量同步；`test_skillname.py` 增可变前缀正/负例与 `format_fault_code(prefix=…)`，`test_platform_a_api.py` 增 `test_defect_accepts_variable_prefix_code`（含发布 XML `value=panel_scratch_07 html=面板划伤`）与 `test_defect_rejects_malformed_variable_prefix`。
+
+## D5 收尾第三轮：新建数据集向导 + 收敛原生 Projects 旁路（2026-09-21）
+
+**背景（实测确认的链路问题）**：原流程要跨三个 tab 来回跳（缺陷字典 → 数据集 → 图片），且原生
+Projects 页能建项目/传图，产出的却是"孤儿数据"——实测 `POST /api/projects` 201、`POST /api/projects/{id}/import`
+201（任务与图片都正常显示），但 `aoi_datasets.image` 与 `aoi_datasets.dataset` 均无登记：
+不进 AOI 图片库（无 md5 去重/质检/工位号/来源）、不进数据集页（无版本、无字典绑定、无删除级联），
+label config 还是用户自选模板而非缺陷字典；operator 更能建项目却无 `datasets.config` 权限改配置（403）。
+
+- **新建数据集向导**（`DatasetsPanel`）：一张卡片三步——① 名称 → ② 字典来源（最新已发布版本 / 当前启用缺陷草稿，实时显示条目数与发布人）→ ③ 图片（可选，多选 + 工位号）；建完立即发起导入并在向导内显示进度/结果，点「去图片列表」自动切 tab 并预选该数据集。
+- **tab 顺序按工作流重排**：数据集 → 图片 → 缺陷字典（缺省停在「数据集」）；`DatasetsPage` 透传 `onDatasetReady` / `initialDatasetId`。
+- **导入链路抽公共 hook**：新增 `useDatasetImport`（multipart → Celery 任务 → 终态轮询 + 失效查询），`ImagesPanel` 与向导共用一份实现，避免两处行为漂移。
+- **后端 `dict_source`**（`POST /api/datasets`）：`latest_published`（缺省）/ `active_defects`（强制草稿语义）；非法值 → `42200`；响应回显 `dict_version` / `dict_source`（契约 §4.1 已同步）；审计 detail 带 `dict_source`。
+- **隐藏原生 Projects 菜单入口**（`Menubar`）：AOI 建项目统一走数据集页向导，标注仍走 `/projects/{id}/data` 深链。
+- **测试**：新增 4 例（`dict_source=active_defects` 覆盖已发布版本、无启用缺陷 → 42200、非法值 → 42200、响应回显）。
+
+## D5 收尾第四轮：数据集上传页重设计（frontend-design，2026-09-21）
+
+**设计简报**：产品＝AOI 面板缺陷检测（工业机器视觉）；用户＝产线质检/标注管理员，在工位旁或工程机上
+成批导图；这一页的活儿＝把整批产线图片导进某个数据集（该数据集已绑定缺陷字典），确认导入结果，
+并能在图库里逐张核查。
+
+**设计决策**（为什么这么改，避免以后"顺手"改回卡片套件）：
+1. **颜色是数据，不是装饰**：chrome 全部沿用宿主 sand 中性 token，页面上出现的每一处彩色都编码数据
+   ——缺陷类别（字典自带 8 色，发布快照里有 color）与质检状态。本页不新增任何强调色相，
+   避开"暖奶油底 + 陶土强调色""近黑 + 荧光绿"这些通用套路。
+2. **台面常暗**（本页唯一"大胆"之处）：上传台面 / 图库瓦片在两套主题下都是深色石墨底（`--aoi-stage`），
+   因为看片要在暗底上才准（灯箱/暗房常识），图片也因此在页面上立刻成为主角。
+3. **编号只用在真序列上**：① 建数据集 → ② 传图片 → ③ 发布缺陷字典，轨道同时充当 tab 与状态摘要
+   （"1 个 / 4 张 / 最新 20260921-4"）。
+4. **数字说话**：导入结束用四个 tabular 大数字（成功/重复/坏图/合计），不用彩色横幅；
+   计数、尺寸、版本一律 `tabular-nums`，不跳动。
+5. **空态是邀请**：没有数据集时台面直接给出"新建数据集"；没有图片时告诉你去拖第一批。
+
+**实现**：
+- 新增 `pages/Datasets/Datasets.prefix.css`（页面级 token：`--aoi-stage*`、轨道、台面、胶片条、
+  contact sheet、账本、`prefers-reduced-motion` 与窄屏降级）。
+- `DatasetsPage`：页头 + 工序轨道 + 单工作区；缺省落在「传图片」（上传是主角），
+  轨道 meta 复用面板同 key 的 react-query 缓存，不额外发请求。
+- `ImagesPanel`：拖放上传台面（拖入/点击、本地缩略图逐张可移除、扫描进度条、结果大数字）+
+  contact sheet 图库（QC 角标、工位/尺寸底栏、悬停下载/删除、点图看原图、工位与来源筛选、
+  分页、48/页）。
+- `DatasetsPanel`：新建向导改「作业单」（01 名称 / 02 字典来源含字典色卡 / 03 台面拖入）+ 账本式列表。
+- 后端 `serialize_dataset` 增 `image_count`（按 `upload/{ls_project_id}/` 前缀计数），
+  账本与上传下拉显示"已有 N 张"。
+- 移除台面上的 `InputFile` 依赖，改用自建拖放区（键盘可达：按钮语义 + focus ring）。
+
+**未做（可选后续）**：缺陷字典面板仍是上一轮的表格式卡片风格，与本页新语言未完全统一；
+如需一致，可把「发布字典」也改成"字典卡 + 色卡 + 发布历史时间线"。
+
+**踩坑记录（D5 收尾第四轮 · 样式整页失效）**：新样式文件最初命名 `Datasets.prefix.css`，
+而仓库的 postcss 插件 `web/postcss-prefix-lsf.cjs` 会把**所有 `*.prefix.css` 里的类名统一加 `lsf-` 前缀**
+（`processSelector`），JSX 里的 `className="aoi-ds__stage"` 便对不上产物里的 `.lsf-aoi-ds__stage`
+——Tailwind 工具类照常生效，自定义布局全丢，页面表现为"素材全部靠左顺序排列"。
+**修复**：文件改名 `Datasets.css`（插件只处理 `*.prefix.css`，且本页类名自带 `aoi-ds__` 命名空间，
+无需再加前缀），并在文件头写明原因。
+**教训（验证方法）**：上一轮用 `grep aoi-ds__stage` 做子串校验，`lsf-aoi-ds__stage` 同样命中，属于假阳性；
+现在改为①按浏览器实际 URL 拉取 `/react-app/style-*.css` 核对精确选择器；②脚本对账
+JSX 用到的类名 ↔ CSS 定义的类名（本次 63/63 全部命中，无遗漏）；③确认无 `lsf-aoi-ds__` 残留。
+另注：SPA 由 `REACT_APP_ROOT = web/dist/apps/labelstudio` 直接服务，`bun run build` 是关键步骤；
+`collectstatic` 负责把 manifest 复制进 `STATIC_ROOT/js/`，而 Django 在**模块导入期只读一次 manifest**
+（`core/utils/manifest_assets.py`），所以重建后必须**重启后端**，浏览器再强刷。
+
+## D5 收尾第五轮：缺陷字典面板统一视觉语言 + 首页入口改「建数据集」（2026-09-21）
+
+### 1. 缺陷字典面板统一（`DefectsPanel.jsx` + `Datasets.css`）
+- 摘要行（启用数 / 最新发布版本与时间）→ **条目账本**（色块 + 中文名 + 等宽 code + 风险/别称/启停 + 编辑/停用）
+  → **发布历史时间线**（最新常显、其余可展开；快照用"色卡 chips"呈现，不再嵌套表格）。
+- 编辑表单与新建向导同构（作业单三行：01 code / 02 名称 / 03 风险+别称），code 不可改的说明放在字段下方。
+- **颜色纪律**：条目色块取自**最新发布快照**（发布时才按 index 定色），未发布或不在快照里的条目留空心占位。
+- 发布结果改为「版本 + 回写项目数 + label config 预览（等宽 `<pre>`）」，去掉原表格卡片风。
+
+### 2. 首页入口：Create Project → Create Dataset（新增注入点 6）
+- `web/apps/labelstudio/src/pages/Home/HomePage.tsx`（上游文件）：
+  快捷动作与空态按钮文案改为 **Create Dataset**，点击 `history.push('/datasets')`（本仓库是 react-router v5，
+  首次误用 v6 的 `useNavigate` 导致构建 MISSING_EXPORT，已改正）；空态副文案改为数据集语境；
+  首页不再有"建项目"入口（原生 Projects 页已从菜单隐藏），故移除已无触发者的 `CreateProject`
+  弹窗与 `creationDialogOpen` 用法（死代码）。
+- 未动：首页 "Recent Projects" 卡片仍列标注项目（点进去就是标注页）。
+
+### 3. 验证方法（沿用第四轮教训）
+按浏览器实际 URL 核对：`/react-app/style-*.css` HTTP 200，含 **75 个裸 `.aoi-ds__*` 选择器、`lsf-` 残留 0**；
+脚本对账 JSX 类名 ↔ CSS 定义（75/75 命中、无多余定义）；`main-*.js` 内含 `Create Dataset` 与
+`case 'createDataset': push('/datasets')`；契约测试 353 passed。
+
+## D5 收尾第六轮：按钮样式统一 / 图库按数据集展示 / 风险色块（2026-09-21）
+
+### 1. 按钮统一（`AoiButton.jsx` + `Datasets.css`）
+`@humansignal/ui` 的 `compact + outlined` 在这套页面里偏"半透明灰"，与台面/账本不搭。新增薄封装
+`AoiButton`（样式全在 `.aoi-ds__btn*`，跟随主题语义 token）：**primary**＝墨色实底（浅色主题深墨、暗色自动反白）、
+**ghost**＝发丝描边（缺省）、**quiet**＝无边框文字、**danger**＝删除、**onStage**＝深底台上的反白按钮。
+四个面板（页头/向导/数据集账本/图片台面/字典）全部换过来；统一 30px 高、8px 圆角、12.5px/600。
+
+### 2. 图库按数据集展示（`ImagesPanel.jsx` + 服务端过滤）
+- **问题**：图库把全库图片摊平展示，看不出"哪个数据集里有什么"。
+- **后端**：`GET /api/datasets/images` 新增 `dataset_id`（按导入前缀 `upload/{ls_project_id}/` 过滤，未知 → `40401`）
+  与 `unassigned=true`（B 线回流等未归属图）；每张图返回 `dataset_id`；`serialize_dataset` 增
+  `preview_images`（**最多 5 张**）与既有 `image_count`。
+- **前端**：缺省视图＝**一个数据集一段**（标题 + 图片数 + 当前版本 + 最多 5 张小缩略图，多出的用「+N」块），
+  操作有「查看全部 N 张」「上传到这里」「去标注」；点进「查看全部」下钻为单数据集 contact sheet
+  （分页、工位/来源筛选、悬停下载/删除、点图看原图），可「返回按数据集」。未归属图单独一段。
+
+### 3. 缺陷字典：色块＝风险档颜色
+条目色块原来取"发布快照的类别色"（在用户的字典里恰好是黄/橙），语义与风险不匹配。现改为
+**风险档配色：低=绿 / 中=橙 / 高=红**，与右侧风险徽章同源（`uiTokens` 新增 `warning` 徽章种类，
+中风险不再借用 primary 靛蓝）；面板上标注「色块＝风险档」。类别的 8 色仍保留在**发布历史快照**里
+（那才是标注页标签的颜色）。
+
+### 验证
+新增契约用例 `TestImageGrouping`（5 例：按数据集过滤、未知数据集 40401、未归属排除数据集图、
+数据集预览图、5 张上限）；平台 A 全量 **260 passed**；biome 干净；build + collectstatic 完成，
+按浏览器 URL 复核 `/react-app/style-*.css`（89 个裸 `.aoi-ds__*` 选择器、`lsf-` 残留 0）。

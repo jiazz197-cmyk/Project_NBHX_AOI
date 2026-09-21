@@ -224,7 +224,10 @@ export const Menubar = ({ enabled, defaultOpened, defaultPinned, children, onSid
             >
               <Menu>
                 <Menu.Item label="Home" to="/" icon={<IconHome />} data-external exact />
-                <Menu.Item label="Projects" to="/projects" icon={<IconFolder />} data-external exact />
+                {/* D5 收尾第三轮：原生「Projects」菜单入口已移除——在原生页建项目/传图不会登记
+                    aoi_datasets.dataset/image（无字典、无版本、无 md5 去重与质检、无删除级联），
+                    属于"孤儿数据"旁路；AOI 建项目统一走 /datasets 的新建向导（自动生成标注项目）。
+                    标注仍走 /projects/{id}/data 深链（数据集列表「标注项目」列）。 */}
                 {/* AOI 二开入口（注入点 3，见 CHANGES.md）：按 aoi 权限点显隐（契约 §3.1，H23）。 */}
                 {/* D5：原生「Organization」入口已移除，组织管理由 /organization-admin 承载（仅 system.users）。 */}
                 {hasAoiPerm("datasets.view") && (

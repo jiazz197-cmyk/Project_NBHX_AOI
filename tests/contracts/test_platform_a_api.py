@@ -3745,6 +3745,133 @@ class TestDatasetDraftDictionaryFallback:
         project = Project.objects.get(pk=data['ls_project_id'])
         assert project.label_config == label_config.render_label_config(defects)
         assert str(dict_version.version) in project.description
+        # 响带回显所用字典来源（新建向导第②步要显示"用了哪一版"）
+        assert data['dict_source'] == 'latest_published'
+        assert data['dict_version'] == dict_version.version
+
+    def test_dict_source_active_defects_ignores_published_version(self, auth_client, org):
+        """D5 收尾第三轮：``dict_source=active_defects`` 强制用当前启用缺陷（draft），
+        即使存在已发布版本——用于"字典还没定版先拉数据"。"""
+        from aoi.datasets import label_config
+        from aoi.datasets.models import DefectClass
+        from projects.models import Project
+
+        _seed_published_dict()  # 已发布版本含 object_fault_type_01/02
+        DefectClass.objects.all().delete()
+        DefectClass.objects.create(code='panel_scratch_01', name_cn='面板划伤', risk_level=3)
+
+        response = auth_client.post(
+            '/api/datasets', {'name': '草稿字典', 'dict_source': 'active_defects'}, format='json'
+        )
+        assert response.status_code == 200, response.content[:300]
+        data = assert_envelope(response)['data']
+        assert data['dict_source'] == 'active_defects'
+        assert data['dict_version'] == 'draft'
+        project = Project.objects.get(pk=data['ls_project_id'])
+        assert project.label_config == label_config.render_label_config(
+            [{'code': 'panel_scratch_01', 'name_cn': '面板划伤', 'risk_level': 3}]
+        )
+        assert 'panel_scratch_01' in project.label_config
+        assert 'object_fault_type_01' not in project.label_config
+
+    def test_dict_source_active_defects_without_active_is_42200(self, auth_client, org):
+        from aoi.datasets.models import DefectClass
+
+        _seed_published_dict()
+        DefectClass.objects.all().delete()
+        response = auth_client.post(
+            '/api/datasets', {'name': '空启用缺陷', 'dict_source': 'active_defects'}, format='json'
+        )
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'defects' in body['data']['detail']['fields']
+
+    def test_dict_source_invalid_value_42200(self, auth_client, org):
+        response = auth_client.post(
+            '/api/datasets', {'name': '非法来源', 'dict_source': 'whatever'}, format='json'
+        )
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'dict_source' in body['data']['detail']['fields']
+
+
+@pytest.mark.django_db
+class TestImageGrouping:
+    """D5 收尾第六轮：图库「按数据集展示」——``dataset_id`` / ``unassigned`` 过滤 + 数据集预览图。"""
+
+    @pytest.fixture
+    def two_datasets(self, auth_client, import_surface, jpeg_bytes):
+        """在 import_surface 数据集里导入 1 张图，并另建一个空数据集作对照。"""
+        from aoi.datasets.models import Image
+
+        data = {'dataset_id': str(import_surface['dataset'].id), 'source': 'manual_real', 'station_code': 'ST-01'}
+        data['files[]'] = SimpleUploadedFile('a.jpg', jpeg_bytes, content_type='image/jpeg')
+        assert auth_client.post('/api/datasets/import', data, format='multipart').status_code == 200
+        image = Image.objects.get(md5=hashlib.md5(jpeg_bytes).hexdigest())
+        other = assert_envelope(auth_client.post('/api/datasets', {'name': '空数据集'}, format='json'))['data']
+        return import_surface['dataset'], other, image
+
+    def test_images_filter_by_dataset_id(self, auth_client, two_datasets):
+        dataset, other, image = two_datasets
+
+        scoped = assert_envelope(auth_client.get(f'/api/datasets/images?dataset_id={dataset.id}'))['data']
+        assert [item['id'] for item in scoped['items']] == [image.id]
+        assert scoped['items'][0]['dataset_id'] == dataset.id
+
+        empty = assert_envelope(auth_client.get(f"/api/datasets/images?dataset_id={other['id']}"))['data']
+        assert empty['items'] == [] and empty['total'] == 0
+
+    def test_images_filter_by_dataset_id_unknown_is_40401(self, auth_client):
+        response = auth_client.get('/api/datasets/images?dataset_id=99999')
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+    def test_unassigned_excludes_dataset_images(self, auth_client, two_datasets):
+        """未归属段只看不属于任何数据集的图（B 线回流等），不重复展示数据集里的图。"""
+        from aoi.datasets.models import Image
+        from django.utils import timezone
+
+        dataset, _other, image = two_datasets
+        # 手工塞一张 B 线回传形态的登记行（images/{md5}.jpg，不属于任何 upload/ 前缀）
+        stray = Image.objects.create(
+            object_key='images/deadbeef.jpg',
+            md5='deadbeef',
+            source='reflux_review',
+            qc_status='ok',
+            captured_at=timezone.now(),
+        )
+
+        body = assert_envelope(auth_client.get('/api/datasets/images?unassigned=true'))['data']
+        assert [item['id'] for item in body['items']] == [stray.id]
+        assert body['items'][0]['dataset_id'] is None
+        assert image.id not in [item['id'] for item in body['items']]
+
+    def test_dataset_payload_carries_preview_images(self, auth_client, two_datasets):
+        """数据集投影带 5 张以内的预览图 + 图片数（图库概览一个请求就能画）。"""
+        dataset, _other, image = two_datasets
+
+        datasets = assert_envelope(auth_client.get('/api/datasets?page_size=200'))['data']['items']
+        row = next(item for item in datasets if item['id'] == dataset.id)
+        assert row['image_count'] == 1
+        assert [item['id'] for item in row['preview_images']] == [image.id]
+        assert row['preview_images'][0]['station_code'] == 'ST-01'
+
+    def test_preview_images_capped_at_five(self, auth_client, import_surface):
+        """预览图上限 5 张：多出来的靠前端「+N」和下钻翻页拿，别把整库塞进数据集列表。"""
+        from aoi.datasets.models import Image
+        from aoi.datasets.serializers import DATASET_PREVIEW_IMAGE_LIMIT, serialize_dataset
+
+        project_id = import_surface['project'].id
+        for index in range(DATASET_PREVIEW_IMAGE_LIMIT + 3):
+            Image.objects.create(
+                object_key=f'upload/{project_id}/{index:08x}-f{index}.jpg',
+                md5=f'{index:032x}',
+                source='manual_real',
+                qc_status='ok',
+            )
+        row = serialize_dataset(import_surface['dataset'])
+        assert row['image_count'] == DATASET_PREVIEW_IMAGE_LIMIT + 3
+        assert len(row['preview_images']) == DATASET_PREVIEW_IMAGE_LIMIT
 
 
 @pytest.mark.django_db

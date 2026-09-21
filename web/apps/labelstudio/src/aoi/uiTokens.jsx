@@ -23,11 +23,12 @@ export const TABLE_HEAD_CELL =
 export const TABLE_BODY_CELL = "px-4 py-2.5 align-middle text-neutral-content";
 export const TABLE_ROW = "border-t border-neutral-border-subtle transition-colors hover:bg-neutral-surface-hover";
 
-/** 徽章：kind ∈ positive | negative | primary | neutral */
+/** 徽章：kind ∈ positive | negative | warning | primary | neutral（浅底深字，暗色自动翻转） */
 const BADGE_KIND = {
-  positive: "bg-positive-surface text-positive-content border-positive-border",
-  negative: "bg-negative-surface text-negative-content border-negative-border",
-  primary: "bg-primary-surface text-primary-content border-primary-border",
+  positive: "bg-positive-emphasis-subtle text-positive-content border-positive-border-subtler",
+  negative: "bg-negative-emphasis-subtle text-negative-content border-negative-border-subtler",
+  warning: "bg-warning-emphasis-subtle text-warning-content border-warning-border-subtler",
+  primary: "bg-primary-emphasis-subtle text-primary-content border-primary-border-subtler",
   neutral: "bg-neutral-surface-inset text-neutral-content-subtle border-neutral-border-subtle",
 };
 

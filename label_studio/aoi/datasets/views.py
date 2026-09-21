@@ -34,6 +34,10 @@ from drf_spectacular.utils import extend_schema
 
 logger = logging.getLogger(__name__)
 
+#: ``POST /api/datasets`` 的字典来源（D5 收尾第三轮；契约 §4.1）
+DICT_SOURCE_LATEST_PUBLISHED = 'latest_published'
+DICT_SOURCE_ACTIVE_DEFECTS = 'active_defects'
+
 
 def _payload(request) -> dict[str, Any]:
     return request.data if isinstance(request.data, dict) else {}
@@ -266,7 +270,15 @@ class ImportDetailView(AoiAPIView):
 # ---------------------------------------------------------------------------- images
 @extend_schema(tags=['aoi-datasets'])
 class ImageListView(AoiAPIView):
-    """``GET /api/datasets/images``（筛选/分页）。"""
+    """``GET /api/datasets/images``（筛选/分页）。
+
+    查询参数：``source`` / ``station_code`` / ``dataset_id``（D5 收尾第六轮新增）/
+    ``unassigned=true``（只看未归属任何数据集的图，如 B 线复审回流 ``images/{md5}.jpg``）。
+
+    为什么需要 ``dataset_id``：图片与数据集的关联靠导入路径前缀 ``upload/{ls_project_id}/``
+    （``aoi_datasets.image`` 里没有 dataset 外键），图库要「按数据集展示」就得在服务端按前缀过滤，
+    否则前端只能把全库图片拉下来自己分组。
+    """
 
     aoi_perm = 'datasets.view'
 
@@ -274,12 +286,54 @@ class ImageListView(AoiAPIView):
         qs = Image.objects.all().order_by('id')
         source = request.query_params.get('source')
         station_code = request.query_params.get('station_code')
+        dataset_id = request.query_params.get('dataset_id')
+        unassigned = str(request.query_params.get('unassigned', '')).lower() in {'1', 'true', 'yes'}
         if source:
             qs = qs.filter(source=source)
         if station_code:
             qs = qs.filter(station_code=station_code)
-        items = [serialize_image(obj) for obj in qs]
+        if dataset_id:
+            dataset = Dataset.objects.filter(pk=dataset_id).first() if str(dataset_id).isdigit() else None
+            if dataset is None or not dataset.ls_project_id:
+                raise AoiError(CODE_NOT_FOUND, f'dataset not found: {dataset_id}')
+            qs = qs.filter(object_key__startswith=_dataset_key_prefix(dataset.ls_project_id))
+        elif unassigned:
+            # 未归属：不属于任何已知数据集的导入前缀（例如 B 线回传 images/{md5}.jpg）
+            known_prefixes = [
+                _dataset_key_prefix(project_id)
+                for project_id in Dataset.objects.exclude(ls_project_id__isnull=True).values_list(
+                    'ls_project_id', flat=True
+                )
+            ]
+            for prefix in known_prefixes:
+                qs = qs.exclude(object_key__startswith=prefix)
+            qs = qs.exclude(object_key__startswith='upload/')  # upload/ 但项目已删的残留
+        # 反查每张图属于哪个数据集（按导入前缀），让前端分组/下钻都有归属信息
+        prefix_map = _dataset_prefix_map()
+        items = [serialize_image(obj, dataset_id=_dataset_id_for_key(obj.object_key, prefix_map)) for obj in qs]
         return self.ok(paginate(request, items))
+
+
+def _dataset_key_prefix(ls_project_id: int) -> str:
+    """数据集内导入图片的对象键前缀（导入路径由 ``create_file_upload`` 决定）。"""
+    return f'upload/{ls_project_id}/'
+
+
+def _dataset_prefix_map() -> dict[str, int]:
+    """``{'upload/<ls_project_id>/': dataset_id}``——图片→数据集归属的唯一依据（无外键）。"""
+    return {
+        _dataset_key_prefix(project_id): dataset_id
+        for dataset_id, project_id in Dataset.objects.exclude(ls_project_id__isnull=True).values_list(
+            'id', 'ls_project_id'
+        )
+    }
+
+
+def _dataset_id_for_key(object_key: str, prefix_map: dict[str, int]) -> int | None:
+    for prefix, dataset_id in prefix_map.items():
+        if object_key.startswith(prefix):
+            return dataset_id
+    return None
 
 
 @extend_schema(tags=['aoi-datasets'])
@@ -316,7 +370,7 @@ class ImageDetailView(AoiAPIView):
         obj = Image.objects.filter(pk=id).first()
         if obj is None:
             raise AoiError(CODE_NOT_FOUND, f'image not found: {id}')
-        return self.ok(serialize_image(obj))
+        return self.ok(serialize_image(obj, dataset_id=_dataset_id_for_key(obj.object_key, _dataset_prefix_map())))
 
     def delete(self, request, id: int):
         obj = Image.objects.filter(pk=id).first()
@@ -519,12 +573,19 @@ class DefectVersionListView(AoiAPIView):
             serialize_defect_version(
                 obj,
                 labels=_defects_from_snapshot(obj.snapshot),
-                publisher_name=publisher_names.get(obj.published_by),
+                # 发布人账号被删除时回落 user#id（不显示空白，便于追责）
+                publisher_name=publisher_names.get(obj.published_by)
+                or (f'user#{obj.published_by}' if obj.published_by else None),
                 is_latest=obj.id == latest_id,
             )
             for obj in qs
         ]
         return self.ok(paginate(request, items))
+
+
+def _latest_dict_version() -> DefectDictVersion | None:
+    """最新已发布缺陷字典版本（``id`` 越大越新；发布历史同序）。"""
+    return DefectDictVersion.objects.order_by('-id').first()
 
 
 def _publisher_names(user_ids: set[int]) -> dict[int, str]:
@@ -609,15 +670,22 @@ class DatasetListCreateView(AoiAPIView):
         cur_version = payload.get('cur_version')
         if cur_version is not None and not isinstance(cur_version, str):
             fields['cur_version'] = 'must be a string'
+        # D5 收尾第三轮（新建数据集向导）：字典来源可选
+        #   latest_published（默认）：用最新已发布版本快照，无版本时回退启用缺陷
+        #   active_defects：强制用当前启用缺陷（draft 语义），用于"字典还没定版先拉数据"
+        dict_source = payload.get('dict_source', DICT_SOURCE_LATEST_PUBLISHED)
+        if dict_source not in (DICT_SOURCE_LATEST_PUBLISHED, DICT_SOURCE_ACTIVE_DEFECTS):
+            fields['dict_source'] = f'must be one of {DICT_SOURCE_LATEST_PUBLISHED!r}/{DICT_SOURCE_ACTIVE_DEFECTS!r}'
         if fields:
             raise AoiError(CODE_UNPROCESSABLE, 'invalid dataset payload', fields=fields)
 
-        dict_version = DefectDictVersion.objects.order_by('-id').first()
+        dict_version = None if dict_source == DICT_SOURCE_ACTIVE_DEFECTS else _latest_dict_version()
         if dict_version is not None:
             defects = _defects_from_snapshot(dict_version.snapshot)
             dict_version_label = dict_version.version
         else:
-            # 无已发布字典版本：回退当前启用缺陷（draft 语义），允许先建数据集再发布字典
+            # 无已发布字典版本（或显式要求用启用缺陷）：回退当前启用缺陷（draft 语义），
+            # 允许先建数据集再发布字典
             defects = [
                 {'code': obj.code, 'name_cn': obj.name_cn, 'risk_level': obj.risk_level}
                 for obj in DefectClass.objects.filter(active=True).order_by('id')
@@ -655,10 +723,19 @@ class DatasetListCreateView(AoiAPIView):
             action='datasets.create',
             object_type='dataset',
             object_id=str(obj.pk),
-            detail={'name': obj.name, 'ls_project_id': project.id, 'dict_version': dict_version_label},
+            detail={
+                'name': obj.name,
+                'ls_project_id': project.id,
+                'dict_version': dict_version_label,
+                'dict_source': dict_source,
+            },
             request_id=self.request_id,
         )
-        return self.ok(serialize_dataset(obj), message='dataset created')
+        # 向导需要回显「用了哪版字典」：序列化结果补 dict_version/dict_source 两个只读字段
+        payload_out = serialize_dataset(obj)
+        payload_out['dict_version'] = dict_version_label
+        payload_out['dict_source'] = dict_source
+        return self.ok(payload_out, message='dataset created')
 
 
 @extend_schema(tags=['aoi-datasets'])
