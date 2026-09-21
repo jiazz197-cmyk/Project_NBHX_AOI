@@ -9,15 +9,14 @@ import { Button, SimpleCard, Spinner, Tooltip, Typography } from "@humansignal/u
 import { useQuery } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
+import { useHistory } from "react-router";
 import { useUpdatePageTitle } from "@humansignal/core";
 import { useAtom, useAtomValue, useSetAtom } from "jotai";
 import { HeidiTips } from "../../components/HeidiTips/HeidiTips";
 import { useAPI } from "../../providers/ApiProvider";
-import { CreateProject } from "../CreateProject/CreateProject";
 import { InviteLink } from "../Organization/PeoplePage/InviteLink";
 import type { Page } from "../types/Page";
 import {
-  creationDialogOpen,
   invitationOpen,
   locationKeyAtom,
   PROJECTS_TO_SHOW,
@@ -51,9 +50,12 @@ const resources = [
 
 const actions = [
   {
-    title: "Create Project",
+    // AOI 二开（注入点 6，见 CHANGES.md）：原生"建项目"入口改为"建数据集"。
+    // 原生 Projects 页已从菜单隐藏（在那边建项目/传图不会登记 aoi_datasets，属孤儿数据旁路），
+    // AOI 建项目统一走 /datasets 的新建向导（服务端自动生成标注项目 + 套用缺陷字典）。
+    title: "Create Dataset",
     icon: FolderSimplePlusIcon,
-    type: "createProject",
+    type: "createDataset",
   },
   {
     title: "Invite Members",
@@ -67,7 +69,7 @@ type Action = (typeof actions)[number]["type"];
 export const HomePage: Page = () => {
   const api = useAPI();
   const location = useLocation();
-  const [modalIsOpen, setModalIsOpen] = useAtom(creationDialogOpen);
+  const history = useHistory(); // react-router v5（本仓库），非 v6 的 useNavigate
   const [invitationIsOpen, setInvitationIsOpen] = useAtom(invitationOpen);
   const setLocationKey = useSetAtom(locationKeyAtom);
   const setProjectsData = useSetAtom(projectsDataAtom);
@@ -126,8 +128,8 @@ export const HomePage: Page = () => {
   const handleActions = (action: Action) => {
     return () => {
       switch (action) {
-        case "createProject":
-          setModalIsOpen(true);
+        case "createDataset":
+          history.push("/datasets");
           break;
         case "inviteMembers":
           setInvitationIsOpen(true);
@@ -193,13 +195,13 @@ export const HomePage: Page = () => {
                   <FolderOpenIcon />
                 </div>
                 <Typography variant="headline" size="small">
-                  Create your first project
+                  Create your first dataset
                 </Typography>
                 <Typography size="small" className="text-neutral-content-subtler">
-                  Import your data and set up the labeling interface to start annotating
+                  Name it, pick the defect dictionary, drop in your line images — the labeling project comes with it
                 </Typography>
-                <Button className="mt-4" onClick={() => setModalIsOpen(true)} aria-label="Create new project">
-                  Create Project
+                <Button className="mt-4" onClick={() => history.push("/datasets")} aria-label="Create new dataset">
+                  Create Dataset
                 </Button>
               </div>
             ) : isSuccess && data && sortedProjects.length > 0 ? (
@@ -238,7 +240,6 @@ export const HomePage: Page = () => {
           </div>
         </section>
       </div>
-      {modalIsOpen && <CreateProject onClose={() => setModalIsOpen(false)} />}
       <InviteLink opened={invitationIsOpen} onClosed={() => setInvitationIsOpen(false)} />
     </main>
   );

@@ -4,10 +4,13 @@
 """
 
 from .codes import (
+    FAULT_CODE_DEFAULT_PREFIX,
     FAULT_CODE_MAX_INDEX,
+    FAULT_CODE_MAX_LENGTH,
     FAULT_CODE_MIN_INDEX,
     FAULT_CODE_PALETTE,
     FAULT_CODE_PATTERN,
+    FAULT_CODE_PREFIX_MAX_LENGTH,
     FAULT_CODE_RE,
     color_for_index,
     fault_code_index,
@@ -48,6 +51,9 @@ __all__ = [
     'FAULT_CODE_RE',
     'FAULT_CODE_MIN_INDEX',
     'FAULT_CODE_MAX_INDEX',
+    'FAULT_CODE_MAX_LENGTH',
+    'FAULT_CODE_PREFIX_MAX_LENGTH',
+    'FAULT_CODE_DEFAULT_PREFIX',
     'FAULT_CODE_PALETTE',
     'is_valid_fault_code',
     'format_fault_code',

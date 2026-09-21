@@ -25,6 +25,7 @@ from aoi.common.settings import get_internal_token
 from conftest import TEST_USER_EMAIL, TEST_USER_PASSWORD
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import Resolver404, resolve
+from django.utils.dateparse import parse_datetime
 from rest_framework.test import APIClient
 from samples import (
     build_model_yaml_sample,
@@ -77,6 +78,9 @@ def payload_for(entry: dict, predict_request: dict | None = None):
     method, path = entry['method'], entry['path']
     if path == '/api/core/roles' and method == 'POST':
         return {'code': 'qa_reviewer', 'name_cn': 'QA 复审员'}
+    if path == '/api/core/users/{id}/roles':
+        # D4 起为全量覆盖语义：不能传空数组，否则会清空调用者自己的角色，后续用例全变 40300
+        return {'roles': ['super_admin']}
     if path == '/api/datasets/defects' and method in ('POST', 'PUT'):
         return {'code': 'object_fault_type_01', 'name_cn': '划伤', 'risk_level': 3}
     if path == '/api/datasets/defects/publish':
@@ -89,6 +93,8 @@ def payload_for(entry: dict, predict_request: dict | None = None):
         return {'dataset_version': '1.0.0', 'framework': 'yolo', 'preset': {'class_subset': ['object_fault_type_01']}}
     if path == '/api/train/models/{id}/approve':
         return {'decision': 'approve', 'note': 'ok'}
+    if path == '/api/train/models/publish' and method == 'POST':
+        return {'model_ids': [1]}
     if path == '/api/prelabel/tasks' and method == 'POST':
         return {'dataset_id': 1, 'model_ref': '3-yolo@ds1'}
     if path == '/api/prelabel/{task_id}/predict':
@@ -109,8 +115,9 @@ class TestEnvelopeAndAuth:
         body = assert_envelope(response)
         assert body['message'] == 'ok'
         assert body['data']['user_id'] is not None
-        assert body['data']['roles'] == []
-        assert body['data']['perms'] == []
+        # D4：RBAC 真实生效；`test_user` 持 super_admin → 全码
+        assert body['data']['roles'] == ['super_admin']
+        assert 'system.roles' in body['data']['perms']
 
     def test_unauthenticated_returns_40100(self, api_client):
         response = api_client.get('/api/core/permissions')
@@ -130,6 +137,14 @@ class TestEnvelopeAndAuth:
         assert set(body['data']) == {'total', 'items'}
 
     def test_idempotency_key_accepted(self, auth_client):
+        # D5：POST /api/datasets 服务端创建 LS 项目，前置是已发布缺陷字典版本（无 → 42200）
+        from aoi.datasets import label_config
+        from aoi.datasets.models import DefectDictVersion
+
+        DefectDictVersion.objects.create(
+            version='21000101-1',
+            snapshot=label_config.snapshot_from_defects(label_config_sample_defects()),
+        )
         response = auth_client.post(
             '/api/datasets', {'name': 'with-idem'}, format='json', HTTP_IDEMPOTENCY_KEY='idem-1'
         )
@@ -327,6 +342,17 @@ class TestPathContract:
         assert auth_client.get('/api/datasets/datasets').status_code == 404
         assert auth_client.get('/api/datasets/datasets/1').status_code == 404
 
+    def test_fixture_matches_generator_source(self):
+        """防回归：仓库里的 `aoi_api_paths.json` 必须等于 `samples.aoi_api_paths()` 的输出。
+
+        历史教训（2026-09-21）：fixture 是 `make_fixtures.py` 的**生成物**，却被手工维护，
+        生成器停在 d2 基线（缺 7 条 D5 路径）——只有 fixture↔OpenAPI 的断言，跑一次生成器
+        就会把 fixture 覆盖回旧基线且全文件重排。本用例把「单一来源」钉死。
+        """
+        from samples import aoi_api_paths
+
+        assert load_json('aoi_api_paths.json') == aoi_api_paths()
+
     def test_route_and_openapi_baseline(self):
         from drf_spectacular.generators import SchemaGenerator
 
@@ -468,6 +494,54 @@ def _reset_review_workitem():
     )
 
 
+def _advance_model_id_sequence():
+    """巡检 fixture 显式写 ``Model(pk=1)`` 不推进序列；建行前先把序列拨到 ``MAX(id)``。
+
+    不写的话 ``Model.objects.create()`` 会拿到 nextval=1，撞 ``model_pkey``。
+    """
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'SELECT setval(pg_get_serial_sequence(\'"aoi_training"."model"\', \'id\'), '
+            'GREATEST((SELECT COALESCE(MAX(id), 1) FROM "aoi_training"."model"), 1))'
+        )
+
+
+def _seed_retired_publish(version: str, *, deleted: bool = False):
+    """D7 已上传管理巡检种子：模型（已下线）+ 一条发布记录，可选预置软删标记。
+
+    与巡检顺序无关（delete/restore 各用独立 model_ref）；建行前先修序列（见上）。
+    """
+    from aoi.training.models import Model, ModelPublish
+
+    _advance_model_id_sequence()
+    model, _ = Model.objects.update_or_create(
+        version=version,
+        defaults={
+            'framework': 'yolo',
+            'dataset_version': '9',
+            'precision': 'fp32',
+            'class_names': ['object_fault_type_01'],
+            'gate_status': Model.GATE_PASSED,
+            'lifecycle': Model.LIFECYCLE_RETIRED,
+        },
+    )
+    publish, _ = ModelPublish.objects.update_or_create(
+        model_ref=model.version,
+        tag='1-yolo-ds9',
+        defaults={
+            'registry': 'docker.io',
+            'image': 'docker.io/rekal1018/aoi-model',
+            'digest': 'sha256:' + '0' * 64,
+            'status': ModelPublish.STATUS_PUBLISHED,
+            'deleted_at': parse_datetime('2026-09-21T02:00:00Z') if deleted else None,
+            'deleted_by': 1 if deleted else None,
+        },
+    )
+    return publish
+
+
 class TestAllStubs:
     @pytest.fixture(autouse=True)
     def _ingest_token(self, settings):
@@ -492,6 +566,38 @@ class TestAllStubs:
                 'lifecycle': Model.LIFECYCLE_APPROVED,
             },
         )
+
+    @pytest.fixture(autouse=True)
+    def _seed_import_surface(self, db, test_user):
+        """D5：导入/数据集创建真实化后，兜底端点巡检需要真实字典版本与数据集（含 LS 项目）。
+
+        - ``POST /api/datasets`` 要求已发布缺陷字典版本（无 → 42200）；
+        - ``POST /api/datasets/import`` 要求 dataset 已有 LS 项目（无 → 42200）。
+        """
+        from aoi.datasets import label_config
+        from aoi.datasets.ls_project import build_project_kwargs
+        from aoi.datasets.models import Dataset, DefectDictVersion
+        from organizations.models import Organization
+        from projects.models import Project
+
+        org = Organization.create_organization(created_by=test_user, title='AOI Regression')
+        test_user.active_organization = org
+        test_user.save(update_fields=['active_organization'])
+
+        defects = label_config_sample_defects()
+        dict_version = DefectDictVersion.objects.create(
+            version='21000101-1',
+            snapshot=label_config.snapshot_from_defects(defects),
+            published_by=test_user.id,
+        )
+        kwargs = build_project_kwargs(
+            dataset_name='stub-dataset',
+            version='draft',
+            dict_version=dict_version.version,
+            defects=defects,
+        )
+        project = Project.objects.create(organization=org, created_by=test_user, **kwargs)
+        Dataset.objects.create(name='stub-dataset', ls_project_id=project.id, created_by=test_user.id)
 
     def test_all_aoi_endpoints_return_200(self, api_client, test_user, jpeg_bytes):
         baseline = load_json('aoi_api_paths.json')
@@ -529,6 +635,38 @@ class TestAllStubs:
                 assert_envelope(response)
                 continue
 
+            if path == '/api/datasets/import/{job_id}':
+                # D5：未知 job → 40401（stub 已移除）
+                client.force_authenticate(user=test_user)
+                response = client.get(url)
+                assert response.status_code == 404, (method, path, response.content[:200])
+                assert_envelope(response, code=40401)
+                continue
+
+            if path == '/api/datasets/import' and method == 'POST':
+                # D5：multipart 导入（eager Celery 在请求内同步完成）
+                from aoi.datasets.models import Dataset
+
+                dataset = Dataset.objects.order_by('id').first()
+                client.force_authenticate(user=test_user)
+                response = client.post(
+                    url,
+                    {
+                        'dataset_id': str(dataset.id),
+                        'source': 'manual_real',
+                        'files[]': SimpleUploadedFile('a.jpg', jpeg_bytes, content_type='image/jpeg'),
+                    },
+                    format='multipart',
+                )
+                assert response.status_code == 200, (method, path, response.content[:200])
+                body = assert_envelope(response)
+                job_id = body['data']['job_id']
+                detail = client.get(f'/api/datasets/import/{job_id}')
+                assert detail.status_code == 200, detail.content[:200]
+                detail_body = assert_envelope(detail)
+                assert detail_body['data']['status'] == 'succeeded', detail_body['data']
+                continue
+
             if path == '/api/auth/login':
                 # 匿名端点：真实凭据换取令牌（凭证来自 conftest，与 test_user 同源）
                 client.force_authenticate(user=None)
@@ -547,6 +685,30 @@ class TestAllStubs:
             if path.startswith('/api/review/workitems/') and method == 'POST':
                 workitem = _reset_review_workitem()
                 url = f'/api/review/workitems/{workitem.id}/{path.rsplit("/", 1)[-1]}'
+            if path == '/api/train/models/{id}/retire':
+                # D7：retire 幂等，用专用种子模型，避免污染 model 1 的 publish 巡检链
+                from aoi.training.models import Model
+
+                _advance_model_id_sequence()
+                target, _ = Model.objects.update_or_create(
+                    version='90-yolo@ds9',
+                    defaults={
+                        'framework': 'yolo',
+                        'dataset_version': '9',
+                        'precision': 'fp32',
+                        'class_names': ['object_fault_type_01'],
+                        'gate_status': Model.GATE_PASSED,
+                        'lifecycle': Model.LIFECYCLE_APPROVED,
+                    },
+                )
+                url = f'/api/train/models/{target.id}/retire'
+            if path == '/api/train/publishes/{id}/delete':
+                # D7：软删要求 lifecycle=retired —— 专用种子（模型已下线 + 发布记录），与巡检顺序无关
+                publish = _seed_retired_publish('91-yolo@ds9')
+                url = f'/api/train/publishes/{publish.id}/delete'
+            if path == '/api/train/publishes/{id}/restore':
+                publish = _seed_retired_publish('92-yolo@ds9', deleted=True)
+                url = f'/api/train/publishes/{publish.id}/restore'
 
             if auth == 'jwt':
                 client.force_authenticate(user=test_user)
@@ -558,6 +720,14 @@ class TestAllStubs:
                 assert response.status_code == 200, (method, path)
                 content = b''.join(response.streaming_content)
                 assert b'"phase": "finished"' in content
+                continue
+
+            if path == '/api/datasets/images/{id}/raw':
+                # D6：二进制端点（回传图片字节），不回 aoi 信封 —— 校验字节本身
+                client.force_authenticate(user=test_user)
+                response = client.get(url)
+                assert response.status_code == 200, (method, path, response.status_code)
+                assert b''.join(response.streaming_content) == jpeg_bytes
                 continue
 
             if auth == 'optional-internal-token':
@@ -608,6 +778,35 @@ class TestLabelConfig:
         assert expected.startswith('<View><Image name="image" value="$image"/><RectangleLabels name="defect"')
         assert 'object_fault_type_01' in expected
         assert 'object_fault_type_02' in expected
+        # D5 收尾 #2：value=code（结果值/导出契约不变）+ html=中文展示名（标注页显示中文）
+        assert 'value="object_fault_type_01" html="划伤"' in expected
+        assert 'value="object_fault_type_02" html="凹坑"' in expected
+
+    def test_html_display_name_is_separate_from_result_value(self):
+        """展示名走 html，结果值仍是 code——用 alias 会污染标注结果（LSF selectedValues 取 alias）。"""
+        from aoi.datasets.label_config import render_label_config
+
+        xml = render_label_config([{'code': 'object_fault_type_01', 'name_cn': '划伤', 'index': 0}])
+        assert 'alias=' not in xml
+        assert 'value="object_fault_type_01"' in xml
+        assert 'html="划伤"' in xml
+        # 无 name_cn 时退回纯 value，保持向后兼容
+        xml_no_name = render_label_config([{'code': 'object_fault_type_01', 'index': 0}])
+        assert 'html=' not in xml_no_name
+
+    def test_defects_from_snapshot_falls_back_to_dictionary(self, auth_client):
+        """旧快照（只有 index/color）也能渲染出中文名：回退查当前缺陷字典。"""
+        from aoi.datasets import label_config
+        from aoi.datasets.models import DefectClass
+        from aoi.datasets.views import _defects_from_snapshot
+
+        DefectClass.objects.create(code='object_fault_type_01', name_cn='划伤', risk_level=3)
+        legacy = {'labels': {'object_fault_type_01': {'index': 0, 'color': '#FF4D4F'}}}
+        defects = _defects_from_snapshot(legacy)
+        assert defects == [
+            {'code': 'object_fault_type_01', 'index': 0, 'color': '#FF4D4F', 'name_cn': '划伤', 'risk_level': 3}
+        ]
+        assert label_config.render_label_config(defects).count('html="划伤"') == 1
 
     def test_label_config_passes_ls_native_validator(self):
         """T2.2 产出的 label config 必须通过 LS 自身解析器（不是自定义格式）。"""
@@ -626,12 +825,15 @@ class TestLabelConfig:
         assert body['data']['label_config'] == load_text('label_config_expected.xml')
 
         row = DefectDictVersion.objects.get(version=body['data']['version'])
+        # D5 收尾 #2：快照同时带展示字段（name_cn/risk_level），旧快照缺这些字段时读侧回退查字典
         assert row.snapshot == {
             'labels': {
-                'object_fault_type_01': {'index': 0, 'color': '#FF4D4F'},
-                'object_fault_type_02': {'index': 1, 'color': '#FA8C16'},
+                'object_fault_type_01': {'index': 0, 'color': '#FF4D4F', 'name_cn': '划伤', 'risk_level': None},
+                'object_fault_type_02': {'index': 1, 'color': '#FA8C16', 'name_cn': '凹坑', 'risk_level': None},
             }
         }
+        # 发布响应新增 projects_synced（回写已建标注项目的数量），便于前端提示
+        assert body['data']['projects_synced'] >= 0
 
     def test_invalid_code_42200(self, auth_client):
         response = auth_client.post(
@@ -1053,6 +1255,134 @@ class TestIngestFindings:
         assert response.status_code == 422
         assert_envelope(response, code=42200)
 
+    # ------------------------------------------------------------------ D6：图片落对象存储
+    @staticmethod
+    def _unique_jpeg(seed: int) -> bytes:
+        """生成唯一内容的有效 JPEG（media 目录跨用例共享，md5 必须互不相同才能触发新写入）。"""
+        from io import BytesIO
+
+        from PIL import Image as PILImage
+
+        buf = BytesIO()
+        PILImage.new('RGB', (16, 16), color=(seed % 256, 0, 0)).save(buf, format='JPEG')
+        return buf.getvalue()
+
+    def test_suspicious_image_bytes_stored_and_served(self, api_client, test_user, settings):
+        """suspicious 的图片字节真实落存储（生产 MinIO，测试 = MEDIA_ROOT），raw 端点可回原字节。"""
+        from aoi.datasets.models import Image
+        from django.core.files.storage import default_storage
+
+        payload = self._unique_jpeg(11)
+        client = APIClient()
+        response = self._post(
+            client, self._meta(), file=SimpleUploadedFile('ST01_1042.jpg', payload, content_type='image/jpeg')
+        )
+        first = assert_envelope(response)['data']
+
+        image = Image.objects.get(pk=first['image_id'])
+        assert image.object_key.startswith('images/') and image.object_key.endswith('.jpg')
+        assert image.qc_status == 'ok' and image.width == 16
+        assert default_storage.exists(image.object_key)
+        assert default_storage.open(image.object_key).read() == payload
+
+        viewer = APIClient()
+        viewer.force_authenticate(user=test_user)
+        served = viewer.get(f'/api/datasets/images/{image.id}/raw')
+        assert served.status_code == 200
+        assert b''.join(served.streaming_content) == payload
+
+    def test_duplicate_ingest_does_not_duplicate_storage_object(self, api_client, settings):
+        from aoi.datasets.models import Image
+        from django.core.files.storage import default_storage
+
+        payload = self._unique_jpeg(12)
+        client = APIClient()
+        for _ in range(2):
+            response = self._post(
+                client, self._meta(), file=SimpleUploadedFile('a.jpg', payload, content_type='image/jpeg')
+            )
+            assert response.status_code == 200
+        assert Image.objects.count() == 1
+        image = Image.objects.first()
+        assert default_storage.exists(image.object_key)
+
+    def test_storage_failure_rolls_back_everything_50300(self, api_client, monkeypatch):
+        """存储不可用 → 50300 且 image/fact/workitem 全部回滚（不留「有登记无字节」的半写）。"""
+        from aoi.datasets.models import Image
+        from aoi.review.models import InspectionFact, ReviewWorkitem
+        from django.core.files.storage import default_storage
+
+        def boom(*args, **kwargs):
+            raise ConnectionError('minio unreachable')
+
+        # exists 拨 False：排除「同 md5 字节已在共享 media 目录」的幂等短路，强制走到 save
+        monkeypatch.setattr(default_storage, 'exists', lambda key: False)
+        monkeypatch.setattr(default_storage, 'save', boom)
+        payload = self._unique_jpeg(13)
+        response = self._post(
+            APIClient(),
+            self._meta(seq=1051),
+            file=SimpleUploadedFile('a.jpg', payload, content_type='image/jpeg'),
+        )
+        assert response.status_code == 503
+        assert_envelope(response, code=50300)
+        assert Image.objects.count() == 0
+        assert InspectionFact.objects.count() == 0
+        assert ReviewWorkitem.objects.count() == 0
+
+    def test_bad_kind_with_undecodable_image_keeps_evidence(self, api_client, settings):
+        """bad 分支带坏字节：仍落存储当证据，登记 qc=rejected（不拒绝整条回传）。"""
+        from aoi.datasets.models import Image
+        from django.core.files.storage import default_storage
+
+        payload = b'broken-camera-bytes-1'
+        response = self._post(
+            APIClient(),
+            self._meta(kind='bad', error_code='decode_failed', verdict=None, boxes=[], seq=8888),
+            file=SimpleUploadedFile('broken.jpg', payload, content_type='image/jpeg'),
+        )
+        assert response.status_code == 200
+        first = assert_envelope(response)['data']
+        image = Image.objects.get(pk=first['image_id'])
+        assert image.qc_status == 'rejected' and image.qc_reason == 'decode_failed'
+        assert image.size_bytes == len(payload)
+        assert default_storage.open(image.object_key).read() == payload
+
+    def test_workitem_list_embeds_fact_and_image(self, api_client, test_user):
+        """D7 加性投影：队列 item 内嵌 fact（工位/序号）与 image（含可加载 url），复审页看图用。"""
+        payload = self._unique_jpeg(21)
+        response = self._post(
+            APIClient(),
+            self._meta(seq=1071),
+            file=SimpleUploadedFile('a.jpg', payload, content_type='image/jpeg'),
+        )
+        data = assert_envelope(response)['data']
+
+        viewer = APIClient()
+        viewer.force_authenticate(user=test_user)
+        listing = assert_envelope(viewer.get('/api/review/workitems'))['data']
+        item = next(entry for entry in listing['items'] if entry['id'] == data['workitem_id'])
+        assert item['fact']['station_code'] == 'ST01'
+        assert item['fact']['seq'] == 1071
+        assert item['fact']['verdict'] == 'recheck'
+        assert item['image']['object_key'].startswith('images/')
+        assert item['image']['url'] == f'/api/datasets/images/{item["image"]["id"]}/raw'
+        assert item['image']['width'] == 16
+
+        # 无 fact/image 的预标工作项：两块为 null，不伪造
+        from aoi.review.models import ReviewWorkitem
+
+        prelabel = ReviewWorkitem.objects.create(
+            source=ReviewWorkitem.SOURCE_PRELABEL,
+            dataset_version_id=1,
+            model_ref='3-yolo@ds1',
+            verdict='recheck',
+            bucket=ReviewWorkitem.BUCKET_MEDIUM,
+        )
+        listing2 = assert_envelope(viewer.get('/api/review/workitems'))['data']
+        prelabel_item = next(entry for entry in listing2['items'] if entry['id'] == prelabel.id)
+        assert prelabel_item['fact'] is None and prelabel_item['image'] is None
+
 
 @pytest.mark.django_db
 class TestIngestFindingsFixtureContract:
@@ -1082,9 +1412,7 @@ class TestIngestFindingsFixtureContract:
 
     def test_suspicious_sample_roundtrip_and_idempotency(self, jpeg_bytes):
         suspicious = next(item for item in self._samples() if item['kind'] == 'suspicious')
-        response = self._post(
-            suspicious, file=SimpleUploadedFile('sample.jpg', jpeg_bytes, content_type='image/jpeg')
-        )
+        response = self._post(suspicious, file=SimpleUploadedFile('sample.jpg', jpeg_bytes, content_type='image/jpeg'))
         assert response.status_code == 200, response.content[:300]
         data = assert_envelope(response)['data']
         assert set(data) == {'fact_id', 'workitem_id', 'image_id', 'bad_image_id', 'duplicated'}
@@ -1570,7 +1898,9 @@ class TestRegistryPushClient:
         params.update(overrides)
         return RegistryPushClient(**params)
 
-    def _mock_hub(self, mock, artifacts, *, manifest_digest=None, blob_receipt=True, manifest_receipt=True, readback=None):
+    def _mock_hub(
+        self, mock, artifacts, *, manifest_digest=None, blob_receipt=True, manifest_receipt=True, readback=None
+    ):
         """搭一个最小 Registry v2 假仓库。
 
         ``blob_receipt`` / ``manifest_receipt`` 控制仓库**是否回 ``Docker-Content-Digest`` 回执**：
@@ -1828,15 +2158,12 @@ class TestPublishRegistryMode:
         assert row.status == ModelPublish.STATUS_PUBLISHED
         assert row.digest == data['digest']
 
-    def test_same_model_rebuilt_later_yields_different_digest(self, auth_client, settings, monkeypatch):
-        """**D7 待修事实锁定**：同一个 model_ref 在**不同时刻**重建 → digest 不同。
+    def test_same_model_rebuilt_later_yields_same_digest(self, auth_client, settings, monkeypatch):
+        """D7 验收附加项 ②：同一 model_ref 在**不同时刻**重建推送 → digest 必须相等（跨平台契约 §2.4）。
 
-        根因：``model.yaml`` 里写了 ``created_at``（``model_yaml._utcnow()``，秒级）与发布器传入的
-        ``published_at``，二者都参与 manifest 字节 → 影响跨平台契约 §2.2「同 tag 不同 digest → 禁止覆盖」的判定。
-        修法见 ``docs/MVP开发计划.md`` §5 D7「digest 可复现」；修好后本用例应改成断言两次相等。
-
-        这里显式把两次构建钉在**不同秒**（而非依赖真实时钟）：同一秒内重建产物本来就可复现，
-        真正不可复现的是「换个时刻重建」。
+        镜像内 model.yaml 零墙钟（``created_at`` 固定 epoch、不写 ``published_at``），时间信息只落
+        A 侧 ``model_publish.published_at`` / ``config_snapshot``。两次发布把发布时间钉在**不同时刻**
+        （而非依赖真实时钟碰巧同秒），断言 digest 相等。
         """
         from aoi.training.models import Model, ModelPublish
 
@@ -1845,17 +2172,19 @@ class TestPublishRegistryMode:
 
         digests = []
         for stamp in ('2026-09-11T02:25:00Z', '2026-09-11T02:29:00Z'):
-            monkeypatch.setattr('aoi.training.model_yaml._utcnow', lambda stamp=stamp: stamp)
-            monkeypatch.setattr('aoi.training.publish._utcnow_iso', lambda stamp=stamp: stamp)
+            monkeypatch.setattr('aoi.training.publish.django_timezone.now', lambda stamp=stamp: parse_datetime(stamp))
             model.lifecycle = Model.LIFECYCLE_APPROVED
             model.save(update_fields=['lifecycle'])
             ModelPublish.objects.filter(model_ref=model.version).delete()
             with requests_mock.Mocker() as mock:
                 self._mock_registry(mock)
                 response = auth_client.post(f'/api/train/models/{model.id}/publish', {}, format='json')
-            digests.append(assert_envelope(response)['data']['digest'])
+            data = assert_envelope(response)['data']
+            digests.append(data['digest'])
+            row = ModelPublish.objects.get(model_ref=model.version)
+            assert row.published_at.isoformat() == parse_datetime(stamp).isoformat()
 
-        assert digests[0] != digests[1], '若相等说明 model.yaml 已不再带时间戳 —— 请更新本用例与 D7 计划项'
+        assert digests[0] == digests[1], '同内容重推 digest 不等：镜像字节又被墙钟污染（契约 §2.4 可复现被破坏）'
 
     def test_registry_without_receipt_fails_publish(self, auth_client, settings):
         """仓库不回 ``Docker-Content-Digest`` → 发布失败 50300、状态 failed，绝不落「本地自算 digest」。"""
@@ -1876,6 +2205,184 @@ class TestPublishRegistryMode:
         assert row.status == ModelPublish.STATUS_FAILED
         assert row.digest in (None, '')  # 不落「本地自算值」当仓库确认值
         assert 'receipt missing' in (row.error_message or '')
+
+
+@pytest.mark.django_db
+class TestBatchPublish:
+    """D7 批量上传：逐条独立执行，某条失败不影响其余（契约 §4.2 / 跨平台契约 §2.4）。"""
+
+    def _model(self, version, *, lifecycle='approved', precision='fp32', **overrides):
+        from aoi.training.models import Model
+
+        defaults = {
+            'version': version,
+            'framework': 'yolo',
+            'dataset_version': '9',
+            'precision': precision,
+            'class_names': ['object_fault_type_01'],
+            'cover_classes': ['object_fault_type_01'],
+            'gate_status': Model.GATE_PASSED,
+            'lifecycle': lifecycle,
+        }
+        defaults.update(overrides)
+        return Model.objects.create(**defaults)
+
+    def test_batch_publishes_each_item_independently(self, auth_client):
+        from aoi.training.models import Model, ModelPublish
+
+        ok_model = self._model('40-yolo@ds9')
+        blocked_model = self._model('41-yolo@ds9', lifecycle='candidate')
+
+        response = auth_client.post(
+            '/api/train/models/publish',
+            {'model_ids': [ok_model.id, blocked_model.id]},
+            format='json',
+        )
+        body = assert_envelope(response)['data']
+        assert body['succeeded'] == 1 and body['failed'] == 1
+        first, second = body['results']
+        assert first['model_id'] == ok_model.id and first['status'] == 'published'
+        assert first['tag'] == '40-yolo-ds9' and first['publish_id']
+        assert second['model_id'] == blocked_model.id and second['status'] == 'failed'
+        assert 'approved' in second['error']
+
+        # 失败条目不产生发布记录；成功条目正常推进生命周期
+        assert ModelPublish.objects.filter(model_ref='41-yolo@ds9').exists() is False
+        assert Model.objects.get(pk=blocked_model.id).lifecycle == Model.LIFECYCLE_CANDIDATE
+
+    def test_batch_publish_empty_or_non_list_42200(self, auth_client):
+        for payload in ({}, {'model_ids': []}, {'model_ids': '1'}, {'model_ids': [True]}):
+            response = auth_client.post('/api/train/models/publish', payload, format='json')
+            assert response.status_code == 422, payload
+            assert_envelope(response, code=42200)
+
+    def test_batch_publish_unknown_id_fails_per_item(self, auth_client):
+        response = auth_client.post('/api/train/models/publish', {'model_ids': [424242]}, format='json')
+        body = assert_envelope(response)['data']
+        assert body['results'] == [{'model_id': 424242, 'status': 'failed', 'error': 'model not found'}]
+
+    def test_batch_publish_precision_override_tag(self, auth_client):
+        from aoi.training.models import ModelPublish
+
+        model = self._model('42-yolo@ds9')
+        response = auth_client.post(
+            '/api/train/models/publish', {'model_ids': [model.id], 'precision': 'fp16'}, format='json'
+        )
+        data = assert_envelope(response)['data']['results'][0]
+        assert data['tag'] == '42-yolo-ds9-fp16'
+        assert ModelPublish.objects.get(model_ref='42-yolo@ds9', tag='42-yolo-ds9-fp16').status == 'published'
+
+
+@pytest.mark.django_db
+class TestPublishManagement:
+    """D7 已上传管理：下线 / 软删（只清 A 侧记录）/ 恢复（契约 §4.2 / 跨平台契约 §2.4）。"""
+
+    def _published_model(self, auth_client, version):
+        """造一个「已发布」状态：approved 模型 + fake 模式发布一次，返回 (model, publish)。"""
+        from aoi.training.models import Model, ModelPublish
+
+        model = Model.objects.create(
+            version=version,
+            framework='yolo',
+            dataset_version='9',
+            precision='fp32',
+            class_names=['object_fault_type_01'],
+            cover_classes=['object_fault_type_01'],
+            gate_status=Model.GATE_PASSED,
+            lifecycle=Model.LIFECYCLE_APPROVED,
+        )
+        response = auth_client.post(f'/api/train/models/{model.id}/publish', {}, format='json')
+        assert response.status_code == 200, response.content[:200]
+        return model, ModelPublish.objects.get(model_ref=version)
+
+    def test_delete_requires_retired_model(self, auth_client):
+        from aoi.training.models import Model, ModelPublish
+
+        model, publish = self._published_model(auth_client, '50-yolo@ds9')
+        response = auth_client.post(f'/api/train/publishes/{publish.id}/delete', {}, format='json')
+        assert response.status_code == 409
+        body = assert_envelope(response, code=40900)
+        assert body['data']['detail']['fields']['lifecycle'] == Model.LIFECYCLE_PUBLISHED
+
+        # 下线是删除前置条件
+        assert auth_client.post(f'/api/train/models/{model.id}/retire', {}, format='json').status_code == 200
+        assert Model.objects.get(pk=model.id).lifecycle == Model.LIFECYCLE_RETIRED
+
+        delete = auth_client.post(f'/api/train/publishes/{publish.id}/delete', {}, format='json')
+        assert delete.status_code == 200
+        publish.refresh_from_db()
+        assert publish.deleted_at is not None and publish.deleted_by is not None
+        # 只软删 A 侧记录：digest/镜像地址不动，仓库镜像保留（B 仍可拉取）
+        assert publish.digest and publish.status == ModelPublish.STATUS_PUBLISHED
+        assert Model.objects.get(pk=model.id).lifecycle == Model.LIFECYCLE_RETIRED
+
+    def test_delete_is_idempotent_and_audited_once(self, auth_client):
+        from aoi.audit.models import AuditLog
+        from aoi.training.models import ModelPublish
+
+        model, publish = self._published_model(auth_client, '51-yolo@ds9')
+        auth_client.post(f'/api/train/models/{model.id}/retire', {}, format='json')
+        assert auth_client.post(f'/api/train/publishes/{publish.id}/delete', {}, format='json').status_code == 200
+        again = auth_client.post(f'/api/train/publishes/{publish.id}/delete', {}, format='json')
+        assert again.status_code == 200
+        assert AuditLog.objects.filter(action='model.publish.deleted', object_id=str(publish.id)).count() == 1
+        assert ModelPublish.objects.get(pk=publish.id).deleted_at is not None
+
+    def test_publishes_list_hides_deleted_and_restores(self, auth_client):
+        from aoi.training.models import Model
+
+        model, publish = self._published_model(auth_client, '52-yolo@ds9')
+        auth_client.post(f'/api/train/models/{model.id}/retire', {}, format='json')
+        auth_client.post(f'/api/train/publishes/{publish.id}/delete', {}, format='json')
+
+        visible = assert_envelope(auth_client.get('/api/train/publishes'))['data']
+        assert visible['items'] == []
+        with_deleted = assert_envelope(auth_client.get('/api/train/publishes?include_deleted=1'))['data']
+        row = next(item for item in with_deleted['items'] if item['publish_id'] == publish.id)
+        assert row['deleted_at'] is not None
+        assert row['model_id'] == model.id
+        assert row['model_lifecycle'] == Model.LIFECYCLE_RETIRED
+
+        restore = auth_client.post(f'/api/train/publishes/{publish.id}/restore', {}, format='json')
+        assert restore.status_code == 200
+        publish.refresh_from_db()
+        model.refresh_from_db()
+        assert publish.deleted_at is None and publish.deleted_by is None
+        # 恢复零成本：仓库镜像仍在（digest 不变），lifecycle 回 published
+        assert publish.digest is not None
+        assert model.lifecycle == Model.LIFECYCLE_PUBLISHED
+
+    def test_publishes_list_filters(self, auth_client):
+        _, publish = self._published_model(auth_client, '53-yolo@ds9')
+        self._published_model(auth_client, '54-yolo@ds9')
+
+        by_ref = assert_envelope(auth_client.get('/api/train/publishes?model_ref=53-yolo@ds9'))['data']
+        assert [item['publish_id'] for item in by_ref['items']] == [publish.id]
+        by_status = assert_envelope(auth_client.get('/api/train/publishes?status=published'))['data']
+        assert by_status['total'] == 2
+
+    def test_delete_and_restore_unknown_40401(self, auth_client):
+        for path in ('/api/train/publishes/424242/delete', '/api/train/publishes/424242/restore'):
+            response = auth_client.post(path, {}, format='json')
+            assert response.status_code == 404, path
+            assert_envelope(response, code=40401)
+
+    def test_retire_unknown_40401(self, auth_client):
+        response = auth_client.post('/api/train/models/424242/retire', {}, format='json')
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+    def test_publish_management_is_admin_only(self, client_for):
+        """批量上传/下线/删除/恢复受 ``training.publish`` 控制（operator → 40300）。"""
+        for method, path, payload in (
+            ('post', '/api/train/models/publish', {'model_ids': [1]}),
+            ('post', '/api/train/models/1/retire', {}),
+            ('post', '/api/train/publishes/1/delete', {}),
+            ('post', '/api/train/publishes/1/restore', {}),
+        ):
+            response = getattr(client_for('operator'), method)(path, payload, format='json')
+            assert response.status_code == 403, path
+            assert_envelope(response, code=40300)
 
 
 @pytest.mark.django_db
@@ -2077,6 +2584,120 @@ class TestStateMachineInjection:
         body = assert_envelope(response, code=42200)
         assert 'code' in body['data']['detail']['fields']
 
+    def test_defect_accepts_variable_prefix_code(self, auth_client):
+        """D5 收尾第二轮：code 前缀是两段可变英文词 <object>_<fault_type>（超集，存量写法仍合法）。"""
+        response = auth_client.post(
+            '/api/datasets/defects',
+            {'code': 'panel_scratch_07', 'name_cn': '面板划伤', 'risk_level': 3},
+            format='json',
+        )
+        assert response.status_code == 200
+        created = assert_envelope(response)['data']
+        assert created['code'] == 'panel_scratch_07'
+
+        # 发布后 label config 用该 code 作 value，html 用中文名
+        published = assert_envelope(auth_client.post('/api/datasets/defects/publish', {}, format='json'))['data']
+        assert 'value="panel_scratch_07" html="面板划伤"' in published['label_config']
+
+        # 历史里也能看到（含旧式 object_fault_type_* 条目共存）
+        history = assert_envelope(auth_client.get('/api/datasets/defects/versions'))['data']['items'][0]
+        assert 'panel_scratch_07' in [label['code'] for label in history['labels']]
+
+    def test_defect_rejects_malformed_variable_prefix(self, auth_client):
+        for bad_code in ('Panel_scratch_01', 'panel-scratch_01', 'panel_scratch_1', 'panel_scratch_00'):
+            response = auth_client.post(
+                '/api/datasets/defects',
+                {'code': bad_code, 'name_cn': '非法', 'risk_level': 1},
+                format='json',
+            )
+            assert response.status_code == 422, bad_code
+            assert_envelope(response, code=42200)
+
+
+@pytest.mark.django_db
+class TestDefectPublishHistory:
+    """D5 收尾 #1：发布历史可见（此前只写库，前端刷新即失）。"""
+
+    def test_versions_list_after_publish(self, auth_client):
+        from aoi.datasets.models import DefectDictVersion
+
+        first = assert_envelope(
+            auth_client.post(
+                '/api/datasets/defects/publish',
+                {'defects': [{'code': 'object_fault_type_01', 'name_cn': '划伤', 'risk_level': 3, 'index': 0}]},
+                format='json',
+            )
+        )['data']
+        second = assert_envelope(
+            auth_client.post(
+                '/api/datasets/defects/publish',
+                {
+                    'defects': [
+                        {'code': 'object_fault_type_01', 'name_cn': '划伤', 'risk_level': 3, 'index': 0},
+                        {'code': 'object_fault_type_02', 'name_cn': '凹坑', 'risk_level': 2, 'index': 1},
+                    ]
+                },
+                format='json',
+            )
+        )['data']
+
+        response = auth_client.get('/api/datasets/defects/versions')
+        assert response.status_code == 200
+        body = assert_envelope(response)['data']
+        items = body['items']
+        assert [item['version'] for item in items] == [second['version'], first['version']]  # 最新在前
+        assert items[0]['is_latest'] is True and items[1]['is_latest'] is False
+        assert items[0]['defect_count'] == 2 and items[1]['defect_count'] == 1
+        assert items[0]['published_at'] is not None
+        assert items[0]['published_by_name']  # 发布人可读名（邮箱/用户名）
+        assert items[0]['labels'][0] == {
+            'code': 'object_fault_type_01',
+            'index': 0,
+            'color': '#FF4D4F',
+            'name_cn': '划伤',
+            'risk_level': 3,
+        }
+        assert DefectDictVersion.objects.count() == 2
+
+    def test_versions_empty_is_ok(self, auth_client):
+        from aoi.datasets.models import DefectDictVersion
+
+        DefectDictVersion.objects.all().delete()
+        body = assert_envelope(auth_client.get('/api/datasets/defects/versions'))['data']
+        assert body['items'] == []
+
+    def test_publish_resyncs_existing_projects(self, auth_client, test_user):
+        """发布要把新的 label config（含中文展示名 html）回写到已建 AOI 标注项目。"""
+        from aoi.datasets.models import Dataset
+        from projects.models import Project
+
+        project = Project.objects.create(
+            title='sync-target',
+            label_config='<View><Image name="image" value="$image"/></View>',
+            organization=test_user.active_organization,
+            created_by=test_user,
+        )
+        Dataset.objects.create(name='sync-ds', ls_project_id=project.id, created_by=test_user.id)
+
+        published = assert_envelope(
+            auth_client.post(
+                '/api/datasets/defects/publish',
+                {'defects': [{'code': 'object_fault_type_01', 'name_cn': '划伤', 'risk_level': 3, 'index': 0}]},
+                format='json',
+            )
+        )['data']
+        assert published['projects_synced'] == 1
+
+        project.refresh_from_db()
+        assert project.label_config == published['label_config']
+        assert 'html="划伤"' in project.label_config
+        # 结果值不变：value 仍是 code（已有标注不会失效）
+        assert 'value="object_fault_type_01"' in project.label_config
+
+    def test_publish_history_requires_auth(self, client):
+        """历史是只读查询，但同样要鉴权（匿名 → 401，不泄露字典版本）。"""
+        assert client.get('/api/datasets/defects/versions').status_code == 401
+
 
 @pytest.mark.django_db
 class TestLabelConfigIndexConsistency:
@@ -2251,18 +2872,1556 @@ class TestRBACDeferral:
     """契约 §13.1 的 RBAC（三角色矩阵/40300/缓存失效）在 D4 落地；D2 只能冻结现状。"""
 
     @pytest.mark.django_db
-    def test_d2_permission_is_authenticated_only(self, auth_client):
-        from aoi.common.permissions import aoi_permission
-
-        permission = aoi_permission('training.publish')()
-
-        class _Request:
-            user = type('U', (), {'is_authenticated': True})()
-
-        assert permission.has_permission(_Request(), None) is True
-
-    @pytest.mark.django_db
     def test_anonymous_is_40100(self, api_client):
         response = api_client.get('/api/datasets')
         assert response.status_code == 401
         assert_envelope(response, code=40100)
+
+
+# --------------------------------------------------------------------------- RBAC（D4，契约 §3.1）
+#: 38 码全表（**硬编码**：锁定契约本身，不读实现常量，避免测试与实现同源互相掩护）
+ALL_PERMISSION_CODES = """
+datasets.view datasets.create datasets.update datasets.cancel datasets.approve datasets.publish
+datasets.export datasets.delete datasets.config
+training.view training.create training.update training.cancel training.approve training.publish
+review.view review.create review.update review.cancel review.approve review.publish review.finalize
+prelabel.view prelabel.create prelabel.update
+system.view system.create system.update system.cancel system.approve system.publish
+system.roles system.users system.audit system.storage system.ml system.webhook system.labels
+""".split()
+
+#: 三角色默认矩阵（硬编码）
+OPERATOR_CODES = {
+    'datasets.view',
+    'datasets.create',
+    'datasets.update',
+    'training.view',
+    'review.view',
+    'review.update',
+    'review.finalize',
+}
+
+ADMIN_CODES = OPERATOR_CODES | {
+    'datasets.publish',
+    'datasets.export',
+    'datasets.delete',
+    'datasets.config',
+    'prelabel.view',
+    'prelabel.create',
+    'prelabel.update',
+    'training.create',
+    'training.cancel',
+    'training.approve',
+    'training.publish',
+}
+
+
+@pytest.fixture
+def grant_roles(db):
+    """给用户授予角色（全量覆盖），并 bump 授权版本号。"""
+    from aoi.core import authz
+    from aoi.core.models import Role, UserRole
+
+    def _grant(user, *role_codes: str):
+        role_ids = dict(Role.objects.filter(code__in=role_codes).values_list('code', 'id'))
+        UserRole.objects.filter(user_id=user.id).delete()
+        for code in sorted(set(role_codes)):
+            UserRole.objects.create(user_id=user.id, role_id=role_ids[code])
+        authz.bump_version()
+        return user
+
+    return _grant
+
+
+@pytest.fixture
+def make_user(db):
+    """建 LS 账号（RBAC 用例专用，不复用 ``test_user``）。"""
+    import itertools
+
+    from django.contrib.auth import get_user_model
+
+    counter = itertools.count(1)
+
+    def _make(role_code: str | None = None, *, email: str | None = None):
+        user = get_user_model().objects.create_user(
+            email=email or f'rbac-{next(counter)}@example.com',
+            password='rbac-pass-123',
+        )
+        return user
+
+    return _make
+
+
+@pytest.fixture
+def client_for(make_user, grant_roles):
+    """``client_for('operator')`` → 已认证的 APIClient（每次新建，互不串号）。"""
+
+    def _client_for(*role_codes: str, user=None):
+        user = user or make_user()
+        if role_codes:
+            grant_roles(user, *role_codes)
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    return _client_for
+
+
+class TestPermissionCodeRegistry:
+    """权限码表与视图锚点（契约 §3.1）。"""
+
+    def test_code_table_is_the_frozen_38(self):
+        from aoi.core.permissions import PERMISSION_CODES
+
+        assert len(ALL_PERMISSION_CODES) == 38
+        assert len(set(ALL_PERMISSION_CODES)) == 38
+        assert sorted(PERMISSION_CODES) == sorted(ALL_PERMISSION_CODES)
+
+    def test_every_view_anchor_is_a_known_code(self):
+        import inspect
+
+        from aoi.audit import views as audit_views
+        from aoi.common.views import AoiAPIView
+        from aoi.core import views as core_views
+        from aoi.core.permissions import PERMISSION_CODES
+        from aoi.datasets import views as datasets_views
+        from aoi.prelabel import views as prelabel_views
+        from aoi.review import views as review_views
+        from aoi.training import views as training_views
+
+        modules = [core_views, datasets_views, audit_views, prelabel_views, review_views, training_views]
+        bad = []
+        for module in modules:
+            for name, obj in vars(module).items():
+                if not inspect.isclass(obj) or not issubclass(obj, AoiAPIView) or obj is AoiAPIView:
+                    continue
+                declared = [obj.aoi_perm, *obj.aoi_perm_by_method.values()]
+                bad += [
+                    f'{module.__name__}.{name}:{code}' for code in declared if code and code not in PERMISSION_CODES
+                ]
+        assert not bad, f'unknown permission codes on views: {bad}'
+
+    def test_role_matrix_codes_are_all_known(self):
+        from aoi.core.permissions import DEFAULT_ROLE_MATRIX, PERMISSION_CODES
+
+        for role_code, codes in DEFAULT_ROLE_MATRIX.items():
+            unknown = sorted(set(codes) - set(PERMISSION_CODES))
+            assert not unknown, f'{role_code} has unknown codes: {unknown}'
+        # super_admin 覆盖全码（播种的「只加不减」补授以此为前提）
+        assert set(DEFAULT_ROLE_MATRIX['super_admin']) == set(PERMISSION_CODES)
+        # 管理员是操作员的超集
+        assert set(DEFAULT_ROLE_MATRIX['operator']) <= set(DEFAULT_ROLE_MATRIX['admin'])
+
+
+@pytest.mark.django_db
+class TestRbacMatrix:
+    """三角色矩阵在库里逐码生效（契约 §3.1）。"""
+
+    def _seeded_matrix(self) -> dict[str, set[str]]:
+        from aoi.core.models import Permission, Role, RolePermission
+
+        codes = dict(Permission.objects.values_list('id', 'code'))
+        result: dict[str, set[str]] = {}
+        for role in Role.objects.all():
+            perm_ids = RolePermission.objects.filter(role_id=role.id).values_list('permission_id', flat=True)
+            result[role.code] = {codes[pid] for pid in perm_ids}
+        return result
+
+    def test_seeded_permissions_are_the_frozen_38(self):
+        from aoi.core.models import Permission
+
+        assert sorted(Permission.objects.values_list('code', flat=True)) == sorted(ALL_PERMISSION_CODES)
+
+    def test_operator_matrix(self):
+        assert self._seeded_matrix()['operator'] == OPERATOR_CODES
+
+    def test_admin_matrix(self):
+        assert self._seeded_matrix()['admin'] == ADMIN_CODES
+
+    def test_super_admin_matrix(self):
+        assert self._seeded_matrix()['super_admin'] == set(ALL_PERMISSION_CODES)
+
+    def test_operator_can_view_datasets(self, client_for):
+        assert client_for('operator').get('/api/datasets/images').status_code == 200
+
+    def test_admin_can_export_but_operator_cannot(self, client_for):
+        operator = client_for('operator').get('/api/datasets/1/versions/1.0.0/export')
+        assert operator.status_code == 403
+        assert_envelope(operator, code=40300)
+
+        admin = client_for('admin').get('/api/datasets/1/versions/1.0.0/export')
+        assert admin.status_code == 200
+
+
+@pytest.mark.django_db
+class TestRbacForbidden40300:
+    """越权一律 40300（契约 §3.1）。"""
+
+    OVER_PERMISSION_CALLS = (
+        ('POST', '/api/datasets/defects/publish', 'datasets.publish'),
+        ('GET', '/api/datasets/1/versions/1.0.0/export', 'datasets.export'),
+        ('POST', '/api/train/jobs', 'training.create'),
+        ('GET', '/api/core/roles', 'system.roles'),
+    )
+
+    @pytest.mark.parametrize('method,path,perm', OVER_PERMISSION_CALLS)
+    def test_operator_denied(self, client_for, method, path, perm):
+        client = client_for('operator')
+        response = (
+            getattr(client, METHOD_CALL[method])(path, {}, format='json')
+            if method == 'POST'
+            else getattr(client, METHOD_CALL[method])(path)
+        )
+        assert response.status_code == 403, (perm, response.content[:200])
+        assert_envelope(response, code=40300)
+
+    def test_user_without_role_is_denied_everywhere(self, client_for):
+        client = client_for()  # 无角色
+        response = client.get('/api/datasets/images')
+        assert response.status_code == 403
+        assert_envelope(response, code=40300)
+
+        perms = client.get('/api/core/permissions')
+        assert perms.status_code == 200  # 豁免：无角色也应能拿到自己的权限集
+        assert perms.json()['data'] == {'user_id': perms.json()['data']['user_id'], 'roles': [], 'perms': []}
+
+    def test_anonymous_is_40100_not_40300(self, api_client):
+        response = api_client.get('/api/datasets/images')
+        assert response.status_code == 401
+        assert_envelope(response, code=40100)
+
+
+@pytest.mark.django_db
+class TestPermCacheInvalidation:
+    """授权变更**零延迟**生效（契约 §3.1：版本号每请求读一次）。"""
+
+    def test_grant_and_revoke_take_effect_immediately(self, make_user, grant_roles):
+        from aoi.core.models import AuthzState, UserRole
+
+        user = make_user()
+        client = APIClient()
+        client.force_authenticate(user=user)
+        assert client.get('/api/datasets/images').status_code == 403
+
+        before = AuthzState.objects.get(pk=1).version
+        grant_roles(user, 'operator')
+        assert AuthzState.objects.get(pk=1).version > before
+        assert client.get('/api/datasets/images').status_code == 200  # 同进程立即生效
+
+        UserRole.objects.filter(user_id=user.id).delete()
+        from aoi.core import authz
+
+        authz.bump_version()
+        assert client.get('/api/datasets/images').status_code == 403  # 撤销同样立即生效
+
+    def test_deleted_user_loses_roles_without_cleanup(self, make_user, grant_roles):
+        from django.contrib.auth import get_user_model
+
+        user = make_user()
+        grant_roles(user, 'operator')
+        client = APIClient()
+        client.force_authenticate(user=user)
+        assert client.get('/api/datasets/images').status_code == 200
+
+        user_id = user.id
+        get_user_model().objects.filter(pk=user_id).delete()  # user_role 残留（不建外键）
+        from aoi.core import authz
+
+        authz.bump_version()
+        from aoi.core.models import UserRole
+
+        assert UserRole.objects.filter(user_id=user_id).exists()  # 确实残留
+        assert authz.resolve_user_perms(user_id) == frozenset()  # 但读时校验 → 无权限
+
+
+@pytest.mark.django_db
+class TestRoleAdminApi:
+    """角色与授权端点语义（契约 §4.0）。"""
+
+    def test_get_role_returns_permissions(self, client_for):
+        body = assert_envelope(client_for('super_admin').get('/api/core/roles'))
+        roles = {item['code']: item for item in body['data']['items']}
+        assert set(roles['operator']['permissions']) == OPERATOR_CODES
+        assert 'permissions' in roles['admin']
+
+    def test_put_role_replaces_permissions(self, client_for):
+        client = client_for('super_admin')
+        response = client.put('/api/core/roles/2', {'permissions': ['datasets.view']}, format='json')
+        body = assert_envelope(response)
+        assert body['data']['permissions'] == ['datasets.view']
+
+        # 清空
+        response = client.put('/api/core/roles/2', {'permissions': []}, format='json')
+        assert assert_envelope(response)['data']['permissions'] == []
+
+    def test_put_role_unknown_code_is_42200(self, client_for):
+        response = client_for('super_admin').put('/api/core/roles/2', {'permissions': ['nope.nope']}, format='json')
+        assert response.status_code == 422
+        assert_envelope(response, code=42200)
+
+    def test_builtin_role_cannot_be_deleted(self, client_for):
+        response = client_for('super_admin').delete('/api/core/roles/1')
+        assert response.status_code == 409
+        assert_envelope(response, code=40900)
+
+    def test_custom_role_delete_cascades_user_role(self, client_for, grant_roles, make_user):
+        from aoi.core.models import Role, UserRole
+
+        client = client_for('super_admin')
+        created = assert_envelope(client.post('/api/core/roles', {'code': 'qa', 'name_cn': 'QA'}, format='json'))
+        role_id = created['data']['id']
+
+        user = make_user()
+        grant_roles(user, 'qa')
+        assert UserRole.objects.filter(user_id=user.id, role_id=role_id).exists()
+
+        assert client.delete(f'/api/core/roles/{role_id}').status_code == 200
+        assert not UserRole.objects.filter(role_id=role_id).exists()
+        assert not Role.objects.filter(id=role_id).exists()
+
+    def test_assign_roles_is_full_overwrite(self, client_for):
+        created = assert_envelope(
+            client_for('super_admin').post('/api/core/roles', {'code': 'qa2', 'name_cn': 'QA2'}, format='json')
+        )
+        assert created['data']['code'] == 'qa2'
+
+        user_client = client_for('operator')
+        user_id = user_client.get('/api/core/permissions').json()['data']['user_id']
+        admin = client_for('super_admin')
+        assert admin.post(f'/api/core/users/{user_id}/roles', {'roles': ['qa2']}, format='json').status_code == 200
+        assert user_client.get('/api/core/permissions').json()['data']['roles'] == ['qa2']
+
+        assert admin.post(f'/api/core/users/{user_id}/roles', {'roles': []}, format='json').status_code == 200
+        assert user_client.get('/api/core/permissions').json()['data']['roles'] == []
+
+    def test_assign_unknown_role_is_42200(self, client_for):
+        response = client_for('super_admin').post('/api/core/users/1/roles', {'roles': ['nope']}, format='json')
+        assert response.status_code == 422
+        assert_envelope(response, code=42200)
+
+    def test_assign_to_missing_user_is_40401(self, client_for):
+        response = client_for('super_admin').post(
+            '/api/core/users/999999/roles', {'roles': ['operator']}, format='json'
+        )
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+
+@pytest.mark.django_db
+class TestGrantRoleCommand:
+    """``aoi_grant_role``（首个超管引导，契约 §3.1）。"""
+
+    def test_grant_is_full_overwrite_and_audited(self, make_user, capsys):
+        from aoi.audit.models import AuditLog
+        from aoi.core.models import UserRole
+        from django.core.management import call_command
+
+        user = make_user(email='ops@nbhx.com')
+        call_command('aoi_grant_role', 'ops@nbhx.com', 'operator')
+        assert UserRole.objects.filter(user_id=user.id).count() == 1
+        assert AuditLog.objects.filter(action='user.roles.assign', object_id=str(user.id)).exists()
+
+        call_command('aoi_grant_role', 'ops@nbhx.com', 'admin', 'super_admin')
+        assert UserRole.objects.filter(user_id=user.id).count() == 2
+
+        call_command('aoi_grant_role', 'ops@nbhx.com', '--clear')
+        assert UserRole.objects.filter(user_id=user.id).count() == 0
+
+    def test_list_outputs_mapping(self, make_user, grant_roles, capsys):
+        from django.core.management import call_command
+
+        user = make_user(email='listed@nbhx.com')
+        grant_roles(user, 'operator')
+        call_command('aoi_grant_role', '--list')
+        out = capsys.readouterr().out
+        assert 'listed@nbhx.com' in out
+        assert 'operator' in out
+
+    def test_unknown_role_fails(self, make_user):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        make_user(email='ops2@nbhx.com')
+        with pytest.raises(CommandError):
+            call_command('aoi_grant_role', 'ops2@nbhx.com', 'nope')
+
+    def test_unknown_email_fails(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with pytest.raises(CommandError):
+            call_command('aoi_grant_role', 'ghost@nbhx.com', 'operator')
+
+
+@pytest.mark.django_db
+class TestSeedRbac:
+    """播种语义（契约 §3.1）：幂等 + 内置角色不覆盖 + super_admin 只加不减。"""
+
+    def test_seed_is_idempotent(self):
+        from aoi.core.models import Permission, Role, RolePermission
+        from aoi.core.permissions import seed_rbac
+
+        before = (Permission.objects.count(), Role.objects.count(), RolePermission.objects.count())
+        stats = seed_rbac()
+        assert stats == {'permissions_created': 0, 'permissions_updated': 0, 'roles_created': 0, 'grants_created': 0}
+        assert (Permission.objects.count(), Role.objects.count(), RolePermission.objects.count()) == before
+
+    def test_builtin_role_grants_are_not_reapplied(self):
+        from aoi.core.models import Permission, Role, RolePermission
+        from aoi.core.permissions import seed_rbac
+
+        admin = Role.objects.get(code='admin')
+        target = Permission.objects.get(code='datasets.export')
+        RolePermission.objects.filter(role_id=admin.id, permission_id=target.id).delete()
+
+        seed_rbac()
+        # 人工调整（这里是撤销）不被重启回滚
+        assert not RolePermission.objects.filter(role_id=admin.id, permission_id=target.id).exists()
+
+    def test_super_admin_grants_are_backfilled(self):
+        from aoi.core.models import Permission, Role, RolePermission
+        from aoi.core.permissions import PERMISSION_CODES, seed_rbac
+
+        super_admin = Role.objects.get(code='super_admin')
+        target = Permission.objects.get(code='system.labels')
+        RolePermission.objects.filter(role_id=super_admin.id, permission_id=target.id).delete()
+
+        stats = seed_rbac()
+        assert stats['grants_created'] == 1
+        granted = set(
+            Permission.objects.filter(
+                id__in=RolePermission.objects.filter(role_id=super_admin.id).values_list('permission_id', flat=True)
+            ).values_list('code', flat=True)
+        )
+        assert granted == set(PERMISSION_CODES)
+
+
+@pytest.mark.django_db
+class TestUserAdminApi:
+    """组织管理端点语义（契约 §4.0，D5）。"""
+
+    def test_non_super_admin_is_40300(self, client_for, make_user):
+        target = make_user()
+        operator = client_for('operator')
+        for method, url in [
+            ('get', '/api/core/users'),
+            ('post', f'/api/core/users/{target.id}/deactivate'),
+            ('post', f'/api/core/users/{target.id}/activate'),
+        ]:
+            response = getattr(operator, method)(url)
+            assert response.status_code == 403, url
+            assert_envelope(response, code=40300)
+        # 无角色用户同样拒绝
+        assert client_for().get('/api/core/users').status_code == 403
+
+    def test_list_users_includes_aoi_roles(self, client_for, make_user, grant_roles):
+        user = make_user()
+        grant_roles(user, 'operator')
+        body = assert_envelope(client_for('super_admin').get('/api/core/users'))
+        items = {item['id']: item for item in body['data']['items']}
+        assert items[user.id] == {'id': user.id, 'email': user.email, 'is_active': True, 'roles': ['operator']}
+
+    def test_admin_and_operator_toggle_take_effect_immediately(self, client_for):
+        """前端任免语义：读取现有角色 → 独立增删 admin/operator → 全量覆盖提交。"""
+        user_client = client_for('operator')
+        user_id = user_client.get('/api/core/permissions').json()['data']['user_id']
+        admin = client_for('super_admin')
+
+        ok = admin.post(f'/api/core/users/{user_id}/roles', {'roles': ['admin', 'operator']}, format='json')
+        assert ok.status_code == 200
+        assert sorted(user_client.get('/api/core/permissions').json()['data']['roles']) == ['admin', 'operator']
+
+        ok = admin.post(f'/api/core/users/{user_id}/roles', {'roles': ['operator']}, format='json')
+        assert ok.status_code == 200
+        assert user_client.get('/api/core/permissions').json()['data']['roles'] == ['operator']
+
+    def test_deactivate_combo_and_jwt_rejected(self, client_for, make_user, grant_roles):
+        """停用组合拳：is_active=False + 清角色 + 软移除组织成员；已签发 JWT 立即失效。"""
+        from aoi.audit.models import AuditLog
+        from aoi.core.models import UserRole
+        from organizations.models import Organization, OrganizationMember
+
+        user = make_user()
+        grant_roles(user, 'admin')
+        login = APIClient().post('/api/auth/login', {'email': user.email, 'password': 'rbac-pass-123'}, format='json')
+        access = assert_envelope(login)['data']['access']
+        Organization.create_organization(created_by=user, title='deactivate-combo')
+        assert OrganizationMember.objects.filter(user=user, deleted_at__isnull=True).exists()
+
+        response = client_for('super_admin').post(f'/api/core/users/{user.id}/deactivate')
+        assert response.status_code == 200
+        assert assert_envelope(response)['data'] == {'user_id': user.id, 'is_active': False}
+
+        user.refresh_from_db()
+        assert user.is_active is False
+        assert user.active_organization_id is None
+        assert UserRole.objects.filter(user_id=user.id).count() == 0
+        assert not OrganizationMember.objects.filter(user=user, deleted_at__isnull=True).exists()
+
+        rejected = APIClient().get('/api/core/permissions', HTTP_AUTHORIZATION=f'Bearer {access}')
+        assert rejected.status_code == 401
+        assert_envelope(rejected, code=40100)
+
+        assert AuditLog.objects.filter(action='user.deactivate', object_id=str(user.id)).exists()
+
+    def test_activate_restores_access_but_not_roles(self, client_for, make_user, grant_roles):
+        from aoi.audit.models import AuditLog
+        from aoi.core.models import UserRole
+        from organizations.models import Organization, OrganizationMember
+
+        user = make_user()
+        grant_roles(user, 'admin')
+        Organization.create_organization(created_by=user, title='activate-restore')
+        admin = client_for('super_admin')
+        assert admin.post(f'/api/core/users/{user.id}/deactivate').status_code == 200
+
+        login = APIClient().post('/api/auth/login', {'email': user.email, 'password': 'rbac-pass-123'}, format='json')
+        assert login.status_code == 401
+
+        assert admin.post(f'/api/core/users/{user.id}/activate').status_code == 200
+        user.refresh_from_db()
+        assert user.is_active is True
+        assert OrganizationMember.objects.filter(user=user, deleted_at__isnull=True).exists()
+        assert user.active_organization_id is not None
+        assert UserRole.objects.filter(user_id=user.id).count() == 0  # 角色不回补，需重新任命
+        assert AuditLog.objects.filter(action='user.activate', object_id=str(user.id)).exists()
+
+        login = APIClient().post('/api/auth/login', {'email': user.email, 'password': 'rbac-pass-123'}, format='json')
+        assert login.status_code == 200
+
+    def test_deactivate_missing_user_is_40401(self, client_for):
+        response = client_for('super_admin').post('/api/core/users/999999/deactivate')
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+
+@pytest.mark.django_db
+class TestLastSuperAdminGuard:
+    """最后超管守卫（契约 §3.1，D5）：活跃超管不可归零。
+
+    注意：``client_for('super_admin')`` 每次调用都会**新建**一个超管，
+    会改变"最后一个超管"的前提——守卫用例一律以既有账号身份行动。
+    """
+
+    @staticmethod
+    def _bootstrap_user():
+        from aoi.core.bootstrap import BOOTSTRAP_SUPER_ADMIN_EMAIL
+        from django.contrib.auth import get_user_model
+
+        return get_user_model().objects.get(email__iexact=BOOTSTRAP_SUPER_ADMIN_EMAIL)
+
+    def test_cannot_deactivate_last_super_admin(self, client_for):
+        target = self._bootstrap_user()
+        response = client_for(user=target).post(f'/api/core/users/{target.id}/deactivate')
+        assert response.status_code == 409
+        assert_envelope(response, code=40900)
+
+    def test_cannot_clear_roles_of_last_super_admin(self, client_for):
+        target = self._bootstrap_user()
+        response = client_for(user=target).post(f'/api/core/users/{target.id}/roles', {'roles': []}, format='json')
+        assert response.status_code == 409
+        assert_envelope(response, code=40900)
+
+        # 自保持 super_admin 的重授不受守卫影响
+        response = client_for(user=target).post(
+            f'/api/core/users/{target.id}/roles', {'roles': ['super_admin']}, format='json'
+        )
+        assert response.status_code == 200
+
+    def test_second_super_admin_allows_demote_then_blocks_last(self, client_for, make_user, grant_roles):
+        other = make_user()
+        grant_roles(other, 'super_admin')
+        acting = client_for(user=other)
+        target = self._bootstrap_user()
+
+        # 仍有 other 在位：降级 bootstrap 允许
+        assert acting.post(f'/api/core/users/{target.id}/roles', {'roles': []}, format='json').status_code == 200
+
+        # other 成为最后一个活跃超管：停用被拒
+        response = acting.post(f'/api/core/users/{other.id}/deactivate')
+        assert response.status_code == 409
+        assert_envelope(response, code=40900)
+
+
+@pytest.mark.django_db
+class TestBootstrapSuperAdmin:
+    """固定超管播种（契约 §3.1 超管引导，D5）。"""
+
+    @staticmethod
+    def _user():
+        from aoi.core.bootstrap import BOOTSTRAP_SUPER_ADMIN_EMAIL
+        from django.contrib.auth import get_user_model
+
+        return get_user_model().objects.get(email__iexact=BOOTSTRAP_SUPER_ADMIN_EMAIL)
+
+    def test_seeded_with_org_wiring_and_role(self):
+        from aoi.core.bootstrap import ensure_bootstrap_super_admin
+        from aoi.core.models import Role, UserRole
+        from organizations.models import OrganizationMember
+
+        # post_migrate 已播种；重跑幂等
+        assert ensure_bootstrap_super_admin() is False
+        user = self._user()
+        assert user.is_active
+        assert user.username == user.email.split('@')[0]
+        assert OrganizationMember.objects.filter(user=user, deleted_at__isnull=True).exists()
+        assert user.active_organization_id is not None
+        super_admin = Role.objects.get(code='super_admin')
+        assert UserRole.objects.filter(user_id=user.id, role_id=super_admin.id).exists()
+
+    def test_rerun_does_not_reset_password(self):
+        from aoi.core.bootstrap import ensure_bootstrap_super_admin
+
+        user = self._user()
+        user.set_password('changed-by-admin-999')
+        user.save()
+        ensure_bootstrap_super_admin()
+        user.refresh_from_db()
+        assert user.check_password('changed-by-admin-999')
+
+    def test_recreates_when_missing(self):
+        from aoi.core.bootstrap import BOOTSTRAP_SUPER_ADMIN_PASSWORD, ensure_bootstrap_super_admin
+        from django.contrib.auth import get_user_model
+        from organizations.models import OrganizationMember
+
+        get_user_model().objects.filter(email__iexact='superadmin@nbhx.com').delete()
+        assert ensure_bootstrap_super_admin() is True
+        user = self._user()
+        assert user.check_password(BOOTSTRAP_SUPER_ADMIN_PASSWORD)
+        assert OrganizationMember.objects.filter(user=user, deleted_at__isnull=True).exists()
+        assert user.active_organization_id is not None
+
+
+@pytest.mark.django_db
+class TestAoiSpaPages:
+    """aoi SPA 页面路由（契约 §2.2，H22 结项）。"""
+
+    @staticmethod
+    def _session_client(client, user):
+        """带 ``last_login`` 的会话客户端。
+
+        LS 登录包装（``users/functions/common.py::login``）会写 ``session['last_login']``；
+        不写会被 ``InactivitySessionTimeoutMiddleWare`` 当成长时间未活动登出。
+        会话引擎为 signed-cookie：``save()`` 把数据编码进新 session key，
+        必须回写 cookie，否则客户端仍发送旧值。
+        """
+        import time
+
+        from django.conf import settings
+
+        client.force_login(user)
+        session = client.session
+        session['last_login'] = time.time()
+        session.save()
+        client.cookies[settings.SESSION_COOKIE_NAME] = session.session_key
+        return client
+
+    @pytest.mark.parametrize(
+        'path',
+        ['/datasets', '/datasets/', '/training', '/review', '/system', '/organization-admin', '/organization-admin/'],
+    )
+    def test_page_routes_render_shell(self, client, test_user, path):
+        response = self._session_client(client, test_user).get(path)
+        assert response.status_code == 200, (path, response.content[:200])
+
+    def test_anonymous_redirects_to_login(self, client):
+        response = client.get('/organization-admin')
+        assert response.status_code == 302
+        assert '/user/login/' in response['Location']
+
+    def test_spa_routes_do_not_shadow_upstream(self):
+        """点名路由而非泛 catch-all：上游路由不受影响（aoi.urls 无前缀 include 优先级最高）。"""
+        from django.urls import resolve
+
+        assert resolve('/admin/').view_name == 'admin:index'
+        assert resolve('/docs/').view_name == 'docs-redirect'
+        assert resolve('/heidi-tips/').view_name == 'aoi-heidi-tips'
+        assert resolve('/api/auth/export/').view_name == 'data_export:project-export-files-auth-check'
+        assert resolve('/api/core/users/1/roles/').view_name == 'aoi-slash-fallback'
+
+
+@pytest.mark.django_db
+class TestNativeGate:
+    """LS 原生闸门（契约 §3.1.1）：deny-list 4 类高危 + 前缀陷阱。"""
+
+    DENIED_FOR_OPERATOR = (
+        ('delete', '/api/projects/1/'),
+        ('patch', '/api/projects/1/'),
+        ('post', '/api/projects/1/summary/reset/'),
+        ('post', '/api/projects/1/exports/'),
+        ('get', '/api/auth/export/'),
+        ('post', '/api/storages/localfiles/'),
+        ('post', '/api/ml/'),
+        ('post', '/api/users/'),
+    )
+
+    def test_operator_is_blocked(self, client_for):
+        client = client_for('operator')
+        for method, path in self.DENIED_FOR_OPERATOR:
+            response = (
+                getattr(client, method)(path, {}, format='json') if method == 'post' else getattr(client, method)(path)
+            )
+            assert response.status_code == 403, (method, path, response.content[:200])
+            # LS 方言错误体（非 aoi 信封）
+            assert 'detail' in response.json()
+
+    def test_admin_can_delete_project_but_not_touch_infra(self, client_for):
+        admin = client_for('admin')
+        assert admin.delete('/api/projects/1/').status_code != 403  # datasets.delete ✅
+        assert admin.post('/api/ml/', {}, format='json').status_code == 403  # system.ml ❌
+        assert admin.post('/api/storages/localfiles/', {}, format='json').status_code == 403
+
+    def test_super_admin_passes_the_gate(self, client_for):
+        client = client_for('super_admin')
+        for method, path in self.DENIED_FOR_OPERATOR:
+            response = (
+                getattr(client, method)(path, {}, format='json') if method == 'post' else getattr(client, method)(path)
+            )
+            assert response.status_code != 403, (method, path, response.content[:200])
+
+    def test_reads_are_not_gated(self, client_for):
+        client = client_for('operator')
+        assert client.get('/api/projects/').status_code != 403
+        assert client.get('/api/projects/1/').status_code != 403
+        assert client.get('/api/organizations/').status_code != 403
+        assert client.get('/api/storages/').status_code != 403
+
+    def test_auth_prefix_trap(self, client_for):
+        """aoi 的 /api/auth/login|logout 放行，上游 /api/auth/export/ 拦截。"""
+        client = client_for('operator')
+        assert client.post('/api/auth/login', {'email': 'x@y.z', 'password': 'nope'}, format='json').status_code != 403
+        assert client.post('/api/auth/logout', {}, format='json').status_code != 403
+        assert client.get('/api/auth/export/').status_code == 403
+
+    def test_readonly_import_retrieval_is_not_gated(self, client_for):
+        """`ProjectImportAPI`/`ProjectReimportAPI` 是 RetrieveAPIView（只读），不得拦。"""
+        client = client_for('operator')
+        assert client.get('/api/projects/1/imports/1/').status_code != 403
+        assert client.get('/api/projects/1/reimports/1/').status_code != 403
+
+    def test_project_create_is_an_anchor_not_a_block(self, client_for):
+        assert client_for('operator').post('/api/projects/', {'title': 't'}, format='json').status_code != 403
+
+
+@pytest.mark.django_db
+class TestNativeGateAnnotationFlow:
+    """标注主流程绝不能被闸门误拦（最高优先级回归，契约 §3.1.1）。"""
+
+    EXEMPT_CALLS = (
+        ('post', '/api/token/', True),
+        ('get', '/api/current-user/whoami', False),
+        ('post', '/api/tasks/1/annotations/', True),
+        ('patch', '/api/tasks/1', True),
+        ('post', '/api/dm/views/', True),
+        ('get', '/api/projects/1/next/', False),
+        ('post', '/api/prelabel/1/health', True),
+        ('post', '/api/ingest/findings', True),
+    )
+
+    @pytest.mark.parametrize('method,path,with_body', EXEMPT_CALLS)
+    def test_exempt_paths_are_never_403(self, client_for, method, path, with_body):
+        client = client_for('operator')
+        call = getattr(client, method)
+        response = call(path, {}, format='json') if with_body else call(path)
+        assert response.status_code != 403, (method, path, response.content[:200])
+
+    def test_annotations_post_reaches_the_view(self, client_for):
+        """POST 任务标注不被闸门拦：应落到视图（无该 task → 404），而不是 403。"""
+        response = client_for('operator').post('/api/tasks/1/annotations/', {}, format='json')
+        assert response.status_code == 404
+
+
+# --------------------------------------------------------------------------- 前端素材（D4）
+@pytest.mark.django_db
+class TestHeidiTipsRoute:
+    """遮蔽上游 ``/heidi-tips``：返回平台自有集合，链接为绝对地址。"""
+
+    def test_returns_platform_collections(self, api_client):
+        response = api_client.get('/heidi-tips/')
+        assert response.status_code == 200
+        body = response.json()
+        assert set(body) == {'projectCreation', 'projectSettings', 'organizationPage'}
+        for collection, tips in body.items():
+            # 空集合会让前端 getRandomTip 返回 null（tips 全部消失），必须非空
+            assert tips, collection
+            for tip in tips:
+                assert tip['title'] and tip['content']
+                assert tip['link']['url'].startswith('http'), tip['link']['url']
+
+    def test_contains_no_upstream_marketing_copy(self, api_client):
+        raw = api_client.get('/heidi-tips/').content.decode('utf-8')
+        for banned in ('Enterprise', 'Starter Cloud', 'humansignal', 'labelstud.io'):
+            assert banned not in raw, banned
+
+
+@pytest.mark.django_db
+class TestLoginPageBranding:
+    """登录页品牌覆盖（仓库根 templates/ 遮蔽上游模板，D4）。"""
+
+    def test_login_page_is_rebranded(self, client):
+        response = client.get('/user/login/')
+        assert response.status_code == 200
+        html = response.content.decode('utf-8')
+        assert '宁波华翔' in html
+        assert 'AOI 数智检测' in html
+        assert '<title>AOI 数智检测</title>' in html
+        assert 'Human Signal' not in html
+        assert 'Label Studio' not in html
+        # 不再加载外站追踪/分析
+        assert 'googletagmanager' not in html
+        assert 'labelstud.io' not in html
+
+    def test_login_page_serves_the_brand_logo(self, client):
+        html = client.get('/user/login/').content.decode('utf-8')
+        # 断言 alt 与 staticfiles 可发现性：manifest 存储下 DEBUG=False 时 URL 需 collectstatic 后才有哈希名
+        assert re.search(r'<img[^>]*alt="宁波华翔 NBHX"', html), html[:2000]
+
+        from django.contrib.staticfiles import finders
+
+        assert finders.find('aoi/NBHX.png')
+
+
+class TestLsProjectTemplate:
+    """AOI 标注项目模板（契约 §4.1，D4 只交模板，真实创建在 D6）。"""
+
+    DATASET = '门板-A线'
+    VERSION = '1.0.0'
+    DICT_VERSION = 'd1'
+
+    def _kwargs(self):
+        from aoi.datasets.ls_project import build_project_kwargs
+
+        return build_project_kwargs(
+            dataset_name=self.DATASET,
+            version=self.VERSION,
+            dict_version=self.DICT_VERSION,
+            defects=label_config_sample_defects(),
+        )
+
+    def test_keys_are_exactly_the_pinned_set(self):
+        from aoi.datasets.ls_project import AOI_PROJECT_DEFAULTS
+
+        kwargs = self._kwargs()
+        expected = set(AOI_PROJECT_DEFAULTS) | {'title', 'description', 'label_config'}
+        assert set(kwargs) == expected
+
+    def test_every_key_exists_on_ls_project_model(self):
+        """防上游改字段名：模板里的键必须都能落在 LS ``Project`` 上。"""
+        from projects.models import Project
+
+        missing = [key for key in self._kwargs() if not hasattr(Project, key)]
+        assert not missing, f'unknown LS Project fields: {missing}'
+
+    def test_label_config_passes_ls_native_validator(self):
+        from core.label_config import validate_label_config
+
+        validate_label_config(self._kwargs()['label_config'])
+
+    def test_template_has_no_review_settings(self):
+        """LS OSS 无 Review 流（契约 §10.1）：模板不得出现任何 review 设置。"""
+        kwargs = self._kwargs()
+        assert not [key for key in kwargs if 'review' in key.lower()]
+        assert not [key for key in kwargs if 'require_comment' in key.lower()]
+
+    def test_pinned_defaults(self):
+        kwargs = self._kwargs()
+        assert kwargs['maximum_annotations'] == 1
+        assert kwargs['enable_empty_annotation'] is True  # OK 图必须能提交空标注
+        assert kwargs['color'] == '#FFFFFF'  # 不使用品牌色
+        assert kwargs['title'] == self.DATASET
+        assert self.VERSION in kwargs['description'] and self.DICT_VERSION in kwargs['description']
+        assert kwargs['expert_instruction']
+
+
+# --------------------------------------------------------------- D5：标注项目创建（自 D6 提前）
+def _seed_published_dict(defects=None):
+    """发布一个缺陷字典版本，返回 (DefectDictVersion, defects)。"""
+    from aoi.datasets import label_config
+    from aoi.datasets.models import DefectDictVersion
+
+    defects = defects if defects is not None else label_config_sample_defects()
+    dict_version = DefectDictVersion.objects.create(
+        version='21000101-1',
+        snapshot=label_config.snapshot_from_defects(defects),
+    )
+    return dict_version, defects
+
+
+@pytest.mark.django_db
+class TestDatasetProjectCreation:
+    """D5：``POST /api/datasets`` 服务端创建 LS 项目（``ls_project_id`` 不再由客户端传入）。"""
+
+    @pytest.fixture
+    def with_dict(self, test_user):
+        """已发布字典 + 用户组织（项目归属）。"""
+        from organizations.models import Organization
+
+        org = Organization.create_organization(created_by=test_user, title='AOI Dataset Creation')
+        test_user.active_organization = org
+        test_user.save(update_fields=['active_organization'])
+        dict_version, defects = _seed_published_dict()
+        return {'org': org, 'dict_version': dict_version, 'defects': defects}
+
+    def test_post_creates_ls_project_from_template(self, auth_client, test_user, with_dict):
+        from aoi.audit.models import AuditLog
+        from aoi.datasets import label_config
+        from aoi.datasets.models import Dataset
+        from projects.models import Project
+
+        response = auth_client.post('/api/datasets', {'name': '门板-A线'}, format='json')
+        assert response.status_code == 200, response.content[:300]
+        data = assert_envelope(response)['data']
+        assert data['name'] == '门板-A线'
+        assert isinstance(data['ls_project_id'], int) and data['ls_project_id'] > 0
+
+        dataset = Dataset.objects.get(pk=data['id'])
+        project = Project.objects.get(pk=data['ls_project_id'])
+        assert dataset.ls_project_id == project.id
+        # 模板钉死字段逐项断言（契约 §4.1）
+        assert project.title == '门板-A线'
+        assert project.maximum_annotations == 1
+        assert project.enable_empty_annotation is True
+        assert project.color == '#FFFFFF'
+        assert project.label_config == label_config.render_label_config(with_dict['defects'])
+        assert str(with_dict['dict_version'].version) in project.description
+        assert project.organization_id == with_dict['org'].id
+        assert project.created_by_id == test_user.id
+        # 审计：datasets.create
+        assert AuditLog.objects.filter(action='datasets.create', object_id=str(dataset.id)).exists()
+
+    def test_post_without_published_dict_is_42200(self, auth_client):
+        from aoi.datasets.models import DefectDictVersion
+
+        DefectDictVersion.objects.all().delete()
+        response = auth_client.post('/api/datasets', {'name': 'no-dict'}, format='json')
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'defects' in body['data']['detail']['fields']
+
+    def test_post_with_client_ls_project_id_is_42200(self, auth_client, with_dict):
+        response = auth_client.post('/api/datasets', {'name': 'x', 'ls_project_id': 123}, format='json')
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'ls_project_id' in body['data']['detail']['fields']
+
+    def test_post_without_name_is_42200(self, auth_client, with_dict):
+        response = auth_client.post('/api/datasets', {}, format='json')
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'name' in body['data']['detail']['fields']
+
+    def test_put_ls_project_id_is_42200(self, auth_client, with_dict):
+        dataset_id = assert_envelope(auth_client.post('/api/datasets', {'name': 'ds'}, format='json'))['data']['id']
+        response = auth_client.put(f'/api/datasets/{dataset_id}', {'ls_project_id': 999}, format='json')
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'ls_project_id' in body['data']['detail']['fields']
+
+    def test_put_still_allows_name_and_cur_version(self, auth_client, with_dict):
+        created = assert_envelope(auth_client.post('/api/datasets', {'name': 'ds'}, format='json'))['data']
+        response = auth_client.put(
+            f'/api/datasets/{created["id"]}', {'name': 'ds2', 'cur_version': '1.0.0'}, format='json'
+        )
+        assert response.status_code == 200
+        data = assert_envelope(response)['data']
+        assert data['name'] == 'ds2' and data['cur_version'] == '1.0.0'
+        # ls_project_id 保持服务端生成的值，未被改动
+        assert data['ls_project_id'] == created['ls_project_id']
+
+
+# ------------------------------------------------------------------ D5：导入包裹
+@pytest.mark.django_db
+class TestImportPackage:
+    """D5：``POST /api/datasets/import``（复用 LS 上传 + Celery eager，契约 §4.1/§5.2）。"""
+
+    @pytest.fixture
+    def surface(self, test_user):
+        """已发布字典 + 数据集（含真实 LS 项目）。"""
+        from aoi.datasets.ls_project import build_project_kwargs
+        from aoi.datasets.models import Dataset
+        from organizations.models import Organization
+        from projects.models import Project
+
+        org = Organization.create_organization(created_by=test_user, title='AOI Import')
+        test_user.active_organization = org
+        test_user.save(update_fields=['active_organization'])
+        dict_version, defects = _seed_published_dict()
+        kwargs = build_project_kwargs(
+            dataset_name='import-ds',
+            version='draft',
+            dict_version=dict_version.version,
+            defects=defects,
+        )
+        project = Project.objects.create(organization=org, created_by=test_user, **kwargs)
+        dataset = Dataset.objects.create(name='import-ds', ls_project_id=project.id, created_by=test_user.id)
+        return {'dataset': dataset, 'project': project, 'dict_version': dict_version}
+
+    def _import(self, client, surface, files, extra=None):
+        data = {'dataset_id': str(surface['dataset'].id), 'source': 'manual_real'}
+        data.update(extra or {})
+        for name, content, ctype in files:
+            data['files[]'] = SimpleUploadedFile(name, content, content_type=ctype)
+        return client.post('/api/datasets/import', data, format='multipart')
+
+    def _job(self, client, job_id):
+        response = client.get(f'/api/datasets/import/{job_id}')
+        assert response.status_code == 200, response.content[:300]
+        return assert_envelope(response)['data']
+
+    def test_import_ok_registers_image_and_ls_task(self, auth_client, surface, jpeg_bytes):
+        from aoi.datasets.models import Image, ImportJob
+        from tasks.models import Task
+
+        response = self._import(auth_client, surface, [('a.jpg', jpeg_bytes, 'image/jpeg')])
+        assert response.status_code == 200, response.content[:300]
+        job_id = assert_envelope(response)['data']['job_id']
+
+        job = ImportJob.objects.get(job_id=job_id)
+        assert job.status == ImportJob.STATUS_SUCCEEDED  # eager：请求内同步完成
+        assert (job.total, job.ok, job.dup, job.bad) == (1, 1, 0, 0)
+
+        image = Image.objects.get(md5=hashlib.md5(jpeg_bytes).hexdigest())
+        assert image.object_key.startswith(f'upload/{surface["project"].id}/')  # LS 上传路径
+        assert image.qc_status == 'ok' and image.source == 'manual_real'
+        assert Task.objects.filter(project=surface['project']).count() == job.ok
+        task = Task.objects.filter(project=surface['project']).first()
+        assert 'image' in task.data
+        # D5 收尾：任务里的图片值必须是浏览器可直接加载的同源 URL（裸对象键 → ERR_LOADING_HTTP）
+        assert task.data['image'].startswith('/data/'), task.data['image']
+        # D5 收尾（第二轮）：标注页读任务时 resolve_uri 会用 file.url 重写任务 data，
+        # 该值曾因 HOSTNAME 为空拼出 https:///data/... 空主机绝对地址 → 同样 ERR_LOADING_HTTP
+        from data_import.models import FileUpload
+
+        file_upload = FileUpload.objects.get(project=surface['project'])
+        assert file_upload.url == f'/data/{image.object_key}', file_upload.url
+        assert task.resolve_uris(dict(task.data), task.project)['image'].startswith('/data/')
+
+    def test_import_same_file_twice_is_dup(self, auth_client, surface, jpeg_bytes):
+        from aoi.datasets.models import ImportJob
+        from tasks.models import Task
+
+        first = self._import(auth_client, surface, [('a.jpg', jpeg_bytes, 'image/jpeg')])
+        assert first.status_code == 200
+        second = self._import(auth_client, surface, [('a.jpg', jpeg_bytes, 'image/jpeg')])
+        assert second.status_code == 200
+        job = ImportJob.objects.get(job_id=assert_envelope(second)['data']['job_id'])
+        assert job.status == ImportJob.STATUS_SUCCEEDED
+        assert (job.ok, job.dup) == (0, 1)
+        # md5 全局去重：不建第二个任务
+        assert Task.objects.filter(project=surface['project']).count() == 1
+
+    def test_import_bad_bytes_is_decode_failed(self, auth_client, surface):
+        from aoi.datasets.models import Image, ImportJob
+
+        response = self._import(auth_client, surface, [('bad.jpg', b'not-a-jpeg', 'image/jpeg')])
+        assert response.status_code == 200
+        job = ImportJob.objects.get(job_id=assert_envelope(response)['data']['job_id'])
+        assert job.status == ImportJob.STATUS_SUCCEEDED
+        assert job.bad == 1
+        assert job.bad_items == [{'filename': 'bad.jpg', 'reason': 'decode_failed'}]
+        image = Image.objects.get(qc_reason='decode_failed')
+        assert image.qc_status == 'rejected'
+
+    def test_import_txt_is_unsupported_extension(self, auth_client, surface):
+        from aoi.datasets.models import ImportJob
+
+        response = self._import(auth_client, surface, [('note.txt', b'hello', 'text/plain')])
+        assert response.status_code == 200
+        job = ImportJob.objects.get(job_id=assert_envelope(response)['data']['job_id'])
+        assert job.bad == 1
+        assert job.bad_items == [{'filename': 'note.txt', 'reason': 'unsupported_extension'}]
+        assert job.file_upload_ids == []  # 预检拒绝：不产生 LS 上传
+        assert job.status == ImportJob.STATUS_SUCCEEDED
+
+    def test_unknown_job_is_40401(self, auth_client):
+        response = auth_client.get('/api/datasets/import/does-not-exist')
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+    def test_missing_dataset_id_is_42200(self, auth_client, surface):
+        response = auth_client.post(
+            '/api/datasets/import',
+            {'files[]': SimpleUploadedFile('a.jpg', b'x', content_type='image/jpeg')},
+            format='multipart',
+        )
+        assert response.status_code == 422
+        assert_envelope(response, code=42200)
+
+    def test_dataset_without_project_is_42200(self, auth_client, surface):
+        from aoi.datasets.models import Dataset
+
+        orphan = Dataset.objects.create(name='orphan', ls_project_id=None)
+        response = self._import(auth_client, {'dataset': orphan}, [])
+        assert response.status_code == 422
+        assert_envelope(response, code=42200)
+
+    def test_dataset_not_found_is_40401(self, auth_client, surface):
+        response = auth_client.post(
+            '/api/datasets/import',
+            {
+                'dataset_id': '999999',
+                'files[]': SimpleUploadedFile('a.jpg', b'x', content_type='image/jpeg'),
+            },
+            format='multipart',
+        )
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+    def test_invalid_source_is_42200(self, auth_client, surface):
+        response = self._import(auth_client, surface, [('a.jpg', b'x', 'image/jpeg')], extra={'source': 'camera'})
+        assert response.status_code == 422
+        assert_envelope(response, code=42200)
+
+    def test_empty_files_is_42200(self, auth_client, surface):
+        response = auth_client.post(
+            '/api/datasets/import', {'dataset_id': str(surface['dataset'].id)}, format='multipart'
+        )
+        assert response.status_code == 422
+        assert_envelope(response, code=42200)
+
+    def test_no_role_user_is_40300(self, api_client, db, surface):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        user = User.objects.create_user(email='no-role@import.test', password='pass-123456')
+        api_client.force_authenticate(user=user)
+        response = api_client.post('/api/datasets/import', {'dataset_id': '1'}, format='multipart')
+        assert response.status_code == 403
+        assert_envelope(response, code=40300)
+
+
+# ------------------------------------------------------------------ D5 收尾实测修复
+@pytest.fixture
+def import_surface(test_user):
+    """模块级「已发布字典 + 数据集（含真实 LS 项目）」种子：TestImportPackage.surface 的模块版。
+
+    D5 收尾的删除类用例（TestImageDelete/TestDatasetDeleteCascade）不在该类内，无法复用类内 fixture。
+    """
+    from aoi.datasets.ls_project import build_project_kwargs
+    from aoi.datasets.models import Dataset
+    from organizations.models import Organization
+    from projects.models import Project
+
+    org = Organization.create_organization(created_by=test_user, title='AOI Import Surface')
+    test_user.active_organization = org
+    test_user.save(update_fields=['active_organization'])
+    dict_version, defects = _seed_published_dict()
+    kwargs = build_project_kwargs(
+        dataset_name='import-surface-ds',
+        version='draft',
+        dict_version=dict_version.version,
+        defects=defects,
+    )
+    project = Project.objects.create(organization=org, created_by=test_user, **kwargs)
+    dataset = Dataset.objects.create(name='import-surface-ds', ls_project_id=project.id, created_by=test_user.id)
+    return {'dataset': dataset, 'project': project, 'dict_version': dict_version}
+
+
+@pytest.mark.django_db
+class TestDefectPatchUpdate:
+    """D5 收尾：``PUT /api/datasets/defects`` 部分更新语义（启停开关 ``{code, active}`` 不再 42200）。"""
+
+    def _create(self, client, code='object_fault_type_07', name='气泡', risk=2):
+        response = client.post(
+            '/api/datasets/defects', {'code': code, 'name_cn': name, 'risk_level': risk}, format='json'
+        )
+        assert response.status_code == 200, response.content[:300]
+        return assert_envelope(response)['data']
+
+    def test_put_active_only_toggles(self, auth_client):
+        created = self._create(auth_client)
+        response = auth_client.put('/api/datasets/defects', {'code': created['code'], 'active': False}, format='json')
+        assert response.status_code == 200, response.content[:300]
+        data = assert_envelope(response)['data']
+        assert data['active'] is False
+        # 未携带字段保持原值（部分更新语义）
+        assert data['name_cn'] == '气泡' and data['risk_level'] == 2
+
+        toggle_back = auth_client.put(
+            '/api/datasets/defects', {'code': created['code'], 'active': True}, format='json'
+        )
+        assert assert_envelope(toggle_back)['data']['active'] is True
+
+    def test_put_full_payload_still_works(self, auth_client):
+        created = self._create(auth_client)
+        response = auth_client.put(
+            '/api/datasets/defects',
+            {'code': created['code'], 'name_cn': '气泡改', 'risk_level': 3, 'aliases': ['blisters'], 'active': False},
+            format='json',
+        )
+        assert response.status_code == 200, response.content[:300]
+        data = assert_envelope(response)['data']
+        assert (data['name_cn'], data['risk_level'], data['aliases'], data['active']) == (
+            '气泡改',
+            3,
+            ['blisters'],
+            False,
+        )
+
+    def test_put_partial_still_validates_present_fields(self, auth_client):
+        created = self._create(auth_client)
+        response = auth_client.put('/api/datasets/defects', {'code': created['code'], 'risk_level': 9}, format='json')
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'risk_level' in body['data']['detail']['fields']
+
+    def test_put_unknown_code_is_40401(self, auth_client):
+        response = auth_client.put(
+            '/api/datasets/defects', {'code': 'object_fault_type_99', 'active': False}, format='json'
+        )
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+
+@pytest.mark.django_db
+class TestDatasetDraftDictionaryFallback:
+    """D5 收尾：未发布字典先建数据集（无已发布版本时回退当前启用缺陷，draft 语义）。"""
+
+    @pytest.fixture
+    def org(self, test_user):
+        from organizations.models import Organization
+
+        org = Organization.create_organization(created_by=test_user, title='AOI Draft Dict')
+        test_user.active_organization = org
+        test_user.save(update_fields=['active_organization'])
+        return org
+
+    def test_post_with_active_defects_and_no_published_dict_creates_draft_project(self, auth_client, org):
+        from aoi.datasets import label_config
+        from aoi.datasets.models import DefectClass, DefectDictVersion
+        from projects.models import Project
+
+        DefectDictVersion.objects.all().delete()
+        defects = [
+            DefectClass.objects.create(code='object_fault_type_01', name_cn='划伤', risk_level=3),
+            DefectClass.objects.create(code='object_fault_type_02', name_cn='凹坑', risk_level=1),
+        ]
+
+        response = auth_client.post('/api/datasets', {'name': '先建数据集'}, format='json')
+        assert response.status_code == 200, response.content[:300]
+        data = assert_envelope(response)['data']
+        project = Project.objects.get(pk=data['ls_project_id'])
+        expected = label_config.render_label_config(
+            [{'code': defect.code, 'name_cn': defect.name_cn, 'risk_level': defect.risk_level} for defect in defects]
+        )
+        assert project.label_config == expected
+        # 字典版本以 draft 标记，项目描述可追溯
+        assert 'draft' in project.description
+        assert data['versions'] == []
+
+    def test_post_without_any_defects_is_42200(self, auth_client, org):
+        from aoi.datasets.models import DefectClass, DefectDictVersion
+
+        DefectDictVersion.objects.all().delete()
+        DefectClass.objects.all().delete()
+        response = auth_client.post('/api/datasets', {'name': '无缺陷'}, format='json')
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'defects' in body['data']['detail']['fields']
+
+    def test_published_dict_still_wins_over_active_defects(self, auth_client, org):
+        from aoi.datasets import label_config
+        from aoi.datasets.models import DefectClass
+        from projects.models import Project
+
+        DefectClass.objects.create(code='object_fault_type_09', name_cn='仅启用未发布', risk_level=1)
+        dict_version, defects = _seed_published_dict()
+        response = auth_client.post('/api/datasets', {'name': '发布优先'}, format='json')
+        assert response.status_code == 200, response.content[:300]
+        data = assert_envelope(response)['data']
+        project = Project.objects.get(pk=data['ls_project_id'])
+        assert project.label_config == label_config.render_label_config(defects)
+        assert str(dict_version.version) in project.description
+        # 响带回显所用字典来源（新建向导第②步要显示"用了哪一版"）
+        assert data['dict_source'] == 'latest_published'
+        assert data['dict_version'] == dict_version.version
+
+    def test_dict_source_active_defects_ignores_published_version(self, auth_client, org):
+        """D5 收尾第三轮：``dict_source=active_defects`` 强制用当前启用缺陷（draft），
+        即使存在已发布版本——用于"字典还没定版先拉数据"。"""
+        from aoi.datasets import label_config
+        from aoi.datasets.models import DefectClass
+        from projects.models import Project
+
+        _seed_published_dict()  # 已发布版本含 object_fault_type_01/02
+        DefectClass.objects.all().delete()
+        DefectClass.objects.create(code='panel_scratch_01', name_cn='面板划伤', risk_level=3)
+
+        response = auth_client.post(
+            '/api/datasets', {'name': '草稿字典', 'dict_source': 'active_defects'}, format='json'
+        )
+        assert response.status_code == 200, response.content[:300]
+        data = assert_envelope(response)['data']
+        assert data['dict_source'] == 'active_defects'
+        assert data['dict_version'] == 'draft'
+        project = Project.objects.get(pk=data['ls_project_id'])
+        assert project.label_config == label_config.render_label_config(
+            [{'code': 'panel_scratch_01', 'name_cn': '面板划伤', 'risk_level': 3}]
+        )
+        assert 'panel_scratch_01' in project.label_config
+        assert 'object_fault_type_01' not in project.label_config
+
+    def test_dict_source_active_defects_without_active_is_42200(self, auth_client, org):
+        from aoi.datasets.models import DefectClass
+
+        _seed_published_dict()
+        DefectClass.objects.all().delete()
+        response = auth_client.post(
+            '/api/datasets', {'name': '空启用缺陷', 'dict_source': 'active_defects'}, format='json'
+        )
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'defects' in body['data']['detail']['fields']
+
+    def test_dict_source_invalid_value_42200(self, auth_client, org):
+        response = auth_client.post('/api/datasets', {'name': '非法来源', 'dict_source': 'whatever'}, format='json')
+        assert response.status_code == 422
+        body = assert_envelope(response, code=42200)
+        assert 'dict_source' in body['data']['detail']['fields']
+
+
+@pytest.mark.django_db
+class TestImageGrouping:
+    """D5 收尾第六轮：图库「按数据集展示」——``dataset_id`` / ``unassigned`` 过滤 + 数据集预览图。"""
+
+    @pytest.fixture
+    def two_datasets(self, auth_client, import_surface, jpeg_bytes):
+        """在 import_surface 数据集里导入 1 张图，并另建一个空数据集作对照。"""
+        from aoi.datasets.models import Image
+
+        data = {'dataset_id': str(import_surface['dataset'].id), 'source': 'manual_real', 'station_code': 'ST-01'}
+        data['files[]'] = SimpleUploadedFile('a.jpg', jpeg_bytes, content_type='image/jpeg')
+        assert auth_client.post('/api/datasets/import', data, format='multipart').status_code == 200
+        image = Image.objects.get(md5=hashlib.md5(jpeg_bytes).hexdigest())
+        other = assert_envelope(auth_client.post('/api/datasets', {'name': '空数据集'}, format='json'))['data']
+        return import_surface['dataset'], other, image
+
+    def test_images_filter_by_dataset_id(self, auth_client, two_datasets):
+        dataset, other, image = two_datasets
+
+        scoped = assert_envelope(auth_client.get(f'/api/datasets/images?dataset_id={dataset.id}'))['data']
+        assert [item['id'] for item in scoped['items']] == [image.id]
+        assert scoped['items'][0]['dataset_id'] == dataset.id
+
+        empty = assert_envelope(auth_client.get(f'/api/datasets/images?dataset_id={other["id"]}'))['data']
+        assert empty['items'] == [] and empty['total'] == 0
+
+    def test_images_filter_by_dataset_id_unknown_is_40401(self, auth_client):
+        response = auth_client.get('/api/datasets/images?dataset_id=99999')
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+    def test_unassigned_excludes_dataset_images(self, auth_client, two_datasets):
+        """未归属段只看不属于任何数据集的图（B 线回流等），不重复展示数据集里的图。"""
+        from aoi.datasets.models import Image
+        from django.utils import timezone
+
+        dataset, _other, image = two_datasets
+        # 手工塞一张 B 线回传形态的登记行（images/{md5}.jpg，不属于任何 upload/ 前缀）
+        stray = Image.objects.create(
+            object_key='images/deadbeef.jpg',
+            md5='deadbeef',
+            source='reflux_review',
+            qc_status='ok',
+            captured_at=timezone.now(),
+        )
+
+        body = assert_envelope(auth_client.get('/api/datasets/images?unassigned=true'))['data']
+        assert [item['id'] for item in body['items']] == [stray.id]
+        assert body['items'][0]['dataset_id'] is None
+        assert image.id not in [item['id'] for item in body['items']]
+
+    def test_dataset_payload_carries_preview_images(self, auth_client, two_datasets):
+        """数据集投影带 5 张以内的预览图 + 图片数（图库概览一个请求就能画）。"""
+        dataset, _other, image = two_datasets
+
+        datasets = assert_envelope(auth_client.get('/api/datasets?page_size=200'))['data']['items']
+        row = next(item for item in datasets if item['id'] == dataset.id)
+        assert row['image_count'] == 1
+        assert [item['id'] for item in row['preview_images']] == [image.id]
+        assert row['preview_images'][0]['station_code'] == 'ST-01'
+
+    def test_preview_images_capped_at_five(self, auth_client, import_surface):
+        """预览图上限 5 张：多出来的靠前端「+N」和下钻翻页拿，别把整库塞进数据集列表。"""
+        from aoi.datasets.models import Image
+        from aoi.datasets.serializers import DATASET_PREVIEW_IMAGE_LIMIT, serialize_dataset
+
+        project_id = import_surface['project'].id
+        for index in range(DATASET_PREVIEW_IMAGE_LIMIT + 3):
+            Image.objects.create(
+                object_key=f'upload/{project_id}/{index:08x}-f{index}.jpg',
+                md5=f'{index:032x}',
+                source='manual_real',
+                qc_status='ok',
+            )
+        row = serialize_dataset(import_surface['dataset'])
+        assert row['image_count'] == DATASET_PREVIEW_IMAGE_LIMIT + 3
+        assert len(row['preview_images']) == DATASET_PREVIEW_IMAGE_LIMIT
+
+
+@pytest.mark.django_db
+class TestImageDelete:
+    """D5 收尾：``DELETE /api/datasets/images/{id}`` 级联清理登记/LS 任务/上传字节。"""
+
+    @pytest.fixture
+    def imported(self, auth_client, import_surface, jpeg_bytes):
+        """导入 1 张图，返回 (image, project)。"""
+        from aoi.datasets.models import Image
+
+        data = {'dataset_id': str(import_surface['dataset'].id), 'source': 'manual_real'}
+        data['files[]'] = SimpleUploadedFile('a.jpg', jpeg_bytes, content_type='image/jpeg')
+        response = auth_client.post('/api/datasets/import', data, format='multipart')
+        assert response.status_code == 200, response.content[:300]
+        image = Image.objects.get(md5=hashlib.md5(jpeg_bytes).hexdigest())
+        return image, import_surface['project']
+
+    def test_get_image_detail(self, auth_client, imported):
+        image, _project = imported
+        response = auth_client.get(f'/api/datasets/images/{image.id}')
+        assert response.status_code == 200, response.content[:300]
+        assert assert_envelope(response)['data']['object_key'] == image.object_key
+
+    def test_delete_image_removes_registration_task_and_upload(self, auth_client, imported):
+        from aoi.datasets.models import Image
+        from data_import.models import FileUpload
+        from tasks.models import Task
+
+        image, project = imported
+        # D5 收尾：任务 data.image 已是 /data/upload/... 同源 URL，以 object_key 后缀关联
+        task = Task.objects.get(project=project)
+        assert task.data['image'].endswith(image.object_key)
+        task_id = task.id
+        upload_id = FileUpload.objects.get(file=image.object_key).id
+
+        response = auth_client.delete(f'/api/datasets/images/{image.id}')
+        assert response.status_code == 200, response.content[:300]
+        body = assert_envelope(response)['data']
+        assert body['deleted'] is True
+        assert (body['tasks_deleted'], body['images_deleted']) == (1, 1)
+
+        assert Image.objects.filter(pk=image.id).exists() is False
+        assert Task.objects.filter(pk=task_id).exists() is False
+        assert FileUpload.objects.filter(pk=upload_id).exists() is False
+        assert Task.objects.filter(project=project).count() == 0
+
+    def test_delete_unknown_image_is_40401(self, auth_client):
+        response = auth_client.delete('/api/datasets/images/999999')
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+
+@pytest.mark.django_db
+class TestDatasetDeleteCascade:
+    """D5 收尾：``DELETE /api/datasets/{id}`` 级联清理 LS 项目/任务/图片/版本。"""
+
+    def test_delete_dataset_cascades_ls_project_and_images(self, auth_client, import_surface, jpeg_bytes):
+        from aoi.datasets.models import Dataset, DatasetVersion, Image
+        from projects.models import Project
+        from tasks.models import Task
+
+        dataset, project = import_surface['dataset'], import_surface['project']
+        data = {
+            'dataset_id': str(dataset.id),
+            'source': 'manual_real',
+            'files[]': SimpleUploadedFile('a.jpg', jpeg_bytes, content_type='image/jpeg'),
+        }
+        assert auth_client.post('/api/datasets/import', data, format='multipart').status_code == 200
+        assert auth_client.post(f'/api/datasets/{dataset.id}/versions', {}, format='json').status_code == 200
+        image = Image.objects.first()
+        assert image is not None
+        assert Task.objects.filter(project=project).count() == 1
+
+        response = auth_client.delete(f'/api/datasets/{dataset.id}')
+        assert response.status_code == 200, response.content[:300]
+        body = assert_envelope(response)['data']
+        assert body['deleted'] is True and body['stub'] is False
+        assert body['ls_project_deleted'] is True
+        assert (body['tasks_deleted'], body['images_deleted'], body['versions_deleted']) == (1, 1, 1)
+
+        assert Dataset.objects.filter(pk=dataset.id).exists() is False
+        assert Project.objects.filter(pk=project.id).exists() is False
+        assert Task.objects.filter(project_id=project.id).exists() is False
+        assert Image.objects.filter(pk=image.pk).exists() is False
+        assert DatasetVersion.objects.filter(dataset_id=dataset.id).exists() is False
+
+    def test_delete_stub_dataset_stays_idempotent(self, auth_client):
+        response = auth_client.delete('/api/datasets/999999')
+        assert response.status_code == 200
+        body = assert_envelope(response)['data']
+        assert body['deleted'] is True and body['stub'] is True
+
+
+# ------------------------------------------------------------------ D5：字典权限映射
+@pytest.mark.django_db
+class TestDefectPermMapping:
+    """D5 权限澄清（契约 §4.1）：POST=datasets.create、PUT=datasets.update、publish=datasets.publish。"""
+
+    def test_perm_anchors(self):
+        from aoi.datasets.views import DefectListCreateUpdateView, DefectPublishView
+
+        assert DefectListCreateUpdateView.aoi_perm == 'datasets.view'
+        assert DefectListCreateUpdateView.aoi_perm_by_method == {
+            'POST': 'datasets.create',
+            'PUT': 'datasets.update',
+        }
+        assert DefectPublishView.aoi_perm == 'datasets.publish'
+
+    def test_get_permissions_resolves_by_method(self):
+        from aoi.datasets.views import DefectListCreateUpdateView
+
+        class _Request:
+            method = 'POST'
+            user = None
+
+        view = DefectListCreateUpdateView()
+        view.request = _Request()
+        assert view.get_permissions()[0].perm_code == 'datasets.create'
+
+        view.request.method = 'PUT'
+        assert view.get_permissions()[0].perm_code == 'datasets.update'
+
+    def test_operator_can_post_defect(self, api_client, db):
+        from aoi.core.models import Role, UserRole
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        user = User.objects.create_user(email='operator@defect.test', password='pass-123456')
+        role = Role.objects.get(code='operator')
+        UserRole.objects.create(user_id=user.id, role_id=role.id)
+        api_client.force_authenticate(user=user)
+        response = api_client.post(
+            '/api/datasets/defects',
+            {'code': 'object_fault_type_02', 'name_cn': '凹坑', 'risk_level': 2},
+            format='json',
+        )
+        assert response.status_code == 200
+        assert_envelope(response)
+
+
+# ------------------------------------------------------------------ D5：Celery 接线
+class TestCeleryWiring:
+    """D5：Celery app 与任务路由（契约 §5.2）。"""
+
+    def test_aoi_celery_app_importable(self):
+        from aoi.celery import app
+
+        assert app.main == 'aoi'
+
+    def test_process_import_job_task_registered(self):
+        from aoi.datasets.tasks import process_import_job
+
+        assert process_import_job.name.startswith('aoi.')  # 命中 aoi.* 路由前缀
+
+    def test_aoi_tasks_route_to_default_queue(self):
+        from aoi.celery import app
+        from aoi.datasets.tasks import process_import_job
+
+        route = app.amqp.router.route({}, process_import_job.name)
+        assert route is not None
+        assert route['queue'].name == 'default'
+
+    def test_broker_configured_and_isolated_from_rq(self, settings):
+        # 与 LS django_rq（Redis DB 0）隔离：aoi broker 必须指向 Redis DB 1（契约 §5.2）
+        assert settings.CELERY_BROKER_URL
+        assert settings.CELERY_BROKER_URL.rstrip('/').endswith('/1')
+        assert settings.CELERY_TASK_ROUTES == {'aoi.*': {'queue': 'default'}}

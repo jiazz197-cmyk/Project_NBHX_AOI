@@ -310,7 +310,11 @@ REST_FRAMEWORK = {
         'jwt_auth.auth.TokenAuthenticationPhaseout',
         'rest_framework.authentication.SessionAuthentication',
     ),
+    # AOI 二开（LS 原生闸门，注入点，见 CHANGES.md 与平台 A 契约 §3.1.1）：
+    # RBAC 只覆盖 aoi 视图，LS 原生端点在 LSO 下等价于「登录即可写」。闸门为 deny-list、
+    # 默认放行、fail-open，必须排在首位（身份已由上面的认证类解析完成）。
     'DEFAULT_PERMISSION_CLASSES': [
+        'aoi.common.native_gate.AoiNativeGatePermission',
         'core.api_permissions.HasObjectPermission',
         'rest_framework.permissions.IsAuthenticated',
     ],
@@ -924,6 +928,20 @@ ML_BLOCK_LOCAL_IP = get_bool_env('ML_BLOCK_LOCAL_IP', True)
 
 RQ_LONG_JOB_TIMEOUT = int(get_env('RQ_LONG_JOB_TIMEOUT', 36000))
 
+# ---------------------------------------------------------------------------
+# AOI 二开（Celery 异步任务，注入点，见 CHANGES.md；契约 §5.2）：
+# 导入包裹等 aoi 任务统一走 Celery；LS 自带 django_rq（上方 RQ_* 配置，Redis DB 0）保持不动。
+# ---------------------------------------------------------------------------
+# broker 与 LS 的 RQ（Redis DB 0）隔离，默认用 Redis DB 1。
+CELERY_BROKER_URL = get_env('CELERY_BROKER_URL', 'redis://localhost:6379/1')
+# 测试/无 Redis 场景可置 true 使 .delay() 同步执行（契约测试 autouse fixture 强制开启）。
+CELERY_TASK_ALWAYS_EAGER = get_env('CELERY_TASK_ALWAYS_EAGER', False, is_bool=True)
+# eager 模式下任务异常直接外抛（测试需要感知任务内错误）。
+CELERY_TASK_EAGER_PROPAGATES = get_env('CELERY_TASK_EAGER_PROPAGATES', True, is_bool=True)
+# 仅 default 队列有真实任务（导入包裹）；training/publish 路由待各自任务落地时再加。
+CELERY_TASK_ROUTES = {'aoi.*': {'queue': 'default'}}
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
 APP_WEBSERVER = get_env('APP_WEBSERVER', 'django')
 
 BATCH_JOB_RETRY_TIMEOUT = int(get_env('BATCH_JOB_RETRY_TIMEOUT', 60))
@@ -951,7 +969,11 @@ USE_NGINX_FOR_UPLOADS = get_bool_env('USE_NGINX_FOR_UPLOADS', True)
 _minio_endpoint = get_env('MINIO_STORAGE_ENDPOINT', 'http://localhost:9000')
 if _minio_endpoint and not get_bool_env('MINIO_SKIP', False):
     CLOUD_FILE_STORAGE_ENABLED = True
-    STORAGES['default']['BACKEND'] = 'storages.backends.s3boto3.S3Boto3Storage'
+    # D5 收尾：默认存储后端换成 aoi 同源变体——上游 S3Boto3Storage.url 拼
+    # {protocol}//{custom_domain}/{key}，HOSTNAME 为空时得到 https:///data/... 不可用
+    # 绝对地址；任务读取期 Task.resolve_uris 会拿 file.url 重写任务 data → ERR_LOADING_HTTP。
+    # aoi.common.storage.SameOriginS3Boto3Storage 对 upload/ 对象键输出 /data/<key> 相对路径
+    STORAGES['default']['BACKEND'] = 'aoi.common.storage.SameOriginS3Boto3Storage'
     AWS_STORAGE_BUCKET_NAME = get_env('MINIO_STORAGE_BUCKET_NAME', 'aoi-images')
     AWS_ACCESS_KEY_ID = get_env('MINIO_STORAGE_ACCESS_KEY', 'minioadmin')
     AWS_SECRET_ACCESS_KEY = get_env('MINIO_STORAGE_SECRET_KEY', 'minioadmin')

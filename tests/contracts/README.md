@@ -7,7 +7,7 @@
 | 文件 | 说明 |
 |---|---|
 | `conftest.py` | Django/DRF fixtures、`jpeg_bytes`、`auth_client`、测试账号常量（`TEST_USER_EMAIL`/`TEST_USER_PASSWORD`）、`aoi.core` 进程内状态重置（含 `_NEXT_ROLE_ID`）、**发布模式强制 fake + 关闭产物落盘**（`force_fake_publish_mode`，避免本地 `.env` 开 registry 时联网推仓库 / 测试写仓库工作区） |
-| `test_skillname.py` | T1.2 `packages/skillname`：枚举/code 正则（ASCII 01~99）/`model_ref`（ASCII）/镜像 tag |
+| `test_skillname.py` | T1.2 `packages/skillname`：枚举/code 正则（`<object>_<fault_type>_NN`，ASCII 01~99，超集含历史 `object_fault_type_XX`）/`model_ref`（ASCII）/镜像 tag |
 | `test_pipeline_core.py` | D1 `packages/pipeline-core`：切片/坐标转换/NMS 合并（按 object_code）/三档判定（宁错不漏）/`load_config` 校验/`run` 缺模型必错/`StubRuntimeModel`；与 C 侧 fixtures 互相锁定 |
 | `test_platform_a_api.py` | T2.2–T2.5/T2.9 + P0/P1 回归 + D3 认证与发布：信封/鉴权/全量 stub 200/OpenAPI 基线/label config golden/model.yaml/预标协议/ingest 幂等与半写补建/发布与复审状态机/权限锚点；`TestAoiJwtAuth` 16 例覆盖真实 JWT 链路（登录→Bearer 打 aoi 与 LS 原生端点→刷新→登出黑名单→浏览器 session 回归→中间件移除守卫）；`TestPublishFakePipeline`/`TestRegistryPushClient`/`TestPublishRegistryMode` 覆盖发布服务 stub（产物 schema2 自洽与 digest 链、字节可复现、落盘与审计、失败重推、registry 客户端 mock 全链路）；`TestIngestFindingsFixtureContract` 用 C 侧 `findings_ingest_sample.json` 锁定 B→A 回传应答 |
 | `test_ls_reuse_smoke.py` | T2.7 LS 原生复用 smoke（`@pytest.mark.reuse`；需 `LS_REUSE_*`；写入需 `LS_REUSE_ALLOW_MUTATION=1`，结束清理自建资源） |

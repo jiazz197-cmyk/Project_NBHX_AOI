@@ -1,1 +1,1 @@
-<View><Image name="image" value="$image"/><RectangleLabels name="defect" toName="image"><Label value="object_fault_type_01" background="#FF4D4F"/><Label value="object_fault_type_02" background="#FA8C16"/></RectangleLabels></View>
+<View><Image name="image" value="$image"/><RectangleLabels name="defect" toName="image"><Label value="object_fault_type_01" html="划伤" background="#FF4D4F"/><Label value="object_fault_type_02" html="凹坑" background="#FA8C16"/></RectangleLabels></View>

@@ -94,3 +94,6 @@ web/coverage-chunks
 .pytest_cache/
 .ruff_cache
 .uv-cache
+
+.agents/
+skills-lock.json

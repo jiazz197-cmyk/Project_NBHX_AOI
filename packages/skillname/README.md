@@ -12,6 +12,6 @@ image_tag_from_model_ref("3-yolo@ds1", "fp16")      # "3-yolo-ds1-fp16"
 ```
 
 - `SkillName`：MVP 唯一 `ObjectDetection`（→ LS 控件 `RectangleLabels`）；其余枚举预留。
-- `object_fault_type_XX`：缺陷对象 code，`01~99`。
+- `<object>_<fault_type>_NN`：缺陷对象 code，前缀为两段可变英文词（如 `panel_scratch_01`），后缀 `01~99`（`00` 非法）。历史写法 `object_fault_type_XX` 仍合法（超集）。
 - `model_ref`：`{seq}-{framework}@ds{dataset_version}`，如 `3-yolo@ds1`。
 - 枚举值不得在平台侧硬编码副本；A/B/C 统一 `from skillname import ...`。

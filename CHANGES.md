@@ -412,3 +412,463 @@ import，含 `converter` 导出引擎），不可移除，只能换源。
   已被清理的 `label_studio.tests.conftest.aws_credentials`，收集即错（绕开 fsm 后另有 10 例存量失败，见 §3.2）；
 - 本机默认 uv 缓存 `~/.cache/uv/sdists-v9/.git`（0 字节异常文件）导致 uv 无法初始化缓存，
   本机需 `UV_CACHE_DIR` 指仓库内 `.uv-cache`。
+
+## D4：自研 RBAC 真实化 + LS 原生闸门 + LS 项目模板 + 前端素材更换（2026-09-14）
+
+> 依据 `docs/contracts/平台A_接口与数据契约.md` §2.4/§3.1/§3.1.1/§4.0/§4.1/§10.1/§13.1（本次同步修改）
+> 与 `.dsh/D4-D5_B线施工计划_RBAC-LS项目模板-素材更换.md`。**契约先行**：文档先于代码改完。
+
+### 1. RBAC：进程内 stub → `aoi_core` 五表 + 真判定
+
+| 文件 | 说明 |
+|---|---|
+| `label_studio/aoi/core/models.py` | 4 张 RBAC 表（`role`/`permission`/`role_permission`/`user_role`，复合主键用 Django 5.2 `CompositePrimaryKey`）+ **`authz_state`**（单行授权版本号） |
+| `label_studio/aoi/core/migrations/0001_initial.py` | 首条 `CREATE SCHEMA IF NOT EXISTS aoi_core`（沿用其余 aoi app 模式）+ 末条插入 `authz_state(id=1, version=0)` |
+| `label_studio/aoi/core/permissions.py` | 权限码表 **38 码**（`ACTIONS` 不扩，新增 6 码进 `EXTRA_PERMISSIONS`：`datasets.delete`/`datasets.config`/`system.storage`/`system.ml`/`system.webhook`/`system.labels`）+ 中文名表 + `DEFAULT_ROLE_MATRIX` + `seed_rbac()` |
+| `label_studio/aoi/core/apps.py` | `post_migrate` 播种（**不在 `ready()` 写库**：`ready()` 会在 `check`/`shell`/`collectstatic` 时触发）；失败只告警不阻断 migrate |
+| `label_studio/aoi/core/authz.py`（新增） | `current_version`（每请求一次 PK 查询）/ `bump_version` / `resolve_user_perms`（按 `(user_id, version)` 缓存 300s）/ `role_codes_for_user` |
+| `label_studio/aoi/common/permissions.py` | `AoiPermission.has_permission` 接真判定；`aoi_permission()` 工厂**未知码导入即失败**（配置期错误）+ 工厂产物缓存（每请求 `get_permissions()` 不再重复 `type()`） |
+| `label_studio/aoi/core/views.py` | `/api/core/*` 四端点真实化：`PUT /roles/{id}` 支持 `permissions` **全量覆盖**、`POST /users/{id}/roles` **全量覆盖**、`GET /roles` 带 `permissions`；写操作**同事务 bump 版本号** + 审计 |
+| `label_studio/aoi/core/management/commands/aoi_seed_rbac.py`、`aoi_grant_role.py`（新增） | 幂等播种兜底；首个超管引导（全量覆盖 + `--list` + `--clear` + 写审计） |
+| `label_studio/aoi/common/audit.py` | H10 最小部分：失败日志 `debug → warning`，`request_id` 截断到列宽 64（超长头会把审计整条吞掉） |
+| `tests/contracts/conftest.py` | 删 `reset_aoi_stub_state`（stub 数据已不存在）；新增 `reset_authz_cache`（LocMemCache 跨用例共享，而用例回滚会让版本号与缓存错配）；`test_user` 默认授 `super_admin` |
+
+**播种语义**（契约 §3.1）：权限点全量 upsert；内置三角色矩阵**仅首次创建时**写入（人工调整不被重启回滚）；`super_admin` 每次**只加不减补授**；授权变更**零延迟生效**（版本号每请求读一次，故 `CACHES` 未配置、LocMemCache 多 worker 不共享也正确）。
+
+实测（本机 PG16）：`migrate aoi_core` → 自动播种 `permissions_created=38, roles_created=3, grants_created=63`；`aoi_seed_rbac` 连跑两次均 `+0`；库内 `operator=7 / admin=18 / super_admin=38`。
+
+### 2. LS 原生闸门（契约 §3.1.1，**红线改口**）
+
+- `label_studio/aoi/common/native_gate.py`（新增）：`AoiNativeGatePermission`，**deny-list、默认放行、fail-open**（异常放行 + `warning`），拦 4 类高危写操作 + 1 条权限锚点；命中缺码抛 DRF `PermissionDenied` → 上游 handler 返回 **LS 方言 `{"detail": …}`**（非 aoi 信封）。
+- `label_studio/core/settings/base.py`（**注入点 1**）：`DEFAULT_PERMISSION_CLASSES` 首位插入闸门。**红线改口**：原「不改全局 `REST_FRAMEWORK`（权限类是上游语义）」修正为「仅允许在 `DEFAULT_PERMISSION_CLASSES` 首位插入 aoi 闸门类，其余项不得改」。
+- 不用 Django 中间件的原因：D3 已移除 `jwt_auth.middleware.JWTAuthenticationMiddleware`，中间件里 `request.user` 只有 session 身份，Bearer/`X-Api-Key` 调用者不可见。
+
+### 3. 施工中发现并修复的既有缺陷：`slash_fallback` 吞掉上游 `/api/auth/export/`
+
+- 现象：`GET /api/auth/export/` 返回 **HTML 404**，上游 `ProjectExportFilesAuthCheck` 自 D3 起**不可达**。
+- 根因：`label_studio/aoi/urls.py` 的兜底正则把 `auth` 并进 aoi 前缀通配，`/api/auth/export/` 先命中兜底 → `resolve('/api/auth/export')` 不存在 → `Resolver404`。`resolve()` 命中即终止，上游路由再无机会。
+- 修法：兜底前缀**去掉 `auth`**，aoi 的两个 auth 端点（`login`/`logout`）逐个点名。契约测试已加专项断言（`/api/auth/export/` 被闸门拦=`403`，`/api/auth/login|logout` 放行）。
+
+### 4. LS 项目模板（D4 只交模块，真实创建留 D6）
+
+`label_studio/aoi/datasets/ls_project.py`（新增）：`AOI_PROJECT_DEFAULTS` + `project_title/project_description/build_project_kwargs`，字段**全部显式钉死**（`maximum_annotations=1`、`sampling=Project.SEQUENCE`、`skip_queue=Project.SkipQueue.REQUEUE_FOR_OTHERS`、**`enable_empty_annotation=True`**（OK 图负样本）、`color='#FFFFFF'`（不使用品牌色）），取值直接引用上游 `Project` 常量而非硬编码副本；**不含任何 review 设置**。
+
+### 5. 前端素材更换
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `label_studio/templates/users/new-ui/user_base.html` | **新增覆盖文件** | 位于 `TEMPLATES['DIRS']`（`label_studio/templates/`），DIRS 先于 APP_DIRS → 遮蔽上游同名模板，**上游模板一行未改**。改动 5 处：平台标题、去掉 GA 与外站追踪 iframe、NBHX logo、平台描述、公司署名；登录页营销 tips 改为静态平台提示 |
+| `label_studio/aoi/common/static/aoi/NBHX.png` | 新增 | 品牌字标（须落在**已安装 app** 的 `static/` 下，`AppDirectoriesFinder` 才扫得到）；生产由 Dockerfile 的 `collectstatic` 收集 |
+| `web/.../src/assets/images/logo.svg` | **新注入点** | LS+HumanSignal 组合 logo → NBHX 字标（位图内嵌，保持 `ReactComponent` 导出与 Menubar 调用点不变） |
+| `web/.../src/index.html` | **新注入点** | `<title>Labelstudio</title>` → `AOI 数智检测` |
+| `web/.../components/HeidiTips/content.ts` | **新注入点** | 三集合文案中文化（去 Enterprise/Starter Cloud/humansignal 链接） |
+| `label_studio/aoi/core/heidi_tips.py`（新增）+ `aoi/urls.py` | aoi 自有文件 | 注册 `heidi-tips/` **遮蔽**上游 GitHub 代理路由，返回平台自有集合 |
+
+**遮蔽路由的三条硬约束**（实测于 `web/.../HeidiTips/utils.ts`）：必须 **200 + 完整集合**（返回 `{}` → `getRandomTip` 返回 `null` → tips 全消失；返回 404 → 前端不更新缓存、**永久沿用旧缓存**）；`link.url` **必须是绝对地址**（`createURL` 内部 `new URL(base)`，相对路径抛错）；集合键名须与 `TipCollectionKey` 一致。
+
+### 6. 验证
+
+- **契约测试**：`tests/contracts/test_platform_a_api.py` **191 passed**（新增 12 组：`TestPermissionCodeRegistry`/`TestRbacMatrix`/`TestRbacForbidden40300`/`TestPermCacheInvalidation`/`TestRoleAdminApi`/`TestGrantRoleCommand`/`TestSeedRbac`/`TestNativeGate`/`TestNativeGateAnnotationFlow`/`TestHeidiTipsRoute`/`TestLoginPageBranding`/`TestLsProjectTemplate`）。
+- **A 侧子集**（`tests/contracts` 排除 B 侧模块）：**263 passed / 8 skipped**；余下 4 个失败在 `test_cross_platform.py`，报 `ModuleNotFoundError: No module named 'fastapi'`——A 侧 venv 未装 fastapi（实测确认），该文件需按自身文档用 `infer-platform/backend` 的 venv 跑，**与本次改动无关**。
+- **三角色矩阵硬编码断言**：38 码全表 + `operator=7`/`admin=18`/`super_admin=38` 逐码比对（期望值写在测试里，不读实现常量）。
+- **前端构建**：`cd web && bun run build` ✅ 23s；产物 `dist/apps/labelstudio/index.html` 标题为 `AOI 数智检测`，bundle 内已含 NBHX 位图与中文 Heidi 文案，且**不再含** `Did you know?`/`Starter Cloud`/`A full-fledged open source`。
+- **biome**：改动的 3 个前端文件 check 通过；**ruff**：改动文件 check/format 全绿（`test_pipeline_core.py`/`test_platform_b_api.py` 有 3 处**存量** lint 漂移，非本次引入，未顺手改）。
+- **迁移**：`migrate aoi_core` 在干净库建出 5 表；`sqlmigrate` 含 `CREATE SCHEMA`；`aoi_seed_rbac` 幂等。
+
+### 7. 残留项与未做项（需人工决策）
+
+| # | 项 | 说明 |
+|---|---|---|
+| R1 | favicon 未替换 | `NBHX.png` 是 161×32 横版字标，直接当 32×32 favicon 会严重变形；等 32×32/64×64 图标 |
+| R2 | 登录页右下角装饰图形 | `core/static/images/login-bg.svg` 仍是上游品牌色（抽象几何，无 logo/文字）。如需中性化：在 `label_studio/static/images/` 放同路径覆盖文件（`FileSystemFinder` 优先） |
+| R3 | 注册页残留文案 | `users/new-ui/user_signup.html:47` 有 `How did you hear about Label Studio?`；本轮只覆盖登录页，未 fork 注册页模板 |
+| R4 | 暗色主题下 logo 对比度 | NBHX 为红黑字标 + 透明底，Menubar 暗色主题下深色笔画可能不可见，需目视确认 |
+| R5 | `web/libs/editor/public/images/{logo,ls_logo}.*` | 三个未被代码引用的静态文件（`Choices.jsx:61` 仅注释示例），未清理 |
+| R6 | H9（`Idempotency-Key` CAS 表） | 卫生清单标 D4 但**非本轮三件事**，未做，建议单独排期 |
+| R7 | H23（Menubar 按 `perms` 显隐） | 本轮未做（计划里为第一个可砍项），仍属 D4~D7 |
+| R8 | 构建副作用 | `bun run build` 会覆写 `label_studio/core/static/js/sw.js` 并生成 `sw.js.map`（红线目录内的文件）；已 `git checkout` 回退并删除产物，**后续构建后需复查** |
+
+## D5：组织管理页（仅超管）+ 屏蔽 LS 原生组织页 + SPA 深链修复（2026-09-15）
+
+> 依据 `docs/contracts/平台A_接口与数据契约.md` §2.2/§3.1/§4.0/§13.1/§14（本次同步修改）与
+> `.dsh/新需求_组织管理页面_交接.md`。裁定：删除=**停用组合拳**；新用户走登录页自助注册
+> （`DISABLE_SIGNUP_WITHOUT_LINK=False`，不做邀请）；独立菜单项；超管唯一且固定账号；
+> 原生组织页**彻底摘除**；H22/H23 一并结项。
+
+### 1. 后端（`aoi/core` + `aoi/pages`，权限点沿用 `system.users`，未扩码表）
+
+| 文件 | 说明 |
+|---|---|
+| `label_studio/aoi/core/views.py` | 新增 3 视图：`GET /api/core/users`（分页列表，每项 `{id, email, is_active, roles}`）、`POST .../deactivate`（停用组合拳）、`POST .../activate`（恢复账号与成员关系，角色不回补）；`UserRolesView` 增加最后超管守卫 |
+| `label_studio/aoi/core/urls.py` | +3 路由 |
+| `label_studio/aoi/core/bootstrap.py`（新增） | 固定超管 `superadmin@nbhx.com` 幂等播种：按 LS 注册链路接线（`username` 取邮箱前缀 + `OrganizationMember` + `active_organization`，无组织则创建）+ 补授 `super_admin`；已存在不重置密码 |
+| `label_studio/aoi/core/apps.py`、`aoi_seed_rbac.py` | `post_migrate` 与兜底命令在 `seed_rbac()` 后追加 `ensure_bootstrap_super_admin()` |
+| `label_studio/aoi/pages.py`（新增）+ `aoi/urls.py` | 点名注册 5 个 SPA 页面路由（`datasets\|training\|review\|system\|organization-admin`，带可选尾斜杠）→ `@login_required` 壳模板视图（H22） |
+| `label_studio/templates/aoi/page.html`（新增） | 壳模板（`extends base.html`，形态同 `projects/list.html`）；落在 `TEMPLATES['DIRS']`，上游零改动 |
+
+**停用语义**（契约 §3.1）：`is_active=False`（已签发 JWT 立即失效）+ 清空 aoi 角色（同事务 `bump_version`）+ 全部 `OrganizationMember.deleted_at` 置当前时间（`active_organization` 镜像上游成员软删行为）。**硬删不做**：`htx_user` 35 个 FK 全 `NO ACTION`，ORM 级联会连带删项目/标注。
+
+**最后超管守卫**：`deactivate` 与 `POST users/{id}/roles` 两路都拦——任何变更导致活跃超管（`is_active=True` 且持 `super_admin`）归零 → `40900`。
+
+**SPA 路由不用泛 catch-all**：`aoi.urls` 在 `core/urls.py` 第 60 行**无前缀** include，其后还有 30+ 条上游路由（`admin/`、`docs/`、`heidi-tips/` 等），泛 `^.*$` 会全部吞掉；故逐个点名。`/organization/` 上游遗留路由（旧 Vue 模板）不动——上游只读。
+
+### 2. 前端（`web/apps/labelstudio/src`）
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `aoi/usePerms.ts`（新增） | aoi 自有 | **前端首条 aoi API 调用**：react-query 缓存 `GET /api/core/permissions`，`usePerms()` → `{perms, has}`；失败视为无权限（fail-closed）；后续页面复用此模式 |
+| `pages/OrganizationAdmin/OrganizationAdminPage.jsx`（新增） | aoi 自有 | 用户表（邮箱/状态/角色）+ 设为/取消 `admin`、设为/取消 `operator`（全量覆盖语义，前端读现有角色增删后提交）+ 禁用/启用（`confirm` 二次确认）；`super_admin` 持有者行不提供任免按钮（守卫后端兜底） |
+| `components/Menubar/Menubar.jsx` | **注入点 3** | 删除原生「Organization」入口；5 个 aoi 入口按 `perms` 显隐：`datasets.view`/`training.view`/`review.view`/`system.view`/`system.users`（H23 结项） |
+| `pages/index.js` | **注入点 4** | 摘除 `OrganizationPage` 注册（`/organization` SPA 路由消失，超管也不可达）；新增 `OrganizationAdminPage`；`ModelsPage` 及 `Organization/` 目录文件保留（`HomePage` 仍引用其 `InviteLink`、`ModelsPage` 独立注册） |
+
+SPA 调用鉴权：session cookie（DRF `SessionAuthentication`）；CSRF 由上游 `core.middleware.DisableCSRF` 对 API 请求豁免（`?enforce_csrf_checks` 可强制）。
+
+### 3. 测试与夹具
+
+- `tests/contracts/fixtures/aoi_api_paths.json`：+3 路径（`GET /api/core/users`、`POST /api/core/users/{id}/deactivate|activate`），版本 `d5-20260915`。
+- `tests/contracts/test_platform_a_api.py`：新增 `TestUserAdminApi` / `TestLastSuperAdminGuard` / `TestBootstrapSuperAdmin` / `TestAoiSpaPages`（见契约 §13.1）。
+
+### 4. 卫生清单结项
+
+- **H22**（SPA 深链 404）：点名路由落地，契约 §2.2 已回写。
+- **H23**（Menubar 无权限门控）：`usePerms` + 5 入口显隐落地。
+
+## 开发环境：前端构建组合目标（2026-09-14）
+
+故障现象：改前端后重新 build，登录后页面 JS/CSS 全部 400（请求 `/react-app/main-sCLm4fB-.js` 等旧 hash）。根因：Django 运行时只读 `STATIC_ROOT/js/manifest.json`（`label_studio/core/static_build/`，由 collectstatic 生成），不读 `web/dist` 里的 manifest；只 build 不 collectstatic → 服务端继续引用上一次构建的 hash，而旧 hash 文件已被新构建覆盖清除。缺失文件本应 404，但 `static_serve.py` 剥 `/react-app` 前缀后残留前导 `/`，`safe_join` 抛 `SuspiciousFileOperation` → 400（上游 bug，暂不改）。
+
+处理：Makefile 新增 `frontend-build-collect`（= `frontend-build` + `collectstatic --noinput`），宿主机开发侧一条命令出齐两份产物；Dockerfile 构建链本就 build→collectstatic 顺序执行，无需改。注意 manifest 在进程启动时一次性加载（`manifest_assets.py` 模块级 `_MANIFEST`），collectstatic 后仍需重启后端。
+
+## D5 收尾：导入包裹（Celery 异步 + 复用 LS 上传）+ 标注项目创建提前 + A 侧「数据集」页（2026-09-20）
+
+> 依据 `docs/contracts/平台A_接口与数据契约.md` §3.2/§4.1/§5.2（本次同步修改）与
+> `.dsh/D5_B线施工计划_缺陷字典收尾-导入包裹-数据集页.md`。三项裁定：① 导入走 Celery+Redis 异步；
+> ② 完整复用 LS 上传（导入必须带 `dataset_id` 且已有 LS 项目），标注项目创建自 D6 提前；
+> ③「数据集」页三块全做（字典/图片/数据集）。
+
+### 1. 后端（`aoi/datasets` + Celery 基建）
+
+| 文件 | 说明 |
+|---|---|
+| `label_studio/aoi/celery.py`（新增）、`aoi/__init__.py` | `Celery('aoi')` + `config_from_object(django.conf:settings, namespace='CELERY')` + `autodiscover_tasks()`；包导入期绑定 `celery_app`（`@shared_task`/`.delay()` 解析到 aoi app）；celery.py 不在导入期触碰 ORM |
+| `label_studio/core/settings/base.py` | AOI 注入点：`CELERY_BROKER_URL`（默认 `redis://localhost:6379/1`，与 LS django_rq 的 DB 0 隔离）、`CELERY_TASK_ALWAYS_EAGER`（env，默认 False）、`CELERY_TASK_EAGER_PROPAGATES=True`、`CELERY_TASK_ROUTES={'aoi.*': {'queue': 'default'}}`、`broker_connection_retry_on_startup` |
+| `label_studio/aoi/datasets/models.py` + `migrations/0004_import_job.py` | 新表 `aoi_datasets.import_job`（`job_id` uuid12 UNIQUE、`status` queued/running/succeeded/failed、`total/ok/dup/bad`、`bad_items` JSONB、`file_upload_ids` JSONB、`source/station_code/dataset_id/created_by`、`created_at/finished_at/error_message`） |
+| `label_studio/aoi/datasets/views.py` | ① `POST /api/datasets` 重写：`name` 必填；携带 `ls_project_id` → `42200`；无已发布字典版本 → `42200`；服务端按最新快照还原 defects → `build_project_kwargs` → `Project.objects.create(organization, created_by)` → `Dataset` 落库 + 审计 `datasets.create`；② `DatasetDetailView.put`：`ls_project_id` 移出 `_EDITABLE`，客户端传入 → `42200`；③ `ImportCreateView.post` 重写：multipart `files[]`（兼容 `files`/`file`）+ `dataset_id`（数字/字符串皆收，multipart 表单是字符串）/`source`（白名单 `manual_real`，其它 → `42200`）/`station_code`；校验 dataset 40401、无 LS 项目 42200、空文件 42200；逐文件预检（扩展名 ∉ {.jpg,.jpeg,.png,.bmp} → `unsupported_extension`；>100MB → `too_large`，坏文件不上传，部分成功语义）；合法文件 `data_import.uploader.create_file_upload` 复用 LS 上传 → 建 `ImportJob(queued)` → `process_import_job.delay`；broker 异常 → `50300`；④ `ImportDetailView.get`：查真实任务表，未知 `job_id` → `40401`（`_IMPORT_JOBS` stub 删除）；⑤ 字典权限澄清：`POST /defects` = `datasets.create` |
+| `label_studio/aoi/datasets/tasks.py`（新增） | `@shared_task process_import_job`：job → running；逐 FileUpload 读字节 → md5 全局去重（命中 → `dup`，不建任务、FileUpload 字节保留）→ PIL 解码（失败 → 登记 `Image(qc_status='rejected', qc_reason='decode_failed')` + `bad`）→ 成功登记 `Image(object_key=LS 上传路径, qc ok)` + 收集任务数据；批量建 LS 任务**镜像上游 `async_import_background`**（事务内 `ProjectSummary.select_for_update` + `ImportApiSerializer.save(project_id)` + `update_tasks_counters_and_task_states` + `update_data_columns`；不 emit webhook）；终态 `succeeded`（counts+bad_items）/`failed`（error_message），任务异常不外抛；审计 `datasets.import` |
+| `label_studio/aoi/datasets/serializers.py` | + `serialize_import_job`（`{job_id, status, total, ok, dup, bad, bad_items, ...}`） |
+| `pyproject.toml` + `uv.lock` | + `celery[redis]>=5.4`（celery 5.6.3；redis-py 5.2.1 满足 extra，无需新装） |
+
+**导入语义**（契约 §4.1）：`object_key` 两态——B 回传=`images/{md5}.jpg`，A 导入=LS 上传路径 `upload/{project}/{uuid8}-{filename}`；md5 **全局**去重（同图不进第二个数据集/项目）；dup/bad 文件的 FileUpload 字节保留不清理（已知残留行为）；bad_items 还原用户原始文件名（剥掉上游 `{uuid8}-` 前缀）。
+
+### 2. 前端（`web/apps/labelstudio/src`，aoi 自有文件，上游零改动）
+
+| 文件 | 说明 |
+|---|---|
+| `aoi/api.ts` | `body instanceof FormData` 时不设 `Content-Type`（浏览器自动带 multipart boundary） |
+| `pages/Datasets/DatasetsPage.jsx` | 占位页 → 三 tab 骨架（缺陷字典/图片/数据集），入口门控 `datasets.view`；路由/菜单沿用既有注册（`pages/index.js`、Menubar 不动） |
+| `pages/Datasets/DefectsPanel.jsx`（新增） | 字典列表（code/中文名/风险档/别称/启停）+ 新增/编辑（code 编辑只读）+ 停用/启用（`datasets.update` 显隐）+「发布字典」（`datasets.publish` 显隐）→ 展示 `version` + label config XML `<pre>` 预览 |
+| `pages/Datasets/ImagesPanel.jsx`（新增） | 导入表单（数据集下拉 + `InputFile` multiple `accept=image/*` + source 固定 `manual_real` + 工位可选）→ `POST /api/datasets/import`(FormData) → `refetchInterval` 轮询 `GET /import/{job_id}` 至终态（react-query v4 回调签名 `refetchInterval(data)`）→ 展示 ok/dup/bad 与 bad_items 明细；图片列表（来源/工位筛选 + 前端分页）+ 下载（`GET /images/{id}/download` → 打开 `url`） |
+| `pages/Datasets/DatasetsPanel.jsx`（新增） | 数据集列表（name/cur_version/ls_project_id 外链 `/projects/{id}/data`）+ 新建（`POST {name}`，`datasets.create`）+「新建草稿版本」（`POST /{id}/versions`，confirm 二次确认） |
+| `aoi/uiTokens.jsx`（新增）+ 四文件样式重构 | UI 与 LS 原生对齐：页面壳（`--header-height` 同高 + `bg-neutral-background`）、分段式 tab、卡片化表格（inset 表头 + 行 hover）、语义徽章（风险档 低/中/高 → positive/primary/negative，质检/版本/来源同法）、发布预览 `<pre>` 换 token 底色。**全部 Tailwind 语义 token（`@humansignal/ui` tokens.js → tailwind colors），零写死色值——`html[data-color-scheme="dark"]` 翻转 token 即自动暗色兼容**；加载态用原生 `Spinner`，错误态走 negative token；构建产物已验证 token 类全部生成，collectstatic 已刷新 |
+
+### 3. 部署与环境
+
+| 文件 | 说明 |
+|---|---|
+| `docker-compose.yml` | + `redis`（redis:7-alpine）与 `worker` 服务（`celery -A aoi worker --queues=default --loglevel=info`，depends_on db/redis，`restart: unless-stopped`）；app/worker 均 + `CELERY_BROKER_URL`（compose 内默认 `redis://redis:6379/1`） |
+| `.env.example` / `.env`、`Makefile`、`README.md` | + `CELERY_BROKER_URL`（宿主机默认 `redis://localhost:6379/1`）；README 启动段补「图片导入需要 Redis + worker」说明 |
+
+**worker 启动收口（三条路径都无需手动单独起 worker）**：
+
+- **宿主机裸跑开发（首选）**：`uv run python label_studio/manage.py runserver` **默认自动带起** aoi Celery worker——实现于 `aoi/core/dev_worker.py`，挂点为 `AoiCoreConfig.ready()` 的 `RUN_MAIN` 守卫（仅 runserver 的 autoreload 子进程有该变量，migrate/check/shell/测试/uwsgi 均零影响，与 D6「不在 ready() 做无守卫副作用」约束相容）；Ctrl+C（同进程组 SIGINT）与文件热重载（SIGTERM→sys.exit→atexit）都会一并退出/重建 worker。两个开关：`AOI_AUTOSTART_CELERY=false` 关闭（想单独看 worker 日志）、`CELERY_TASK_ALWAYS_EAGER=true` 时自动跳过。两个关键坑已修复并留注释：PYTHONPATH 必须用 `Path(__file__)` 自定位 label_studio/（`settings.BASE_DIR` 是 label_studio/core，不含 aoi 包）；celery 子进程 env 必须 pop 掉 `RUN_MAIN`，否则 worker 自身 django.setup() 会递归拉起 worker（fork 风暴，冒烟实测 15 秒繁殖到 5 个）。第三个坑：autoreload 模式下 runserver 在线程里起服务，**启动失败**（端口占用等）时 Django 用 `os._exit(1)` 退出——`os._exit` 跳过 atexit，仅靠父进程 atexit 会孤儿化 worker（冒烟复现）——修复为 worker 子进程挂 `PR_SET_PDEATHSIG`（`preexec_fn` + libc.prctl，内核保证随父进程死亡递送 SIGTERM，含 fork/prctl 竞态窗口的自检），与 atexit 双保险；实测端口占用路径 worker 零残留，热重载路径 worker 正常重建；
+- **docker-compose（部署口径）**：`worker` 服务随 `docker-compose up` 自动启动（`restart: unless-stopped`），与 app/db/redis 同栈；
+- **备选**：`make run-dev` = `make -j2 run-django run-celery` 并发拉起（`run-django`/`run-celery` 为仅 Django/仅 worker 的单进程调试入口，后者 `--pool=solo`）；临时无 Redis/worker 的调试可 `CELERY_TASK_ALWAYS_EAGER=true` 同步执行任务（与契约测试同一开关；生产禁用）。
+
+### 4. 测试与文档
+
+- `tests/contracts/conftest.py`：+ autouse `force_celery_eager`（`CELERY_TASK_ALWAYS_EAGER/EAGER_PROPAGATES=True`，对齐 `force_fake_publish_mode` 写法；导入任务在请求内同步完成）。
+- `tests/contracts/test_platform_a_api.py`：+ `TestDatasetProjectCreation`（POST 建 LS 项目逐字段断言：label_config=快照渲染、`maximum_annotations=1`、`enable_empty_annotation=True`、`color=#FFFFFF`、title=name、description 含 dict_version、组织归属、审计；未发布字典/携带 `ls_project_id`/PUT 改 `ls_project_id` → `42200`）、`TestImportPackage`（eager 导入成功→Image 登记 object_key=upload 路径+LS 任务数=ok；同文件重传→`dup` 且不建新任务；坏字节→`decode_failed`+rejected 登记；`.txt`→`unsupported_extension`；未知 job→`40401`；缺 dataset_id/无项目/未知 source/空文件→`42200`；无角色→`40300`）、`TestDefectPermMapping`（锚点 + 方法解析 + operator 行为）、`TestCeleryWiring`（app 可导入、任务名 `aoi.*` 命中 `default` 队列路由、broker 与 RQ DB 0 隔离）；`test_all_aoi_endpoints_return_200` + `_seed_import_surface` 种子（字典版本+数据集+LS 项目）与 import multipart / 未知 job 40401 分支；`test_idempotency_key_accepted` 补字典种子。
+- 契约文档：§3.2（+`import_job` 表、`image.object_key` 两态注释）、§4.1（import/datasets/defects 行重写、模板说明更新）、§5.2（Celery 落地口径）；`docs/MVP开发计划.md` D5 行勾选 + D6 行标注「标注项目创建已提前至 D5 完成」。`tests/contracts/fixtures/aoi_api_paths.json` **不变**（无新增端点）。
+
+### 5. 已知残留（登记）
+
+- dup/bad 文件已上传的 FileUpload 字节保留不清理（P3 卫生项）。
+- 缩略图与 B 回传图（`images/{md5}.jpg`）预签名下载不在本轮（随 D6 ingest-MinIO 评估）。
+- `annotation-stats` 仍为 stub；`training`/`publish` Celery 队列仅留在契约，不配路由占位。
+- md5 为**全局**去重语义：同图不进第二个数据集/LS 项目（计 `dup`）。
+
+## D5 收尾实测修复：停用缺陷 / 未发布字典先建数据集 / 标注页图片 ERR_LOADING_HTTP / 草稿版本反馈 / 图片与数据集删除（2026-09-20）
+
+> A 侧实测反馈 4 个缺陷，全部定位为 D5 收尾引入或暴露的问题；每项附根因与修复，契约 §4.1 已同步。
+
+### 1. 新增缺陷无法停用（PUT 全量校验误伤启停开关）
+
+- **根因**：前端「停用/启用」发 `PUT /defects {code, active}`，而后端 `put` 走 POST 的全量校验 `_validate_defect_payload`（`name_cn`/`risk_level` 必填）→ 恒 `42200`。
+- **修复**（`aoi/datasets/views.py`）：新增 `_validate_defect_patch`，`PUT` 改为**部分更新语义**——只校验/更新携带字段，未携带字段保持原值；`code` 仅用于定位不可改。POST 仍全量必填（门禁不变）；全量 PUT 兼容（契约测试 `test_put_full_payload_still_works`）。
+
+### 2. 无法测试「未发布字典先建数据集」
+
+- **根因**：`POST /api/datasets` 硬性要求已存在 `defect_dict_version`，无 → `42200`，D5 把标注项目创建提前后该前置卡死了引导流程。
+- **修复**（`aoi/datasets/views.py`）：无任何已发布版本时**回退当前启用缺陷（`active=True`，按 code 排序）以 `draft` 语义渲染 label config 建项目**（项目描述/审计 `dict_version=draft` 可追溯）；连启用缺陷都没有仍 `42200`（原有用例口径不变）。已发布版本存在时行为不变（优先快照，测试锚定）。
+
+### 3. 标注页 4 张图全部 ERR_LOADING_HTTP（并非跨域）
+
+- **根因**：`tasks.py::_image_value` 云存储分支沿用上游口径落**裸存储对象键**（`upload/<project>/<uuid8>-<file>`）进任务 `data.image`；LSF 把它按**相对路径**解析 → 404 → 四张图全挂（文件本身在 MinIO 里完好）。另发现本部署 `HOSTNAME` 未配时 `AWS_S3_CUSTOM_DOMAIN='/data'`、`file.url` 形如 `https:////data/...` 也不可用。
+- **修复**：① `tasks.py`：云存储分支改为拼 `MEDIA_URL`（`/data/`）前缀的**同源 URL**——本部署 MinIO 走 LS `/data/` 鉴权代理（`AWS_QUERYSTRING_AUTH=False`），与本地模式同一条 `UploadedFileResponse` 路由，session cookie 同源加载，天然无跨域；② 新增数据迁移 `0005_fix_ls_task_image_url`：把「值与 `FileUpload.file` 精确匹配且非绝对 URL」的存量任务改写为同源 URL（迁移期依赖 `tasks`/`data_import` 节点注册历史模型）；③ 任务删除路径按「精确 + 后缀」两种形态匹配 `data.image`，兼容存量。
+- **第二轮补刀（用户复测仍报 `https:///data/...`）**：上面只修了「任务 data 落库值」，但标注页读任务时 `resolve_uri` 默认开启，`Task.resolve_uris`（tasks/models.py）会剥掉 `/data/` 前缀匹配 `FileUpload` 后用 **`file_upload.url` 重写任务 data**——而 `S3Boto3Storage.url` 拼 `{protocol}//{custom_domain}/{key}`，本部署 `HOSTNAME` 为空 → `custom_domain='/data'` → 拼出空主机绝对地址 `https:///data/upload/...`，读期重写又把坏 URL 塞回任务。修复：新增 `aoi/common/storage.py::SameOriginS3Boto3Storage`（仅接管 `upload/` 对象键的 `url()` → `{MEDIA_URL}{key}` 相对路径，其余媒体名回退上游），注入点 `core/settings/base.py` MinIO 块把默认后端切到它；实测 `GET /api/tasks/{id}` 与 `/data/upload/...` 取图均恢复正常，契约测试补「`file_upload.url` 必须是同源相对路径」断言。
+
+### 4. 新建草稿版本「无反应」
+
+- **根因**：创建实际成功（DB 有 1.0.0~1.0.3），但前端成功后只静默 invalidate——无 toast，列表也不显示版本，用户感知即「无反应」。
+- **修复**：后端 `serialize_dataset` 增加 `versions:[{id,version,status,phase}]` 投影（`dataset_id` 非 FK 无法 prefetch，列表量级小逐行一查）；前端 `DatasetsPanel` 成功 toast（`草稿版本 x.y.z 已创建`）+ 新增「版本」列即时可见。
+
+### 5. 图片、图集没有删除功能
+
+- **后端**：① 新增 `GET/DELETE /api/datasets/images/{id}`（`DELETE`=`datasets.update`；未知 id → `40401`）：删图片登记 + LS 任务（镜像上游 Data Manager `delete_tasks` 路径：`async_project_summary_recalculation` + `update_tasks_states`）+ 存储字节（`FileUpload.file.delete`，异常仅告警）+ `dataset_item`；② `DELETE /api/datasets/{id}` 由「只删登记行」改为**级联清理**：LS 项目（含任务/标注，镜像上游 `perform_destroy` 断信号）、项目内导入图片（`upload/{project_id}/` 前缀）、dup/bad 残留 FileUpload 字节、版本与 `dataset_item`；B 线回传图（`images/{md5}.jpg`）登记行保留。均写审计（`datasets.image.delete` / `datasets.delete`）。
+- **前端**：`ImagesPanel` 行级「删除」（confirm 二次确认，`datasets.update` 显隐）；`DatasetsPanel` 行级「删除」（confirm 文案明确不可恢复，成功 toast）。
+- **fixture/契约**：`aoi_api_paths.json` 增 `GET/DELETE /api/datasets/images/{id}`（version `d5-20260920-2`）；§4.1 三行同步；新增契约测试 `TestDefectPatchUpdate`（4）、`TestDatasetDraftDictionaryFallback`（3）、`TestImageDelete`（3）、`TestDatasetDeleteCascade`（2），导入用例补「任务 image 必须是 `/data/` 同源 URL」断言。`tests/contracts/test_platform_a_api.py` 全量 248 通过。
+
+### 6. 回归过程中发现并顺带修复：导入结果计数虚增（真实 API 实测暴露）
+
+- **现象**：混合批次（1 好图 + 1 个 `.txt` 预检拒绝）导入成功后 `ok=1, dup=2`，而图片因 md5 全局去重并未登记——ok/dup 被预检 bad 数虚增。
+- **根因**：`tasks.py::process_import_job` 的 `ok = dup = bad = job.bad` 链式赋值把预检拒绝数同时灌进 `ok`/`dup` 初值。
+- **修复**：拆开初值——`ok=0; dup=0; bad=job.bad`（预检拒绝只进 bad）。
+
+## D5 收尾第二轮：缺陷字典发布历史 / 标注页中文名 / 缺陷 code 方案评估（2026-09-21）
+
+### 1. 缺陷字典发布历史不可见
+
+- **根因**：`DefectDictVersion` 每次发布都在写（dev 库已有 4 版），但**没有任何读接口**，前端发布后只拿到当次 `{version, label_config}`，刷新即失——无法回答「当前项目用的哪一版、谁在什么时候改了什么」。
+- **后端**：新增 `GET /api/datasets/defects/versions`（`datasets.view`，契约 §4.1）：最新在前，条目 `{id, version, published_by, published_by_name, published_at, defect_count, labels:[{code,index,color,name_cn,risk_level}], is_latest}`；`serialize_defect_version` 落 `aoi/datasets/serializers.py`；发布人在 `views._publisher_names` 批量解析（邮箱优先）。
+- **前端**：`DefectsPanel` 新增「发布历史」区：版本/发布时间/发布人/缺陷数 + 「查看快照」行内展开（索引、code、中文名、色块），最新版打标；发布成功后自动刷新历史 + toast。
+
+### 2. 打标签时显示编号而非中文名
+
+- **根因**：`render_label_config` 只渲染 `<Label value="{code}"/>`，标注页只能显示 code；且发布快照只存 `{index,color}`，中文名在建项目/重同步链路上丢失。
+- **修复（value/展示名分离）**：
+  - label config 改为 `<Label value="{code}" html="{name_cn}" background="…"/>`——`value` 仍是 code（标注结果、导出、`classes.txt`、`model.yaml`、B 侧契约完全不变），`html` 只影响按钮/区域文本（LSF 原生 `Label.html`）。
+  - **明确不用 `alias`**：LSF `SelectedModel.selectedValues()` 是 `alias ? alias : value`，设 alias 会把标注结果值写成中文名，直接破坏 code 契约（已实测确认）。
+  - 快照补 `name_cn`/`risk_level`；`label_config.defects_from_snapshot` 对旧快照（无 name_cn）回退查当前字典补展示名——存量 4 个版本无需重建。
+  - 发布时把新 label config **回写到已建 AOI 标注项目**（`views._sync_dataset_projects`，`value` 不变故已有标注仍合法），响应带 `projects_synced`；老数据集点一次「发布字典」即生效。
+  - **注入点 #5**（新增，登记于本文件顶部注入点清单）：`web/libs/editor/src/mixins/SelectedModel.js` 加 `getSelectedDisplayString()`（展示名优先 `html`）、`mixins/AreaMixin.js::getLabelText` 与 `components/SidePanels/OutlinerPanel/RegionLabel.tsx` 改用它——否则标签按钮显示中文、而画布框标签和右侧区域列表仍显示 code。三处都只改**展示**，结果值仍走 `selectedValues()`。
+- **前端**：发布结果卡片文案改为「已同步 N 个标注项目」，label config 预览提示 `value=code / html=中文名`。
+- **测试**：golden fixture `label_config_expected.xml` 重新生成（含 `html`），新增 `test_html_display_name_is_separate_from_result_value`、`test_defects_from_snapshot_falls_back_to_dictionary`、`TestDefectPublishHistory`（4）。
+
+### 3. fixture 生成器与文件不同步（本轮暴露并修掉）
+
+- **现象**：跑 `tests/contracts/make_fixtures.py` 会把 `aoi_api_paths.json` 覆盖回 `d2-20260909` 基线，丢掉 D5 的 7 条路径（`/api/auth/login|logout`、`/api/core/users*`、`GET|DELETE /api/datasets/images/{id}`），且把 1 空格缩进重排成 2 空格。
+- **根因**：`samples.py::aoi_api_paths()` 才是生成源，但历史上只手工改了 fixture，生成器停在 d2。
+- **修复**：把 7 条缺失路径 + 本轮新增的 `GET /api/datasets/defects/versions` 补进 `samples.py`，版本升 `d5-20260921-1`；`make_fixtures.py` 对该文件改用 `indent=1`（与仓库既有风格一致，消除全文件重排）。复跑生成后 fixture 与 OpenAPI aoi 路径集合**完全一致**（47 == 47，方法集合无差异）。
+
+### 4. 缺陷 code 方案（`object_fault_type_XX`）影响面评估
+
+- **结论**：**契约级、非局部改动**——见下方「缺陷 code 放宽方案」小节（待产品确认目标格式后实施）。当前未改动任何 code 相关逻辑。
+
+### 5. 缺陷 code 放宽为 `<object>_<fault_type>_NN`（产品确认方案 A：超集，存量零迁移）
+
+- **背景**：原正则把模板占位符当字面量写死：`^object_fault_type_(0[1-9]|[1-9][0-9])$`，实际语义应是 `<object>_<fault_type>` **两段可变英文词** + 两位编号。
+- **改动**：`packages/skillname/skillname/codes.py`
+  - 正则 → `^[a-z][a-z0-9_]{0,27}_(?:0[1-9]|[1-9][0-9])$`（ASCII；`00` 仍非法；前缀≤28 ⇒ 总长≤31，落在 `defect_class.code VARCHAR(32)` 内）；新增 `FAULT_CODE_PREFIX_MAX_LENGTH` / `FAULT_CODE_MAX_LENGTH` / `FAULT_CODE_DEFAULT_PREFIX` 并导出。
+  - `format_fault_code(index, prefix='object_fault_type')` 支持前缀（缺省保持历史输出，向后兼容）；`fault_code_index()` 文档澄清它取的是 **code 自身编号，不是类别索引**。
+  - 超集性质：`object_fault_type_11` 等历史 code 仍合法 ⇒ 字典、已发布快照、LS label config、已有标注、`model.yaml`、B 侧 `b_defect_class` **全部无需迁移**。
+- **排序假设修正**：`views.py` 三处 `DefectClass.objects...order_by('code')` 改为 `order_by('id')`——前缀可变后字典序不再等于「字典构建顺序」，而发布时默认 `index`（=列表位置）与调色板分配依赖这个顺序；id 序与 `training/publish.py` 的取数顺序一致，且新增条目追加在末尾、不扰动既有 index/颜色。
+- **前端**：`DefectsPanel` 表单提示改为 `code（<对象>_<缺陷类型>_NN，如 panel_scratch_01）`，placeholder 同步。
+- **文档/测试**：契约 §2.1 词表 + §4.1 DDL 注释、B 契约 DDL 注释、`docs/双平台架构与拆分方案.md` 伪代码、`docs/P0骨架设计_双平台.md`、`docs/设计_预标三桶复审流程.md`、`docs/README.md`、`packages/skillname/README.md`、`tests/contracts/README.md` 全量同步；`test_skillname.py` 增可变前缀正/负例与 `format_fault_code(prefix=…)`，`test_platform_a_api.py` 增 `test_defect_accepts_variable_prefix_code`（含发布 XML `value=panel_scratch_07 html=面板划伤`）与 `test_defect_rejects_malformed_variable_prefix`。
+
+## D5 收尾第三轮：新建数据集向导 + 收敛原生 Projects 旁路（2026-09-21）
+
+**背景（实测确认的链路问题）**：原流程要跨三个 tab 来回跳（缺陷字典 → 数据集 → 图片），且原生
+Projects 页能建项目/传图，产出的却是"孤儿数据"——实测 `POST /api/projects` 201、`POST /api/projects/{id}/import`
+201（任务与图片都正常显示），但 `aoi_datasets.image` 与 `aoi_datasets.dataset` 均无登记：
+不进 AOI 图片库（无 md5 去重/质检/工位号/来源）、不进数据集页（无版本、无字典绑定、无删除级联），
+label config 还是用户自选模板而非缺陷字典；operator 更能建项目却无 `datasets.config` 权限改配置（403）。
+
+- **新建数据集向导**（`DatasetsPanel`）：一张卡片三步——① 名称 → ② 字典来源（最新已发布版本 / 当前启用缺陷草稿，实时显示条目数与发布人）→ ③ 图片（可选，多选 + 工位号）；建完立即发起导入并在向导内显示进度/结果，点「去图片列表」自动切 tab 并预选该数据集。
+- **tab 顺序按工作流重排**：数据集 → 图片 → 缺陷字典（缺省停在「数据集」）；`DatasetsPage` 透传 `onDatasetReady` / `initialDatasetId`。
+- **导入链路抽公共 hook**：新增 `useDatasetImport`（multipart → Celery 任务 → 终态轮询 + 失效查询），`ImagesPanel` 与向导共用一份实现，避免两处行为漂移。
+- **后端 `dict_source`**（`POST /api/datasets`）：`latest_published`（缺省）/ `active_defects`（强制草稿语义）；非法值 → `42200`；响应回显 `dict_version` / `dict_source`（契约 §4.1 已同步）；审计 detail 带 `dict_source`。
+- **隐藏原生 Projects 菜单入口**（`Menubar`）：AOI 建项目统一走数据集页向导，标注仍走 `/projects/{id}/data` 深链。
+- **测试**：新增 4 例（`dict_source=active_defects` 覆盖已发布版本、无启用缺陷 → 42200、非法值 → 42200、响应回显）。
+
+## D5 收尾第四轮：数据集上传页重设计（frontend-design，2026-09-21）
+
+**设计简报**：产品＝AOI 面板缺陷检测（工业机器视觉）；用户＝产线质检/标注管理员，在工位旁或工程机上
+成批导图；这一页的活儿＝把整批产线图片导进某个数据集（该数据集已绑定缺陷字典），确认导入结果，
+并能在图库里逐张核查。
+
+**设计决策**（为什么这么改，避免以后"顺手"改回卡片套件）：
+1. **颜色是数据，不是装饰**：chrome 全部沿用宿主 sand 中性 token，页面上出现的每一处彩色都编码数据
+   ——缺陷类别（字典自带 8 色，发布快照里有 color）与质检状态。本页不新增任何强调色相，
+   避开"暖奶油底 + 陶土强调色""近黑 + 荧光绿"这些通用套路。
+2. **台面常暗**（本页唯一"大胆"之处）：上传台面 / 图库瓦片在两套主题下都是深色石墨底（`--aoi-stage`），
+   因为看片要在暗底上才准（灯箱/暗房常识），图片也因此在页面上立刻成为主角。
+3. **编号只用在真序列上**：① 建数据集 → ② 传图片 → ③ 发布缺陷字典，轨道同时充当 tab 与状态摘要
+   （"1 个 / 4 张 / 最新 20260921-4"）。
+4. **数字说话**：导入结束用四个 tabular 大数字（成功/重复/坏图/合计），不用彩色横幅；
+   计数、尺寸、版本一律 `tabular-nums`，不跳动。
+5. **空态是邀请**：没有数据集时台面直接给出"新建数据集"；没有图片时告诉你去拖第一批。
+
+**实现**：
+- 新增 `pages/Datasets/Datasets.prefix.css`（页面级 token：`--aoi-stage*`、轨道、台面、胶片条、
+  contact sheet、账本、`prefers-reduced-motion` 与窄屏降级）。
+- `DatasetsPage`：页头 + 工序轨道 + 单工作区；缺省落在「传图片」（上传是主角），
+  轨道 meta 复用面板同 key 的 react-query 缓存，不额外发请求。
+- `ImagesPanel`：拖放上传台面（拖入/点击、本地缩略图逐张可移除、扫描进度条、结果大数字）+
+  contact sheet 图库（QC 角标、工位/尺寸底栏、悬停下载/删除、点图看原图、工位与来源筛选、
+  分页、48/页）。
+- `DatasetsPanel`：新建向导改「作业单」（01 名称 / 02 字典来源含字典色卡 / 03 台面拖入）+ 账本式列表。
+- 后端 `serialize_dataset` 增 `image_count`（按 `upload/{ls_project_id}/` 前缀计数），
+  账本与上传下拉显示"已有 N 张"。
+- 移除台面上的 `InputFile` 依赖，改用自建拖放区（键盘可达：按钮语义 + focus ring）。
+
+**未做（可选后续）**：缺陷字典面板仍是上一轮的表格式卡片风格，与本页新语言未完全统一；
+如需一致，可把「发布字典」也改成"字典卡 + 色卡 + 发布历史时间线"。
+
+**踩坑记录（D5 收尾第四轮 · 样式整页失效）**：新样式文件最初命名 `Datasets.prefix.css`，
+而仓库的 postcss 插件 `web/postcss-prefix-lsf.cjs` 会把**所有 `*.prefix.css` 里的类名统一加 `lsf-` 前缀**
+（`processSelector`），JSX 里的 `className="aoi-ds__stage"` 便对不上产物里的 `.lsf-aoi-ds__stage`
+——Tailwind 工具类照常生效，自定义布局全丢，页面表现为"素材全部靠左顺序排列"。
+**修复**：文件改名 `Datasets.css`（插件只处理 `*.prefix.css`，且本页类名自带 `aoi-ds__` 命名空间，
+无需再加前缀），并在文件头写明原因。
+**教训（验证方法）**：上一轮用 `grep aoi-ds__stage` 做子串校验，`lsf-aoi-ds__stage` 同样命中，属于假阳性；
+现在改为①按浏览器实际 URL 拉取 `/react-app/style-*.css` 核对精确选择器；②脚本对账
+JSX 用到的类名 ↔ CSS 定义的类名（本次 63/63 全部命中，无遗漏）；③确认无 `lsf-aoi-ds__` 残留。
+另注：SPA 由 `REACT_APP_ROOT = web/dist/apps/labelstudio` 直接服务，`bun run build` 是关键步骤；
+`collectstatic` 负责把 manifest 复制进 `STATIC_ROOT/js/`，而 Django 在**模块导入期只读一次 manifest**
+（`core/utils/manifest_assets.py`），所以重建后必须**重启后端**，浏览器再强刷。
+
+## D5 收尾第五轮：缺陷字典面板统一视觉语言 + 首页入口改「建数据集」（2026-09-21）
+
+### 1. 缺陷字典面板统一（`DefectsPanel.jsx` + `Datasets.css`）
+- 摘要行（启用数 / 最新发布版本与时间）→ **条目账本**（色块 + 中文名 + 等宽 code + 风险/别称/启停 + 编辑/停用）
+  → **发布历史时间线**（最新常显、其余可展开；快照用"色卡 chips"呈现，不再嵌套表格）。
+- 编辑表单与新建向导同构（作业单三行：01 code / 02 名称 / 03 风险+别称），code 不可改的说明放在字段下方。
+- **颜色纪律**：条目色块取自**最新发布快照**（发布时才按 index 定色），未发布或不在快照里的条目留空心占位。
+- 发布结果改为「版本 + 回写项目数 + label config 预览（等宽 `<pre>`）」，去掉原表格卡片风。
+
+### 2. 首页入口：Create Project → Create Dataset（新增注入点 6）
+- `web/apps/labelstudio/src/pages/Home/HomePage.tsx`（上游文件）：
+  快捷动作与空态按钮文案改为 **Create Dataset**，点击 `history.push('/datasets')`（本仓库是 react-router v5，
+  首次误用 v6 的 `useNavigate` 导致构建 MISSING_EXPORT，已改正）；空态副文案改为数据集语境；
+  首页不再有"建项目"入口（原生 Projects 页已从菜单隐藏），故移除已无触发者的 `CreateProject`
+  弹窗与 `creationDialogOpen` 用法（死代码）。
+- 未动：首页 "Recent Projects" 卡片仍列标注项目（点进去就是标注页）。
+
+### 3. 验证方法（沿用第四轮教训）
+按浏览器实际 URL 核对：`/react-app/style-*.css` HTTP 200，含 **75 个裸 `.aoi-ds__*` 选择器、`lsf-` 残留 0**；
+脚本对账 JSX 类名 ↔ CSS 定义（75/75 命中、无多余定义）；`main-*.js` 内含 `Create Dataset` 与
+`case 'createDataset': push('/datasets')`；契约测试 353 passed。
+
+## D5 收尾第六轮：按钮样式统一 / 图库按数据集展示 / 风险色块（2026-09-21）
+
+### 1. 按钮统一（`AoiButton.jsx` + `Datasets.css`）
+`@humansignal/ui` 的 `compact + outlined` 在这套页面里偏"半透明灰"，与台面/账本不搭。新增薄封装
+`AoiButton`（样式全在 `.aoi-ds__btn*`，跟随主题语义 token）：**primary**＝墨色实底（浅色主题深墨、暗色自动反白）、
+**ghost**＝发丝描边（缺省）、**quiet**＝无边框文字、**danger**＝删除、**onStage**＝深底台上的反白按钮。
+四个面板（页头/向导/数据集账本/图片台面/字典）全部换过来；统一 30px 高、8px 圆角、12.5px/600。
+
+### 2. 图库按数据集展示（`ImagesPanel.jsx` + 服务端过滤）
+- **问题**：图库把全库图片摊平展示，看不出"哪个数据集里有什么"。
+- **后端**：`GET /api/datasets/images` 新增 `dataset_id`（按导入前缀 `upload/{ls_project_id}/` 过滤，未知 → `40401`）
+  与 `unassigned=true`（B 线回流等未归属图）；每张图返回 `dataset_id`；`serialize_dataset` 增
+  `preview_images`（**最多 5 张**）与既有 `image_count`。
+- **前端**：缺省视图＝**一个数据集一段**（标题 + 图片数 + 当前版本 + 最多 5 张小缩略图，多出的用「+N」块），
+  操作有「查看全部 N 张」「上传到这里」「去标注」；点进「查看全部」下钻为单数据集 contact sheet
+  （分页、工位/来源筛选、悬停下载/删除、点图看原图），可「返回按数据集」。未归属图单独一段。
+
+### 3. 缺陷字典：色块＝风险档颜色
+条目色块原来取"发布快照的类别色"（在用户的字典里恰好是黄/橙），语义与风险不匹配。现改为
+**风险档配色：低=绿 / 中=橙 / 高=红**，与右侧风险徽章同源（`uiTokens` 新增 `warning` 徽章种类，
+中风险不再借用 primary 靛蓝）；面板上标注「色块＝风险档」。类别的 8 色仍保留在**发布历史快照**里
+（那才是标注页标签的颜色）。
+
+### 验证
+新增契约用例 `TestImageGrouping`（5 例：按数据集过滤、未知数据集 40401、未归属排除数据集图、
+数据集预览图、5 张上限）；平台 A 全量 **260 passed**；biome 干净；build + collectstatic 完成，
+按浏览器 URL 复核 `/react-app/style-*.css`（89 个裸 `.aoi-ds__*` 选择器、`lsf-` 残留 0）。
+
+## D6+D7：ingest 图片落存储 / 发布 digest 可复现 + 已上传管理 / 复审·训练页骨架（2026-09-21）
+
+### 1. 契约先行（文档 + samples + fixture 同步）
+- 跨平台契约 §2.4 发布步骤改写为「Python 构造 schema2 产物 + Registry v2 直推（docker push 的等价实现），
+  digest 以 `Docker-Content-Digest` 回执为准」；补「digest 可复现」口径（镜像内 `model.yaml.created_at`
+  固定 epoch、`published_at` 不写镜像、tar mtime=0）。§2.3 字段注释同步；B 侧 `pull.py` 补 digest
+  口径注释（逻辑不动）。
+- 平台 A 契约：§4.2 新增 5 个发布管理端点、§4.4 `GET /workitems` 补 fact/image 加性投影；
+  `samples.py` 增 6 条路径（批量 publish、retire、publishes 列表、软删、恢复 + D6 的 raw 图片路由），
+  `aoi_api_paths.json` 重生成（版本 `d7-20260921-1`）。**顺序敏感**：raw 路由必须排在
+  `images/{id}` 的 DELETE 之前（巡检按序走，DELETE 会删掉图片 1）。
+
+### 2. 后端
+- **ingest 落存储（D6 收口）**：`_store_image` 用 `_decode_format` 判扩展名（jpeg→jpg），object_key
+  `images/{md5}.{ext}`；`Image.objects.get_or_create` 后 `_upload_image_bytes`（`default_storage`，
+  已存在则短路；存储失败 → `50300` 且整个事务回滚，不留「有登记无字节」的半写）。新增
+  `GET /api/datasets/images/{id}/raw`（`datasets.view`，FileResponse 流式回原字节）；
+  `serialize_image` 增 `url`（`upload/` 前缀 → `/data/…` 既有通道，其余 → raw 路由）；
+  `ImagesPanel` 缩略图改走 `image.url`（ingest 图不再依赖 FileUpload 行才能显示）。
+- **digest 可复现（D7 验收附加项）**：`publish.py` 的 `model.yaml.created_at` 固定为
+  `1970-01-01T00:00:00Z`，`published_at` 不进镜像、落 `model_publish.published_at`；测试从
+  「必须不等」翻转为 `test_same_model_rebuilt_later_yields_same_digest`（monkeypatch 两个时刻，断言 digest 相等）。
+- **发布管理 5 端点**：`POST /api/train/models/publish`（批量逐条独立，`{results,succeeded,failed}`，
+  某条失败不回滚其余；`model_ids` 非法 → 42200，未知 id 记该条失败）；`POST /api/train/models/{id}/retire`
+  （幂等下线）；`GET /api/train/publishes`（默认隐藏软删记录，`include_deleted=1` 可见，联表 model
+  带出 `model_lifecycle`）；`POST /api/train/publishes/{id}/delete`（**前置 retired** → 否则 40900；
+  只清 A 侧记录：`deleted_at/deleted_by` + 审计 `model.publish.deleted`，镜像/tag/digest 一律不动，
+  幂等不重复审计）；`POST /api/train/publishes/{id}/restore`（清软删 + lifecycle 回 `published`，
+  审计 `model.publish.restored`）。迁移 0004：`ModelPublish.deleted_at/deleted_by`。
+- **workitem 投影**：`GET /api/review/workitems` 的 item 内嵌 `fact`（工位/序号/拍摄时间/verdict/
+  latency/instance_code）与 `image`（含 `url`）；列表页对 fact/image 各做一次批量查询防 N+1；
+  预标来源或无图时为 `null`，不伪造。
+
+### 3. 前端（frontend-design 同一套语言）
+- **共享基座抽取**：新增 `src/aoi/page.css`（`.aoi-ds` root + 台面 token、页头、工序轨道、账本、
+  按钮、空态、返回条、深色台面），`Datasets.css` 只留数据集页部件并 `@import` 基座——
+  类名保持 `aoi-ds__*`，Datasets 的 JSX **零改动**；拆分后选择器集合与每条规则体逐脚本对账
+  （与 HEAD 版本 0 差异）。
+- **复审页骨架** `ReviewPage.jsx` + `Review.css`（`aoi-rv__*`）：桶过滤 tab（绿/黄/红＝桶含义本身，
+  带计数）+ 状态筛选；工作项账本（缩略图 + 检测事实摘要）；点行开**暗房灯箱**（复用 `.aoi-ds__stage`，
+  claim + 终裁内联表单——低桶/forced 提示必须选处理动作，Esc/点背景关闭）；坏图账本 + 「核过」。
+  空态直说数据从哪来（B 侧 `/api/ingest/findings` 回传）。
+- **训练页骨架** `TrainingPage.jsx` + `Training.css`（`aoi-tr__*`）：工序轨道 ①模型库（勾选
+  approved 模型 + 精度选择 + 批量上传；stub 模型如实标注「契约样例，未落库」且不可选）→
+  ②发布仓库（逐条结果 + 单条重试 + 流水线说明）→ ③已上传（下线 / 删除——disabled 直到
+  model_lifecycle=retired，确认文案如实「仅移除 A 侧记录，仓库镜像保留，B 仍可拉取」/ 恢复）。
+  训练任务区 D9 前保持诚实空态。
+
+### 4. 教训 / 注意
+- **测试里显式写 `pk=1` 不推进序列**：巡检 fixture 写死 Model pk=1 后，同用例里任何
+  `Model.objects.create()` 都会拿 nextval=1 撞 `model_pkey`；修复＝`_advance_model_id_sequence()`
+  （setval 到 `MAX(id)`）后再建行，种子一律 `update_or_create`。
+- **共享 media 目录跨用例存在**：同 md5 字节会让 `_upload_image_bytes` 的 exists 短路生效，
+  「存储失败」用例测不到 save——monkeypatch `exists → False` 强制走到 save。
+- Django 5.2 运行时改 `settings.MEDIA_ROOT` **不会**重置已实例化的 `default_storage`
+  （`storages_changed` 只监听 STORAGES/STATIC_*），测试直接依赖 `BASE_DATA_DIR` 环境。
+- 沙箱 uv 缓存（`/data/jiazhenyu/.cache/uv`）不可写：一律 `UV_CACHE_DIR=$PWD/.uv-cache`；
+  `make test` 用的测试依赖在 `test` dependency-group，本地要 `uv run --group test`（`mock` 等在其中）。
+
+### 验证
+- 契约（两侧各自按运行手册跑，**不能混在同一个 pytest 进程**：A 需要
+  `DJANGO_SETTINGS_MODULE=core.settings.label_studio` + `PYTHONPATH=label_studio`，B 是 FastAPI
+  自带 env，共享包要 editable 安装，见 `infer-platform/backend/pyproject.toml` 头注）：
+  - 平台 A：`PYTHONPATH=label_studio pytest tests/contracts/test_platform_a_api.py` → **281 passed**
+    （新增批量发布 4 例、管理 7 例、ingest 落存储 4 例含 503 回滚与坏图证据、workitem 投影 1 例）；
+  - 平台 B + 跨端：`cd infer-platform/backend && uv run --frozen pytest
+    ../../tests/contracts/test_platform_b_api.py ../../tests/contracts/test_cross_platform.py` →
+    **23 passed**（首次需 `uv pip install -e ../../packages/skillname -e ../../packages/pipeline-core`）；
+  - 其余契约（skillname / pipeline_core 等）：**373 passed, 8 skipped**。
+  - 踩坑记录：把整个 `tests/contracts` 从仓库根一把跑会在 B 侧炸出 6 failed + 14 errors——全是
+    「A venv 里没有 fastapi / Django settings 打到 FastAPI 用例」的环境错，非回归。
+- 前端：biome 对全部改动文件 0 错误；`bun run build` 成功；collectstatic 完成
+  （沙箱里 `make frontend-build-collect` 的 collectstatic 一步被 uv 缓存权限卡住，改用
+  `UV_CACHE_DIR=$PWD/.uv-cache .venv/bin/python manage.py collectstatic` 单独跑，产物一致）。
+- CSS 对账（D5 方法）：构建产物 `style-*.css` 中 JSX 用到的 **124/124** 个 `aoi-*__*` 类全部命中
+  （另 2 个为动态生命周期变体，基类兜底），`lsf-aoi` 残留 0。
+- 单测套件（`make test` 等价命令 `uv run --group test pytest label_studio -m "not integration_tests"`）：
+  **存量问题、与本次无关**——①收集期：上游 `label_studio/fsm/tests/conftest.py` 反向引用
+  `label_studio.tests.conftest.aws_credentials` 等存储 fixture，fork 主 conftest 没有这些定义
+  （fork 骨架提交起就如此，`--ignore=label_studio/fsm` 绕开）；②全量跑到 40 分钟超时仍未完
+  （上游套件体量问题）；③对失败区段逐模块隔离复跑定位：`core/tests/test_check_schema_drift.py`（本
+  里程碑新增迁移唯一可能波及的模块）68 passed，`data_export/tests/test_models.py` 等 30 passed，
+  仅 `tests/webhooks/test_webhooks.py` 2 failed + 4 error——403 on create project，是 D4 RBAC
+  收紧后上游用例未适配的**存量断言**（本里程碑未触碰 projects/权限/webhooks）。结论：aoi 代码
+  全部行为由契约套件锁定（281 passed），上游失败与本次改动无关。

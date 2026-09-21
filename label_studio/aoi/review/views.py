@@ -14,6 +14,8 @@ from aoi.common.errors import CODE_CONFLICT, CODE_NOT_FOUND, CODE_UNPROCESSABLE,
 from aoi.common.idempotency import get_idempotency_key
 from aoi.common.pagination import paginate
 from aoi.common.views import AoiAPIView
+from aoi.datasets.models import Image
+from aoi.datasets.serializers import image_url
 from aoi.review.models import BadImage, FeedbackSuggestion, FinalFact, InspectionFact, ReviewWorkitem
 from django.db import transaction
 from drf_spectacular.utils import extend_schema
@@ -37,11 +39,43 @@ def _iso(value: Any) -> Any:
     return value.isoformat() if value is not None and hasattr(value, 'isoformat') else value
 
 
-def _serialize_workitem(obj: ReviewWorkitem) -> dict[str, Any]:
+def _serialize_workitem(
+    obj: ReviewWorkitem, *, fact: InspectionFact | None = None, image: Any = None
+) -> dict[str, Any]:
+    """工作项投影；``fact``/``image`` 由列表页批量取（D7 加性投影，契约 §4.4）。
+
+    - ``fact``：ingest 来源的检测事实（工位/序号/verdict 等），预标来源或缺失时为 ``None``；
+    - ``image``：``{id, object_key, url, width, height, size_bytes}``（``url`` 按 §4.1 图片 URL
+      规则分流），无图或图登记被删时为 ``None``。
+    """
     bucket = obj.bucket or ReviewWorkitem.bucket_for_verdict(obj.verdict)
+    image_block = None
+    if image is not None:
+        image_block = {
+            'id': image.id,
+            'object_key': image.object_key,
+            'url': image_url(image),
+            'width': image.width,
+            'height': image.height,
+            'size_bytes': image.size_bytes,
+        }
+    fact_block = None
+    if fact is not None:
+        fact_block = {
+            'id': fact.id,
+            'station_code': fact.station_code,
+            'station_name': fact.station_name,
+            'seq': fact.seq,
+            'captured_at': _iso(fact.captured_at),
+            'verdict': fact.verdict,
+            'latency_ms': fact.latency_ms,
+            'instance_code': fact.instance_code,
+        }
     return {
         'id': obj.id,
         'fact_id': obj.fact_id,
+        'fact': fact_block,
+        'image': image_block,
         'source': obj.source,
         'dataset_version_id': obj.dataset_version_id,
         'image_id': obj.image_id,
@@ -81,6 +115,31 @@ def _serialize_bad_image(obj: BadImage) -> dict[str, Any]:
     }
 
 
+def _workitem_page_items(request, qs) -> list[dict[str, Any]]:
+    """列表页组装：分页在 Python 侧做（与契约一致），fact/image 各一次批量查询避免 N+1。"""
+    page = paginate(request, list(qs))
+    items = page['items']
+    facts = {obj.id: obj for obj in InspectionFact.objects.filter(id__in={i.fact_id for i in items if i.fact_id})}
+    image_ids = set()
+    for item in items:
+        if item.image_id:
+            image_ids.add(item.image_id)
+        fact = facts.get(item.fact_id)
+        if fact is not None and fact.image_id:
+            image_ids.add(fact.image_id)
+    images = {obj.id: obj for obj in Image.objects.filter(id__in=image_ids)}
+    page['items'] = [
+        _serialize_workitem(
+            item,
+            fact=facts.get(item.fact_id),
+            image=images.get(item.image_id)
+            or (images.get(facts[item.fact_id].image_id) if item.fact_id in facts else None),
+        )
+        for item in items
+    ]
+    return page
+
+
 @extend_schema(tags=['aoi-review'])
 class WorkitemListView(AoiAPIView):
     """``GET /api/review/workitems``（真实队列；空队列返回空列表，不伪造 item）。"""
@@ -96,8 +155,7 @@ class WorkitemListView(AoiAPIView):
         dataset_version_id = request.query_params.get('dataset_version_id')
         if dataset_version_id:
             qs = qs.filter(dataset_version_id=dataset_version_id)
-        items = [_serialize_workitem(obj) for obj in qs]
-        return self.ok(paginate(request, items))
+        return self.ok(_workitem_page_items(request, qs))
 
 
 @extend_schema(tags=['aoi-review'])

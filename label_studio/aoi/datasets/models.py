@@ -13,6 +13,7 @@ __all__ = [
     'DatasetVersion',
     'DatasetItem',
     'PrelabelTask',
+    'ImportJob',
 ]
 
 SCHEMA = 'aoi_datasets'
@@ -45,7 +46,7 @@ class Image(models.Model):
 
 
 class DefectClass(models.Model):
-    """缺陷字典条目：``code = object_fault_type_XX``。"""
+    """缺陷字典条目：``code = <object>_<fault_type>_NN``（前缀可变英文词，后缀 01~99）。"""
 
     id = models.AutoField(primary_key=True)
     code = models.CharField(max_length=32, unique=True)
@@ -204,3 +205,52 @@ class PrelabelTask(models.Model):
     class Meta:
         app_label = 'aoi_datasets'
         db_table = '"aoi_datasets"."prelabel_task"'
+
+    def __str__(self) -> str:
+        return f'prelabel-{self.pk}'
+
+
+class ImportJob(models.Model):
+    """导入包裹任务（契约 §3.2/§4.1，D5）：Celery ``default`` 队列异步执行。
+
+    - ``job_id`` 对外标识（uuid12，URL ``{job_id}``）；``id`` 仅供内部关联。
+    - 逐文件结局：``ok``（登记 Image + 建 LS 任务）/ ``dup``（md5 全局去重命中，
+      不建任务、FileUpload 字节保留）/ ``bad``（``bad_items`` 记录
+      ``unsupported_extension``/``too_large``（预检阶段）或 ``decode_failed``（任务阶段））。
+    - 任务异常不外抛：落 ``failed`` + ``error_message``（契约 §4.1）。
+    """
+
+    STATUS_QUEUED = 'queued'
+    STATUS_RUNNING = 'running'
+    STATUS_SUCCEEDED = 'succeeded'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = (
+        (STATUS_QUEUED, 'queued'),
+        (STATUS_RUNNING, 'running'),
+        (STATUS_SUCCEEDED, 'succeeded'),
+        (STATUS_FAILED, 'failed'),
+    )
+
+    id = models.AutoField(primary_key=True)
+    job_id = models.CharField(max_length=16, unique=True)
+    status = models.CharField(max_length=16, default=STATUS_QUEUED, choices=STATUS_CHOICES)
+    total = models.IntegerField(default=0)
+    ok = models.IntegerField(default=0)
+    dup = models.IntegerField(default=0)
+    bad = models.IntegerField(default=0)
+    bad_items = models.JSONField(default=list)  # [{filename, reason}]
+    file_upload_ids = models.JSONField(default=list)  # 复用 LS 上传的 FileUpload 主键
+    source = models.CharField(max_length=24, null=True, blank=True)
+    station_code = models.CharField(max_length=32, null=True, blank=True)
+    dataset_id = models.IntegerField(null=True, blank=True)
+    created_by = models.IntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(null=True, blank=True)
+
+    class Meta:
+        app_label = 'aoi_datasets'
+        db_table = '"aoi_datasets"."import_job"'
+
+    def __str__(self) -> str:
+        return self.job_id

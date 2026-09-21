@@ -30,8 +30,8 @@
 
 ### B（平台 A：后端二开、前端二开与数据智能）
 1. **D1~3：训练域数据基座前置**——`aoi_training` 四表迁移（`train_job`/`base_model`/`model`/`preset`）+ `skillname` 枚举裁定落地 + `/api/train/base-models|models|jobs` stub；`model` 表含 `task_type`/`cover_classes`。
-2. D1~4：LS fork 仓库骨架（锁 tag、上游模块只读、`label_studio/aoi/` 二开 app、Menubar 占位）+ 契约/stub 先行（aoi API 全量 stub + OpenAPI、共享表迁移、label config 生成）+ D4~5 **A 侧前端素材更换**（公司 logo/名称/描述，去除 LS 吉祥物与登录页署名）。**A 侧前端页面（数据集/训练（含模型库与发布）/复审/系统）归 B**：按页随对应后端同期交付（D4~D7 数据集/复审骨架、D9~D13 训练/模型库、D13~D15 复审三桶页）。
-3. D4~7：**自研 RBAC 三角色**（角色/权限点/授权表 + DRF 权限类；LS 原生角色框架不可用）+ 图片标注（配置 LS 项目/Review 流）+ 缺陷字典 + 导入包裹（复用 LS 上传）+ **错图接收端点 `/api/ingest/findings`**。
+2. D1~4：LS fork 仓库骨架（锁 tag、上游模块只读、`label_studio/aoi/` 二开 app、Menubar 占位）+ 契约/stub 先行（aoi API 全量 stub + OpenAPI、共享表迁移、label config 生成）+ D4~5 **A 侧前端素材更换**（公司 logo/名称/描述，去除登录页上游署名；**Heidi 吉祥物保留组件、只替换文案**——D4 裁定）。**A 侧前端页面（数据集/训练（含模型库与发布）/复审/系统）归 B**：按页随对应后端同期交付（D4~D7 数据集/复审骨架、D9~D13 训练/模型库、D13~D15 复审三桶页）。
+3. D4~7：**自研 RBAC 三角色**（角色/权限点/授权表 + DRF 权限类；LS 原生角色框架不可用）+ 图片标注（配置 LS 项目；**不做 LS Review 配置**，复审归 `aoi/review`）+ 缺陷字典 + 导入包裹（复用 LS 上传）+ **错图接收端点 `/api/ingest/findings`**。
 4. D9~12：训练链（数据集版本/划分/红线、LS data_export 包裹、训练执行流 + 门禁 + 金标准 + ONNX 导出、模型注册与审批）+ **模型发布服务**（`/model/{model.onnx, model.onnx.sha256, model.yaml}` → `FROM scratch` 单层镜像 → `docker push`；契约 §2.1/§2.4）+ **已上传模型管理**（列表 / 下线 / 软删 / 恢复；仅管理员与超管，删除仅清 A 侧记录、仓库镜像保留）。
 5. **D12~13（先）：预标**——D12 预标任务 + **A 侧自实现 LS ML backend 协议**（D2 fixture 先行，D12 ONNX 导出后接真模型）；D13 预标真推理（`pipeline-core` + ONNX Runtime，跑 worker-gpu）+ **三桶路由**（`verdict → bucket → review_workitem`，高桶自动转 annotation）。
 6. **D13~15（后）：复审**——三桶人工复审（认领/终裁/低桶强制编辑）+ 错图终裁 + 建议清单（R1~R4）/坏图（D13~D14，M2 走通）；D15 批量复审完善 + 数据集落版校验（全部 workitem finalized、低桶已重标 → `phase=published`）。
@@ -100,10 +100,10 @@
 | 平台功能 | LS 原生能力 | MVP 动作 |
 |---|---|---|
 | 登录/令牌/账户 | LS users + token API（JWT HS256，含 `user_id`） | 零改动复用账户与登录 |
-| 角色/权限（RBAC） | LS 原生角色/组织权限框架**不可用** | **自研**：`aoi_core` 三角色 + 权限点 + 授权表 + DRF 权限类 |
+| 角色/权限（RBAC） | LS 原生角色/组织权限框架**不可用** | **自研**：`aoi_core` 五表（角色/权限点/授权表/用户角色 + 授权版本号）+ DRF 权限类 + **LS 原生闸门**（契约 §3.1/§3.1.1）（D4 已落地） |
 | 标注项目/任务/框标注 | projects/tasks/annotations + RectangleLabels | 零改动；label config 由字典渲染 |
 | 数据浏览 | Data Manager | 零重构 |
-| 标注审核 | Review 流 | 配置启用；aoi 只读投影 |
+| 标注审核 | **LS OSS 1.24 无 Review 流**（D2 实测、D4 复验） | **自研**：`aoi/review` 三桶复审 + 终裁（契约 §10.1） |
 | 上传/存储/缩略图 | 本地存储/MinIO + 预签名 + 缩略图 | aoi 导入包裹（去重/质检/元数据） |
 | 预标通道 | ml/ MLBackend + Batch predictions + predictions 回传 | 零二开；A 侧实现官方协议 |
 | 数据集导出 | data_export（YOLO/COCO） | aoi 版本绑定 + 红线 + 校验 |
@@ -112,7 +112,7 @@
 ### 2.2 二开增量（真正要写的代码）
 
 - **`label_studio/aoi/` 七个二开 app（四个业务新域 + 三个支撑 app）**：业务新域 datasets（字典/版本/划分红线/导入包裹）、prelabel（预标 + ML backend 协议）、training（任务/门禁/注册/**发布 + 已上传管理（下线/软删/恢复）**）、review（工作项/终裁/建议/坏图 + 错图接收）；支撑 app core（**自研 RBAC**/公共）、audit（审计）、reports（可选）。
-- **A 侧前端页面**（**B 主笔**，D2 确认，不归 A）：数据集、训练（含模型库与发布：**模型列表多选批量上传 + 已上传记录管理**）、复审、系统（用户/角色/审计）（复用 LS 组件库）+ 素材更换（公司 logo/名称/描述，去除 LS 吉祥物）。
+- **A 侧前端页面**（**B 主笔**，D2 确认，不归 A）：数据集、训练（含模型库与发布：**模型列表多选批量上传 + 已上传记录管理**）、复审、系统（用户/角色/审计）（复用 LS 组件库）+ 素材更换（公司 logo/名称/描述，去除上游署名与登录页营销文案；Heidi 组件保留、文案替换为平台自有）。
 - **workers**：Celery 训练/导入/模型发布任务。
 - **A 侧预标推理**：`pipeline-core` + ONNX Runtime，跑在 worker-gpu。
 
@@ -152,7 +152,7 @@
 | 训练框架 | 仅 YOLO；HF/sklearn 二期 |
 | 相机 | 1 路真实（D17）+ 8 路仿真；硬触发/`camera.captured` 流二期 |
 | 视频流/大屏 | 不进 MVP；B 只做 1~2fps 快照与结果展示 |
-| 两级审核 | 复用 LS Review 流；平台不再自建审核 UI |
+| 两级审核 | **不复用 LS Review（LS OSS 无此能力，D4 复验见契约 §10.1）**；复审由 `aoi/review` 自研（三桶路由 + 人工终裁），平台不自建通用审核 UI |
 | 私有 registry / OCI artifact | 用公开或内网 registry 的普通镜像；`oras`/签名/SBOM 二期 |
 | B 自动升级 | 不做；离线包人工升级 |
 
@@ -191,7 +191,7 @@
 | D1 | monorepo 目录与 `packages/` 骨架；CI 骨架；双平台部署骨架；**registry 地址/命名/账号准备** | 契约评审会（全员）；LS fork 骨架确认；**aoi_training 四表迁移 + skillname 枚举裁定落地**；`/api/ingest/*` stub | 平台 B 骨架（FastAPI + SQLite + APScheduler + 前端壳 5 页路由）；**`skillname` + `pipeline-core` 真逻辑**（切片/合并/三档判定/`load_config`）；B 全量端点 stub |
 | D2 | 双平台 compose/systemd + registry 连通性验证；离线依赖清单；B 前端脚手架（Vite + AntD + ECharts） | 上午：共享表迁移收尾 + label config 生成 stub + aoi API 全量 stub（含 `/api/train/*`）+ **`model.yaml` 生成 stub**；**下午：复用验证日（LS 8 项实测）**；预标 ML backend fixture | B 端点 stub 收尾 + fixture；**假 manifest 拉取链路** + 工位模板 stub；契约测试跑绿；前端 mock 数据 |
 | D3 | 契约测试挂 CI；B 前端布局/路由 | JWT 登录链确认 + **`/api/ingest/findings` 打桩应答** + `model_publish` 表 + 发布服务 stub（假 build/push） | 工位模板校验链路 + 与 A 打桩联调（错图回传）+ B 前端对接 mock |
-| **验收** | **10 项**：① LS 登录/令牌 ② label config 注入 ③ 上传+缩略图 ④ 框标注+Review 流 ⑤ YOLO 导出 smoke ⑥ A 的 `/health` 与 OpenAPI ⑦ B 的 `/health` 与 OpenAPI ⑧ **发布/拉取 stub 全绿（`model.yaml` 生成 + 假 manifest + digest/sha256 校验 + 幂等）** ⑨ **错图回传 stub 全绿（幂等 + `duplicated=true` + 坏图无图分支）** ⑩ `pipeline-core`/`skillname` 双端契约测试绿 | | |
+| **验收** | **10 项**：① LS 登录/令牌 ② label config 注入 ③ 上传+缩略图 ④ 框标注（**Review 流不复用**：LS OSS 无此能力，D4 复验） ⑤ YOLO 导出 smoke ⑥ A 的 `/health` 与 OpenAPI ⑦ B 的 `/health` 与 OpenAPI ⑧ **发布/拉取 stub 全绿（`model.yaml` 生成 + 假 manifest + digest/sha256 校验 + 幂等）** ⑨ **错图回传 stub 全绿（幂等 + `duplicated=true` + 坏图无图分支）** ⑩ `pipeline-core`/`skillname` 双端契约测试绿 | | |
 
 > **D3 工程卫生**：D2 code review 判为 P3 的 30 项（提交/文档引用、stub 语义、索引与分页、前端与部署、工具链噪音）外挂在 `docs/D3_工程卫生清单.md`，D3 按该表顺序处理；不阻塞 M1。
 
@@ -199,21 +199,21 @@
 
 | 天 | A | B | C |
 |---|---|---|---|
-| D4 | 数据整理工具；B 前端「概览」页骨架 | **自研 RBAC 三角色**（角色/权限点/授权表 + DRF 权限类）；LS 项目模板配置；**前端素材更换起步** | `pipeline-core` 切片/NMS 真逻辑；ONNX Runtime 适配器；B 检测记录落库 |
-| D5 | 假数据生成（OK + 缺陷图）；B 前端「检测记录」页 | 缺陷字典 + label config 生成 + 导入包裹（复用 LS 上传）；**前端素材更换完成**；A 侧前端「数据集」页 | `/api/v1/inspect/image` 完整链路；单图推理 + 三档判定；B 记录查询接口 |
-| D6 | 节拍模拟器（打 B 的 `/api/v1/inspect/image`） | 标注项目创建 + Review 流配置验证；**`/api/ingest/findings` 完整实现（图片落 MinIO + fact + workitem/bad_image）**；A 侧前端「复审」页骨架 | 相机适配器壳（DirectorySource）+ 坏图登记 + outbox 回传真实打通 |
-| D7 | 双机联调 + 离线包初版；B 前端「工位与相机」页 | **模型发布服务真实推送**（在模型库中**勾选模型**（支持多选批量，逐条独立）→ `/model/{model.onnx, model.onnx.sha256, model.yaml}` → `FROM scratch` 单层镜像 → `docker push` → 写 `model_publish{image,tag,digest,status}`；权重先用基模导出的占位 ONNX，D12 真模型复用同一条流水线，**不得只发 `model.yaml`**）；**已上传记录的下线/软删/恢复后端**（软删只清 A 侧记录，仓库镜像保留）；A 侧前端「训练」页骨架 | **B 模型拉取真实打通**（Registry v2 manifest/层解包/校验/注册）+ **远端可用 tag 列表与一键拉取**；B 前端联调 |
+| D4 | 数据整理工具；B 前端「概览」页骨架 | **自研 RBAC 三角色（✅ 已完成）**：`aoi_core` 五表 + 38 码 + 判定/缓存 + `/api/core/*` 真实化 + `aoi_grant_role` 引导；**LS 原生闸门（✅ 已完成）**；LS 项目模板 `aoi/datasets/ls_project.py`（✅ 已完成）；**前端素材更换（✅ 已完成）** | `pipeline-core` 切片/NMS 真逻辑；ONNX Runtime 适配器；B 检测记录落库 |
+| D5 | 假数据生成（OK + 缺陷图）；B 前端「检测记录」页 | 缺陷字典 + label config 生成（✅ 已完成）；**导入包裹（✅ 已完成：Celery `default` 队列异步 + 复用 LS 上传 + md5 全局去重）**；**标注项目创建（✅ 自 D6 提前完成：`POST /api/datasets` 服务端按 `ls_project.py` 模板创建 LS 项目）**；前端素材更换完成；**A 侧前端「数据集」页（✅ 已完成：字典/图片/数据集三块）** | `/api/v1/inspect/image` 完整链路；单图推理 + 三档判定；B 记录查询接口 |
+| D6 | 节拍模拟器（打 B 的 `/api/v1/inspect/image`） | 标注项目创建（**✅ 已提前至 D5 完成**，应用 `aoi/datasets/ls_project.py` 模板）；**不做 LS Review 配置**；**`/api/ingest/findings` 完整实现（✅ 已完成：图片落 MinIO + fact + workitem/bad_image，存储失败 503 回滚不留半写）**；**A 侧前端「复审」页骨架（✅ 已完成：桶过滤 tab + 工作项账本 + 暗房灯箱 claim/终裁 + 坏图）** | 相机适配器壳（DirectorySource）+ 坏图登记 + outbox 回传真实打通 |
+| D7 | 双机联调 + 离线包初版；B 前端「工位与相机」页 | **模型发布服务真实推送（✅ A 侧已完成：勾选模型多选批量、逐条独立 → `/model/{model.onnx, model.onnx.sha256, model.yaml}` → `FROM scratch` 单层镜像 → Registry v2 直推（docker push 等价实现）→ 写 `model_publish{image,tag,digest,status}`；digest 可复现已修死，见验收附加项 ✅；权重暂用占位 ONNX，D12 真模型复用同一条流水线）**；**已上传记录的下线/软删/恢复后端（✅ 已完成：retire/delete/restore + publishes 列表；软删只清 A 侧记录，仓库镜像保留）**；**A 侧前端「训练」页骨架（✅ 已完成：①模型库勾选批量上传 → ②发布仓库逐条结果/重试 → ③已上传下线/删除/恢复）** | **B 模型拉取真实打通**（Registry v2 manifest/层解包/校验/注册）+ **远端可用 tag 列表与一键拉取**；B 前端联调 |
 | D8 | **M1 联调** + B 前端「系统」页 | **M1 联调**（复审工作项可见） | **M1 联调**（端到端稳定） |
-| **M1** | A 发布镜像 → B 拉取 → 配一个工位模板 → 假图按节拍推理 → 三档判定 → 错图回传 → A 建复审工作项；B 概览页可见统计；界面为公司 logo/平台描述、无 LS 吉祥物 | | |
+| **M1** | A 发布镜像 → B 拉取 → 配一个工位模板 → 假图按节拍推理 → 三档判定 → 错图回传 → A 建复审工作项；B 概览页可见统计；界面为公司 logo/平台描述、无上游署名与 LS 营销文案 | | |
 
 > **D7 A 侧「发布服务真实推送」的验收附加项（digest 语义，项目负责人 2026-09-11 裁定）**：
 >
 > | # | 要求 | 验收方式 |
 > |---|---|---|
-> | 1 | **digest 必须来自仓库回执**：每次推送以仓库返回的 `Docker-Content-Digest`（manifest 与每个 blob）为准并核对；**仓库不回回执一律视为失败**（不拿本地 manifest sha256 兜底），错误如实落 `model_publish.error_message` | 契约测试：仓库不回执 → 发布失败、状态 `failed`、`digest` 为空；回执与本地不一致 → 同样失败 |
-> | 2 | **digest 可复现**：同一 `model_ref` + 同一产物内容，任意时刻重建推送必须得到**同一个 digest**（跨平台契约 §2.2「同 tag 不同 digest → 禁止覆盖」与 §2.4「B 按 digest 记录」都依赖它） | 契约测试：同一模型跨"不同时刻"连续发布两次，digest 必须相等（该用例当前以"必须不等"锁定待修事实，D7 修复后翻转为相等断言） |
-> | 3 | 修法方向（实现自选，但须**同时**满足 1、2） | 时间戳（`model.yaml.created_at`/`published_at`）不参与 digest：① 落盘/推送前把时间戳从镜像内 `model.yaml` 中剔除，或固定为构建批次时间；② 或改由 `model_publish`/`config_snapshot` 承载时间信息，镜像内保持可复现字节 |
-> | 4 | 三处口径同步 | `publish.py` 模块头「字节可复现」的措辞、跨平台契约 §2.4 的发布步骤、B 侧 digest 校验口径 |
+> | 1 | **digest 必须来自仓库回执**：每次推送以仓库返回的 `Docker-Content-Digest`（manifest 与每个 blob）为准并核对；**仓库不回回执一律视为失败**（不拿本地 manifest sha256 兜底），错误如实落 `model_publish.error_message` | 契约测试：仓库不回执 → 发布失败、状态 `failed`、`digest` 为空；回执与本地不一致 → 同样失败 ✅（D7：`test_registry_without_receipt_fails_publish`） |
+> | 2 | **digest 可复现**：同一 `model_ref` + 同一产物内容，任意时刻重建推送必须得到**同一个 digest**（跨平台契约 §2.2「同 tag 不同 digest → 禁止覆盖」与 §2.4「B 按 digest 记录」都依赖它） | 契约测试：同一模型跨"不同时刻"连续发布两次，digest 必须相等（该用例当前以"必须不等"锁定待修事实，D7 修复后翻转为相等断言）✅（D7：`test_same_model_rebuilt_later_yields_same_digest`） |
+> | 3 | 修法方向（实现自选，但须**同时**满足 1、2） | 时间戳（`model.yaml.created_at`/`published_at`）不参与 digest：① 落盘/推送前把时间戳从镜像内 `model.yaml` 中剔除，或固定为构建批次时间；② 或改由 `model_publish`/`config_snapshot` 承载时间信息，镜像内保持可复现字节 ✅（D7：镜像内 `model.yaml.created_at` 固定为 epoch，`published_at` 不写入镜像，落 `model_publish.published_at`；tar mtime=0） |
+> | 4 | 三处口径同步 | `publish.py` 模块头「字节可复现」的措辞、跨平台契约 §2.4 的发布步骤、B 侧 digest 校验口径 ✅（D7：三处已同步） |
 
 ### P2 训练 + 预标闭环（D9–D14）→ M2(D14)
 

@@ -45,7 +45,9 @@ def main() -> None:
         json.dumps(yolo_export_layout_sample(), indent=2, ensure_ascii=False) + '\n', encoding='utf-8'
     )
     (FIXTURES / 'aoi_api_paths.json').write_text(
-        json.dumps(aoi_api_paths(), indent=2, ensure_ascii=False) + '\n', encoding='utf-8'
+        # indent=1：该 fixture 自 T2.9 起就是 1 空格缩进，保持一致，避免每次生成都全文件重排
+        json.dumps(aoi_api_paths(), indent=1, ensure_ascii=False) + '\n',
+        encoding='utf-8',
     )
     print('fixtures written to', FIXTURES)
 

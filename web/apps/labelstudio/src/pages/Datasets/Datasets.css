@@ -1,0 +1,636 @@
+/**
+ * AOI 数据集工作台样式（D5 定稿 · D7 起共享 chrome 抽到 src/aoi/page.css）。
+ *
+ * 文件名注意：**故意不叫 `*.prefix.css`**。仓库的 postcss 插件
+ * （`web/postcss-prefix-lsf.cjs`）会把所有 `*.prefix.css` 里的类名统一加 `lsf-` 前缀，
+ * 于是 `className="aoi-ds__stage"` 就对不上 `.lsf-aoi-ds__stage`，样式会整页失效（踩过一次）。
+ * 这里的类本来就带 `aoi-ds__` 命名空间，无需再加前缀。
+ *
+ * 本文件只留数据集页自己的部分：导入台面（拖放/胶片条）、向导、缺陷字典、
+ * contact sheet 图库、发布历史；页头/工序轨道/账本/按钮/空态等公共件见 `aoi/page.css`。
+ */
+
+@import "../../aoi/page.css";
+
+/* ── 台面：拖放 ───────────────────────────────────────── */
+.aoi-ds__drop {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 168px;
+  padding: 24px;
+  border-radius: 10px;
+  border: 1px dashed var(--aoi-stage-line-strong);
+  background: var(--aoi-stage-raised);
+  color: var(--aoi-stage-ink-dim);
+  text-align: center;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease;
+
+  &:hover {
+    border-color: rgba(255, 255, 255, 0.3);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--aoi-stage-signal);
+    outline-offset: -3px;
+  }
+}
+
+.aoi-ds__drop--over {
+  border-color: var(--aoi-stage-signal);
+  border-style: solid;
+  background: rgba(232, 242, 76, 0.06);
+}
+
+.aoi-ds__drop-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--aoi-stage-ink);
+}
+
+.aoi-ds__drop-hint {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 胶片条：已选文件的本地预览（真实缩略图，非占位） */
+.aoi-ds__strip {
+  margin-top: 14px;
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.aoi-ds__frame {
+  position: relative;
+  flex: 0 0 auto;
+  width: 92px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #000;
+  box-shadow: 0 0 0 1px var(--aoi-stage-line);
+}
+
+.aoi-ds__frame img {
+  display: block;
+  width: 92px;
+  height: 68px;
+  object-fit: cover;
+}
+
+.aoi-ds__frame-name {
+  padding: 4px 6px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--aoi-stage-ink-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aoi-ds__frame-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  border: none;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+
+  &:hover {
+    background: rgba(0, 0, 0, 0.85);
+  }
+}
+
+.aoi-ds__controls {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 14px;
+}
+
+.aoi-ds__field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--aoi-stage-ink-dim);
+}
+
+.aoi-ds__field input,
+.aoi-ds__field select {
+  min-width: 180px;
+  border-radius: 8px;
+  border: 1px solid var(--aoi-stage-line-strong);
+  background: var(--aoi-stage-raised);
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--aoi-stage-ink);
+  outline: none;
+
+  &:focus {
+    border-color: var(--aoi-stage-signal);
+  }
+}
+
+/* 结果：三个大数字（tabular），不用彩色横幅 */
+.aoi-ds__score {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 28px;
+}
+
+.aoi-ds__score-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.aoi-ds__score-num {
+  font-size: 40px;
+  line-height: 1.02;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--aoi-stage-ink);
+}
+
+.aoi-ds__score-num--muted {
+  color: var(--aoi-stage-ink-dim);
+}
+
+.aoi-ds__score-key {
+  font-size: 11.5px;
+  color: var(--aoi-stage-ink-dim);
+}
+
+.aoi-ds__scan {
+  margin-top: 14px;
+  height: 2px;
+  background: var(--aoi-stage-line);
+  position: relative;
+  overflow: hidden;
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    width: 38%;
+    background: linear-gradient(90deg, transparent, var(--aoi-stage-signal), transparent);
+    animation: aoi-ds-scan 1.15s linear infinite;
+  }
+}
+
+@keyframes aoi-ds-scan {
+  from {
+    transform: translateX(-40%);
+  }
+
+  to {
+    transform: translateX(300%);
+  }
+}
+
+/* ── 新建数据集：向导 ─────────────────────────────────── */
+.aoi-ds__wizard {
+  border: 1px solid var(--color-neutral-border-subtler);
+  border-radius: 12px;
+  background: var(--color-neutral-surface);
+  padding: 20px 22px;
+}
+
+.aoi-ds__wizard-row {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 16px;
+  padding: 16px 0;
+  border-top: 1px solid var(--color-neutral-border-subtler);
+
+  &:first-of-type {
+    border-top: none;
+    padding-top: 4px;
+  }
+}
+
+.aoi-ds__wizard-key {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-neutral-content);
+}
+
+.aoi-ds__wizard-key span {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+  color: var(--color-neutral-content-subtlest);
+}
+
+.aoi-ds__wizard-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* 字典来源：两张可点选的卡片（含真实颜色 chips） */
+.aoi-ds__dicts {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.aoi-ds__dict {
+  display: flex;
+  gap: 10px;
+  border: 1px solid var(--color-neutral-border-subtler);
+  border-radius: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+  background: var(--color-neutral-surface);
+
+  &:hover {
+    border-color: var(--color-neutral-border-bold);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-primary-focus-outline, var(--color-primary-border-bold));
+    outline-offset: 2px;
+  }
+}
+
+.aoi-ds__dict--on {
+  /* 选中态用 emphasis-subtle（浅靛底）+ subtler 边；实心 primary-surface 是配白字的强底，
+     这里放中性文字会读不出来 */
+  border-color: var(--color-primary-border-subtler);
+  background: var(--color-primary-emphasis-subtle);
+}
+
+.aoi-ds__dict--off {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.aoi-ds__dict-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-neutral-content);
+}
+
+.aoi-ds__dict-meta {
+  margin-top: 2px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-neutral-content-subtle);
+}
+
+.aoi-ds__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.aoi-ds__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 6px;
+  border: 1px solid var(--color-neutral-border-subtler);
+  background: var(--color-neutral-surface-inset);
+  padding: 2px 7px;
+  font-size: 11.5px;
+  color: var(--color-neutral-content-subtle);
+}
+
+.aoi-ds__chip i {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+/* contact sheet：等宽瓦片，图片是主角 */
+.aoi-ds__sheet {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 12px;
+}
+
+.aoi-ds__tile {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--aoi-stage);
+  box-shadow: 0 0 0 1px var(--color-neutral-border-subtler);
+  transition:
+    box-shadow 140ms ease,
+    transform 140ms ease;
+
+  &:hover {
+    box-shadow: 0 0 0 1px var(--color-neutral-border-bold);
+    transform: translateY(-1px);
+  }
+
+  &:focus-within {
+    box-shadow: 0 0 0 2px var(--color-primary-border-bold);
+  }
+}
+
+.aoi-ds__tile-img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+  background: var(--aoi-stage);
+}
+
+.aoi-ds__tile-flag {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  backdrop-filter: blur(4px);
+}
+
+.aoi-ds__tile-flag--ok {
+  background: rgba(16, 122, 87, 0.82);
+}
+
+.aoi-ds__tile-flag--bad {
+  background: rgba(178, 40, 40, 0.85);
+}
+
+.aoi-ds__tile-tools {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.aoi-ds__tile:hover .aoi-ds__tile-tools,
+.aoi-ds__tile:focus-within .aoi-ds__tile-tools {
+  opacity: 1;
+}
+
+.aoi-ds__tile-btn {
+  border: none;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  background: rgba(0, 0, 0, 0.66);
+  color: #fff;
+  cursor: pointer;
+
+  &:hover {
+    background: rgba(0, 0, 0, 0.88);
+  }
+}
+
+.aoi-ds__tile-cap {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  background: var(--aoi-stage-raised);
+  color: var(--aoi-stage-ink-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.aoi-ds__tile-cap b {
+  font-weight: 600;
+  color: var(--aoi-stage-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aoi-ds__scan::after {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+
+  .aoi-ds__tile,
+  .aoi-ds__drop {
+    transition: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .aoi-ds__wizard-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+}
+
+/* ── 缺陷字典：条目 + 发布历史 ───────────────────────────
+   与页面同一套语言：条目是"账本行"，颜色只表示缺陷类别（来自最新发布快照），
+   未发布/不在快照里的条目就不画色块——不假装有颜色。 */
+.aoi-ds__defect {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 8px;
+  border-bottom: 1px solid var(--color-neutral-border-subtler);
+
+  &:hover {
+    background: var(--color-neutral-surface-hover);
+  }
+}
+
+.aoi-ds__defect-swatch {
+  width: 12px;
+  height: 28px;
+  border-radius: 3px;
+  background: var(--color-neutral-surface-inset);
+  box-shadow: inset 0 0 0 1px var(--color-neutral-border-subtler);
+}
+
+.aoi-ds__defect-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-neutral-content);
+}
+
+.aoi-ds__defect-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--color-neutral-content-subtle);
+}
+
+.aoi-ds__defect-meta {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-neutral-content-subtle);
+}
+
+.aoi-ds__defect-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* 发布历史：时间线（版本是序列，最新在最上） */
+.aoi-ds__history {
+  border-top: 1px solid var(--color-neutral-border-subtler);
+}
+
+.aoi-ds__history-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 8px;
+  border-bottom: 1px solid var(--color-neutral-border-subtler);
+}
+
+.aoi-ds__history-version {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-neutral-content);
+}
+
+.aoi-ds__snapshot {
+  padding: 14px 8px 18px;
+  background: var(--color-neutral-surface-inset);
+  border-bottom: 1px solid var(--color-neutral-border-subtler);
+}
+
+.aoi-ds__snapshot-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* 发布结果：label config 预览 */
+.aoi-ds__xml {
+  margin: 10px 0 0;
+  overflow-x: auto;
+  border-radius: 8px;
+  background: var(--color-neutral-surface-inset);
+  padding: 12px 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--color-neutral-content-subtle);
+}
+
+/* 数据集分组（图库概览） */
+.aoi-ds__group {
+  padding: 18px 0;
+  border-bottom: 1px solid var(--color-neutral-border-subtler);
+}
+
+.aoi-ds__group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.aoi-ds__group-title {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--color-neutral-content);
+}
+
+.aoi-ds__group-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 4px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-neutral-content-subtle);
+}
+
+.aoi-ds__group-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* 数据集下的缩略图条：比 contact sheet 小一号 */
+.aoi-ds__strip-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.aoi-ds__mini {
+  position: relative;
+  display: block;
+  width: 108px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--aoi-stage);
+  box-shadow: 0 0 0 1px var(--color-neutral-border-subtler);
+
+  &:hover {
+    box-shadow: 0 0 0 1px var(--color-neutral-border-bold);
+  }
+}
+
+.aoi-ds__mini-img {
+  display: block;
+  width: 108px;
+  height: 76px;
+  object-fit: cover;
+  background: var(--aoi-stage);
+}
+
+.aoi-ds__mini-more {
+  display: grid;
+  place-items: center;
+  width: 108px;
+  height: 76px;
+  border-radius: 8px;
+  border: 1px dashed var(--color-neutral-border);
+  background: var(--color-neutral-surface-inset);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-neutral-content-subtle);
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--color-neutral-border-bold);
+    color: var(--color-neutral-content);
+  }
+}

@@ -70,7 +70,8 @@ export const RegionLabel = memo(
               // This comes from an Elem tag that was set without a name. The CSS was fixed to make it work,
               // but this is clearly bad CSS usage.
               <div key={label.id} className={cn("labels-list").toClassName()} style={{ color }}>
-                {label.value || "No label"}
+                {/* AOI 二开（注入点 #5，D5 收尾 #2）：展示名优先 html（缺陷字典中文名），结果值仍是 code */}
+                {label.html || label.value || "No label"}
               </div>,
             ];
           })}

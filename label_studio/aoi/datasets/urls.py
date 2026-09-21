@@ -10,8 +10,11 @@ urlpatterns = [
     path('/import', views.ImportCreateView.as_view(), name='import-create'),
     path('/import/<str:job_id>', views.ImportDetailView.as_view(), name='import-detail'),
     path('/images', views.ImageListView.as_view(), name='image-list'),
+    path('/images/<int:id>', views.ImageDetailView.as_view(), name='image-detail'),
     path('/images/<int:id>/download', views.ImageDownloadView.as_view(), name='image-download'),
+    path('/images/<int:id>/raw', views.ImageRawView.as_view(), name='image-raw'),
     path('/defects/publish', views.DefectPublishView.as_view(), name='defect-publish'),
+    path('/defects/versions', views.DefectVersionListView.as_view(), name='defect-versions'),
     path('/defects', views.DefectListCreateUpdateView.as_view(), name='defect-list'),
     path('/annotation-stats', views.AnnotationStatsView.as_view(), name='annotation-stats'),
     # datasets CRUD（T2.9 裁定：/api/datasets 与 /api/datasets/{id}）

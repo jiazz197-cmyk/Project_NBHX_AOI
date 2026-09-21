@@ -1,0 +1,155 @@
+/**
+ * AOI「训练」页样式（D7 骨架 · frontend-design 同一套语言，命名空间 aoi-tr__*）。
+ *
+ * 共享 chrome（页头/工序轨道/账本/按钮）来自 `src/aoi/page.css`（aoi-ds__*）；
+ * 这里只放训练页自己的部分：勾选列、生命周期标记、批量上传逐条结果、digest 展示。
+ *
+ * ⚠ 不叫 `*.prefix.css`（postcss 会加 `lsf-` 前缀导致类名对不上，见 aoi/page.css 顶部说明）。
+ * 颜色约定：彩色只编码数据（生命周期 / 逐条结果成败），chrome 保持中性。
+ */
+
+@import "../../aoi/page.css";
+
+/* ── 模型账本行：勾选 + 信息 + 动作 ───────────────────── */
+.aoi-tr__row {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.aoi-tr__check {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--color-primary-content);
+  cursor: pointer;
+
+  &:disabled {
+    cursor: not-allowed;
+  }
+}
+
+/* 生命周期是数据：approved/published 走桶绿，candidate 中性，retired 退灰，rejected 桶红 */
+.aoi-tr__lifecycle {
+  display: inline-block;
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--color-neutral-surface-inset);
+  color: var(--color-neutral-content-subtle);
+}
+
+.aoi-tr__lifecycle--approved,
+.aoi-tr__lifecycle--published {
+  background: rgba(16, 122, 87, 0.14);
+  color: #167a57;
+}
+
+[data-color-scheme="dark"] .aoi-tr__lifecycle--approved,
+[data-color-scheme="dark"] .aoi-tr__lifecycle--published {
+  background: rgba(82, 196, 26, 0.16);
+  color: #7ed36a;
+}
+
+.aoi-tr__lifecycle--rejected {
+  background: rgba(178, 40, 40, 0.12);
+  color: #b22828;
+}
+
+[data-color-scheme="dark"] .aoi-tr__lifecycle--rejected {
+  color: #ff8f7d;
+}
+
+.aoi-tr__precision {
+  margin-left: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--color-neutral-content-subtle);
+}
+
+.aoi-tr__precision select {
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--color-neutral-border);
+  background: var(--color-neutral-surface);
+  padding: 0 8px;
+  font-size: 12.5px;
+  color: var(--color-neutral-content);
+}
+
+/* ── 批量上传逐条结果（发布仓库工序的工作区）────────── */
+.aoi-tr__pipeline {
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  border-left: 2px solid var(--color-neutral-border);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--color-neutral-content-subtle);
+}
+
+.aoi-tr__result {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--color-neutral-border-subtler);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.aoi-tr__result-main {
+  min-width: 0;
+}
+
+.aoi-tr__result-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--color-neutral-content-subtle);
+}
+
+.aoi-tr__result-line code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.aoi-tr__status-ok {
+  color: #167a57;
+  font-weight: 600;
+}
+
+[data-color-scheme="dark"] .aoi-tr__status-ok {
+  color: #7ed36a;
+}
+
+.aoi-tr__status-failed {
+  color: #b22828;
+  font-weight: 600;
+}
+
+[data-color-scheme="dark"] .aoi-tr__status-failed {
+  color: #ff8f7d;
+}
+
+/* digest：等宽 + 截断（完整值在 title 里） */
+.aoi-tr__digest {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--color-neutral-content-subtle);
+}
+
+/* ── 训练任务占位（D9 接入，不假装有数据）────────────── */
+.aoi-tr__section {
+  margin-top: 36px;
+}
+
+.aoi-tr__section-title {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--color-neutral-content);
+}

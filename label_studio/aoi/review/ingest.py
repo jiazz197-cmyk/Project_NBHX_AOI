@@ -5,6 +5,8 @@
   同键内容不一致 → 40900；
 - **事务**：每个分支的 image/fact/workitem（或 image/bad_image）在同一 ``transaction.atomic()`` 内写入；
   并发重复请求撞唯一约束时按幂等返回；``fact`` 已落库但 ``workitem`` 缺失时**补建**（P0 修复）；
+- **图片字节**随事务落对象存储（生产 MinIO ``images/{md5}.{ext}``，同 md5 同 key 不重写）；
+  存储不可用 → 50300 整体回滚，不留「有登记无字节」的半写；
 - ``suspicious`` 必须带可解码图片（否则 40010），``verdict ∈ {recheck, manual}``（``auto_pass`` 不回传）；
 - ``bad`` 无图仍成功；单图超过 ``MAX_INGEST_BYTES`` → 40010（不读入内存）。
 """
@@ -20,6 +22,7 @@ from typing import Any
 from aoi.common.errors import (
     CODE_BAD_REQUEST,
     CODE_CONFLICT,
+    CODE_UNAVAILABLE,
     CODE_UNPROCESSABLE,
     AoiError,
 )
@@ -185,8 +188,40 @@ def _decode_size(data: bytes) -> tuple[int | None, int | None]:
         return None, None
 
 
+def _decode_format(data: bytes) -> str | None:
+    """PIL 检测图片格式（对象键扩展名用，serve 时 content-type 才正确）。"""
+    try:
+        from io import BytesIO
+
+        from PIL import Image as PILImage
+
+        with PILImage.open(BytesIO(data)) as img:
+            fmt = (img.format or '').lower()
+        return {'jpeg': 'jpg'}.get(fmt, fmt) or None
+    except Exception:  # pragma: no cover - 依赖缺失/解码失败
+        return None
+
+
+def _upload_image_bytes(object_key: str, data: bytes) -> None:
+    """图片字节落对象存储（生产 = MinIO ``aoi-images`` 桶；本地模式落 ``MEDIA_ROOT``）。
+
+    存储不可用必须让整个回传失败（事务随之回滚），不留「有登记无字节」的半写。
+    """
+    from django.core.files.base import ContentFile
+    from django.core.files.storage import default_storage
+
+    try:
+        if default_storage.exists(object_key):
+            return  # 同 md5 → 同 key → 同字节（幂等回传/历史半写补齐都不重写）
+        default_storage.save(object_key, ContentFile(data))
+    except AoiError:
+        raise
+    except Exception as exc:
+        raise AoiError(CODE_UNAVAILABLE, 'image storage unavailable', detail=str(exc)) from exc
+
+
 def _store_image(file_obj, meta: dict[str, Any], *, required: bool) -> Image | None:
-    """落 ``aoi_datasets.image``；D1–D2 stub 不实际写 MinIO（D4 起补上传）。"""
+    """落 ``aoi_datasets.image`` 并把字节写入对象存储（``images/{md5}.{ext}``）。"""
     if file_obj is None:
         if required:
             raise AoiError(CODE_UNPROCESSABLE, 'file is required for kind=suspicious', fields={'file': 'required'})
@@ -206,7 +241,8 @@ def _store_image(file_obj, meta: dict[str, Any], *, required: bool) -> Image | N
         raise AoiError(CODE_BAD_REQUEST, 'image decode failed', fields={'file': 'decode_failed'})
 
     image_meta = meta.get('image') or {}
-    object_key = f'images/{md5}.jpg'
+    extension = _decode_format(data) or 'jpg'
+    object_key = f'images/{md5}.{extension}'
     defaults = {
         'md5': md5,
         'source': 'camera',
@@ -222,7 +258,7 @@ def _store_image(file_obj, meta: dict[str, Any], *, required: bool) -> Image | N
         'trace_id': meta.get('instance_code'),
     }
     image, _created = Image.objects.get_or_create(object_key=object_key, defaults=defaults)
-    # TODO(D4): 上传 MinIO images/{md5}.jpg；当前仅登记元数据
+    _upload_image_bytes(object_key, data)
     return image
 
 

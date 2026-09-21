@@ -42,7 +42,7 @@
 | 术语 | 定义 |
 |---|---|
 | `skillname` | 任务类型：`ObjectDetection`（MVP 唯一）→ LS 控件 `RectangleLabels` |
-| `object_fault_type_XX` | 缺陷对象 code，XX 两位数字（01~99），由缺陷字典配置 |
+| `<object>_<fault_type>_NN` | 缺陷对象 code：前缀是两段**可变英文词**（如 `panel_scratch`、`glass_dent`），后缀 `NN` 固定两位数字 01~99（`00` 非法），由缺陷字典配置。正则 `^[a-z][a-z0-9_]{0,27}_(0[1-9]|[1-9][0-9])$`（ASCII，前缀≤28 ⇒ 总长≤31 对齐 `VARCHAR(32)`）。历史写法 `object_fault_type_XX` 是其一个合法实例（超集放宽，D5 收尾第二轮）。**code 后缀是 code 自身编号，不是类别索引**——类别索引由字典顺序/显式 `index` 决定 |
 | `model_ref` | 模型注册版本号，格式 `{seq}-{framework}@ds{version}`，如 `3-yolo@ds1` |
 | `model.yaml` | 随模型镜像发布的**模型能力描述**（skillname/类别/推荐阈值/张量信息），见跨平台契约 §2.3 |
 | `station_code` | B 侧工位 code；A 只作**不透明字符串**存储（A 没有工位主数据） |
@@ -57,7 +57,7 @@
 
 | 路径 | 上游 | 说明 |
 |---|---|---|
-| `/` | web（LS 前端静态 + 二开页面） | SPA 路由回退 `/index.html` |
+| `/` | web（LS 前端静态 + 二开页面） | SPA 页面路由：LS 原生页面由各上游 app 自己注册（如 `/projects/` → 壳模板）；aoi 页面（`/datasets`、`/training`、`/review`、`/system`、`/organization-admin`）由 `aoi/urls.py` **点名路由**渲染壳模板（D5，非泛 catch-all——`aoi.urls` 无前缀 include 在 `core/urls.py` 中先于 30+ 条上游路由，泛 `^.*$` 会全部吞掉） |
 | `/api/*` | ls-backend:8000（经 nginx） | LS 原生 + aoi 二开全部接口（同一 DRF 根） |
 | `/data/*`、`/upload/*` | ls-backend | LS 媒体/上传文件（预签名下载） |
 | `/healthz` | ls-backend | compose healthcheck |
@@ -89,10 +89,11 @@
 - **令牌管理（上游端点，语义不变）**：`POST /api/token/` 签发 PAT（返回 refresh JWT；同一用户已有有效 token → 409）、`POST /api/token/refresh/`（refresh → access）、`POST /api/token/blacklist/`、`POST /api/token/rotate/`；`POST /api/auth/logout` 把 refresh 加入黑名单（**幂等**：无效/已吊销同样 200，`revoked=false`）。
 - **已废弃的机制（D3）**：上游 `jwt_auth.middleware.JWTAuthenticationMiddleware` 已从 `MIDDLEWARE` 移除——Bearer 不再由 Django 中间件赋值 `request.user`，因此 JWT 在 DRF 侧有完整的 `request.auth`、一致的 401 语义、可进 OpenAPI；`X-Api-Key: <jwt>` 仍由 `XApiKeySupportMiddleware` 改写为 `Authorization: Bearer` 后走同一认证类。
 - **RBAC 自研**：LS 开源版的组织/角色权限框架不可用（能力不完整且语义与 AOI 三角色不匹配），**不作为权限依据**；不修改 LS 原生 users/组织表，授权关系存 `aoi_core.user_role`（`user_id` 逻辑引用 LS users，不建外键）。
+- **全局 DRF 权限类红线（D4 改口）**：原口径为「不改全局 `REST_FRAMEWORK`（权限类是上游语义）」，D4 起修正为——**仅允许在 `REST_FRAMEWORK.DEFAULT_PERMISSION_CLASSES` 首位插入 aoi 闸门类 `aoi.common.native_gate.AoiNativeGatePermission`，其余项一律不得修改**（`DEFAULT_AUTHENTICATION_CLASSES`/`EXCEPTION_HANDLER` 等保持上游语义）。闸门为 deny-list、默认放行、fail-open，拦截表与错误语义见 §3.1.1。
 - **B → A（错图回传）**：`X-Internal-Token: <INTERNAL_TOKEN>`；`instance_code` / `station_code` 由 B 在回传体中给出，供审计与溯源。
 - **LS → A 预标端点（D2 实测）**：LS 调用 `aoi/prelabel/{task_id}/*` 时**不携带 `X-Internal-Token`/Authorization**，仅带 `User-Agent: heartex/...`；因此默认放行，请求若带内部头则必须正确。置 `AOI_PRELABEL_REQUIRE_INTERNAL_TOKEN=true` 可强制 40100（需配合网关注入头或 LS Basic Auth）；生产建议该端点仅在内网暴露。
 - **A → 镜像仓库（模型发布）**：`MODEL_REGISTRY_USER` / `MODEL_REGISTRY_PASSWORD`，见跨平台契约 §1.2。**A 不直接连接 B**。
-- 权限点（模块级）：`datasets.*`、`training.*`、`review.*`、`system.*`；动作 `view/create/update/cancel/approve/publish`；三角色 `operator`（操作员）/ `admin`（管理员）/ `super_admin`（超级管理员）——**仅用于平台 A**；默认权限矩阵见 §3.1。
+- 权限点（模块级）：`datasets.*`、`training.*`、`review.*`、`system.*`；动作 `view/create/update/cancel/approve/publish`，共 **38 码**（§3.1）；三角色 `operator`（操作员）/ `admin`（管理员）/ `super_admin`（超级管理员）——**仅用于平台 A**；默认权限矩阵见 §3.1。LS 原生端点由 `aoi.common.native_gate` 闸门按 §3.1.1 拦截，被拦时返回 LS 方言错误体。
 
 ### 2.5 公共请求约定
 
@@ -111,6 +112,8 @@
 > LS 原生角色/组织权限框架不可用，**不作为权限依据**；只复用 LS 账户表与登录/JWT。授权模型、权限点与判定全部在 `aoi_core`。
 
 ```sql
+CREATE SCHEMA IF NOT EXISTS aoi_core;        -- 随 aoi_core/0001 迁移创建（沿用其余 aoi app 模式）
+
 CREATE TABLE aoi_core.role (
   id SERIAL PRIMARY KEY,
   code VARCHAR(32) UNIQUE NOT NULL,          -- operator/admin/super_admin
@@ -138,36 +141,100 @@ CREATE TABLE aoi_core.user_role (
   granted_by INT, granted_at TIMESTAMPTZ DEFAULT now(),
   PRIMARY KEY(user_id, role_id)
 );
+
+CREATE TABLE aoi_core.authz_state (          -- 授权版本号（单行），跨进程失效依据
+  id INT PRIMARY KEY,                        -- 固定 1
+  version BIGINT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
 ```
 
-- **权限点注册**：启动时由 `aoi/core/permissions.py` 的常量全量 upsert 到 `aoi_core.permission`，新增权限点无需手写数据迁移。
-- **判定入口（P1 errata）**：DRF 权限类由 `aoi.common.permissions.aoi_permission('training.publish')` 生成（返回**类**，可放进 `permission_classes`；不要放实例——DRF 会无参实例化每一项）；每个 aoi 视图通过 `aoi_perm` / `aoi_perm_by_method` 声明自己的权限点，D4 只改 `AoiPermission.has_permission` 的实现。判定链 `user_role → role_permission → permission.code`；结果按用户缓存 5 分钟，授权变更时主动失效。
+**权限点注册（D4）**
+- 码表由 `aoi/core/permissions.py` 常量定义：`MODULES(4) × ACTIONS(6) = 24` + `EXTRA_PERMISSIONS(14)` = **38 码**。`ACTIONS` 不扩（否则生成 `training.delete`/`review.config` 等 13 个永无视图使用的空码），新增码一律进 `EXTRA_PERMISSIONS`。
+- 播种触发点＝**`post_migrate` signal**（`aoi/core/apps.py` 只注册 receiver，不在 `ready()` 里写库——`ready()` 会在 `check`/`shell`/`collectstatic` 时触发，只读库环境直接失败），幂等命令 `aoi_seed_rbac` 兜底。语义：
+  1. `permission` 按码表**全量 upsert**，不删多余行；
+  2. 三角色按 `code` upsert；**角色已存在则不动其 `role_permission`**（人工调整不被重启回滚）；
+  3. 角色**首次创建**时按默认矩阵写 `role_permission`；
+  4. `super_admin` **每次播种补授缺失码（只加不减）**——显式撤销它的某个码会在下次播种被补回，这是有意的：它天然是全权限角色。
+- 超管引导（D5 更新）：`post_migrate`/`aoi_seed_rbac` 幂等播种**固定超管** `superadmin@nbhx.com`——不存在则按 LS 注册链路接线创建（`username` 取邮箱前缀、挂 `OrganizationMember`、设 `active_organization`，无组织则创建），并补授 `super_admin`（只加不减）；已存在**不重置密码**（改密走 LS 原生账户页）。`aoi_grant_role <email> <role_code>` 仍可用于授予其他用户（全量覆盖，带 `--list`，写审计）。
+- **最后超管守卫（D5）**：`POST /api/core/users/{id}/roles` 与 `POST /api/core/users/{id}/deactivate` 若导致**活跃超管**（`is_active=True` 且持 `super_admin`）数量归零 → `40900`（防止永久锁死授权入口）。
+- **停用语义（D5）**：「删除用户」一律为**停用组合拳**：`is_active=False`（已签发 JWT 立即失效）+ 清空 aoi 角色 + 全部 `OrganizationMember` 置 `deleted_at`（`active_organization` 镜像上游成员软删行为）；硬删（`htx_user` 35 个 FK 全 `NO ACTION`，ORM 级联会连带删项目/标注）不在平台语义内。
+
+**判定与缓存（D4）**
+- 判定入口（P1 errata）：DRF 权限类由 `aoi.common.permissions.aoi_permission('training.publish')` 生成（返回**类**，可放进 `permission_classes`；不要放实例——DRF 会无参实例化每一项）；每个 aoi 视图通过 `aoi_perm` / `aoi_perm_by_method` 声明权限点。
+- 判定链 `user_role → role_permission → permission.code`；结果按 `(user_id, version)` 缓存 **5 分钟**。
+- **失效口径**：`authz_state.version` 与角色/授权变更在**同一事务**内 +1；判定侧**每请求读一次版本号**（单行 PK 查询）。`CACHES` 未配置（Django 默认 `LocMemCache`，多 worker 进程间不共享），因此「删 key 式失效」不可用，版本号是唯一可靠手段，且**零延迟生效**。
+- `has_object_permission` 与 `has_permission` **同判定**；对象级规则（复审认领归属等）留在视图层业务校验。
+- 无角色用户 `perms = []`；除 `GET /api/core/permissions`（豁免，仅需登录）外一律 `40300`。`user_role` 不建外键，**读时校验 LS 用户存在**，不存在视为无角色（不挂 signal 清理）。
+- 视图声明了不在码表内的权限点 → 抛 `AssertionError`（配置期错误，不静默放行）。
 - **三角色定义**：`operator`（操作员）负责日常标注与复审；`admin`（管理员）负责数据集/训练/模型发布/复审等业务全量操作；`super_admin`（超级管理员）在管理员之上增加角色与用户授权、审计。**三角色只在平台 A 使用**，平台 B 无 RBAC、无用户认证。
-- **默认权限矩阵**（`✅` 允许，`—` 拒绝）：
+- **默认权限矩阵（38 码全表；`✅` 允许，`—` 拒绝）**。`DEFAULT_ROLE_MATRIX` 的码集必须与 `PERMISSION_CODES` 完全一致（契约测试断言，遗漏即红）：
 
-| 权限点 | `operator`（操作员） | `admin`（管理员） | `super_admin`（超级管理员） |
-|---|---|---|---|
-| `datasets.view` | ✅ | ✅ | ✅ |
-| `datasets.create` / `datasets.update`（导入/标注） | ✅ | ✅ | ✅ |
-| `datasets.export` | — | ✅ | ✅ |
-| `prelabel.*` | — | ✅ | ✅ |
-| `training.view` | ✅ | ✅ | ✅ |
-| `training.create` / `cancel` / `approve` | — | ✅ | ✅ |
-| `training.publish`（发布模型镜像） | — | ✅ | ✅ |
-| `review.view` / `review.finalize` | ✅ | ✅ | ✅ |
-| `system.roles` / `system.users`（角色与授权） | — | — | ✅ |
-| `system.audit` | — | — | ✅ |
+| 权限点 | `operator`（操作员） | `admin`（管理员） | `super_admin` | 占用方 |
+|---|---|---|---|---|
+| `datasets.view` | ✅ | ✅ | ✅ | aoi 视图 |
+| `datasets.create` | ✅ | ✅ | ✅ | aoi 视图 + 闸门 |
+| `datasets.update` | ✅ | ✅ | ✅ | aoi 视图 |
+| `datasets.publish`（发布缺陷字典 → 渲染 label config + 快照） | — | ✅ | ✅ | aoi 视图 |
+| `datasets.export` | — | ✅ | ✅ | aoi 视图 + 闸门 |
+| `datasets.delete` | — | ✅ | ✅ | 闸门（项目删除） |
+| `datasets.config`（LS 项目配置/label config 改写） | — | ✅ | ✅ | 闸门 |
+| `datasets.cancel` / `datasets.approve` | — | — | ✅ | 保留码 |
+| `prelabel.view` / `prelabel.create` / `prelabel.update` | — | ✅ | ✅ | aoi 视图 |
+| `training.view` | ✅ | ✅ | ✅ | aoi 视图 |
+| `training.create` / `training.cancel` / `training.approve` / `training.publish` | — | ✅ | ✅ | aoi 视图 |
+| `training.update` | — | — | ✅ | 保留码 |
+| `review.view` | ✅ | ✅ | ✅ | aoi 视图 |
+| `review.update`（工作项认领/处理） | ✅ | ✅ | ✅ | aoi 视图 |
+| `review.finalize`（终裁） | ✅ | ✅ | ✅ | aoi 视图 |
+| `review.create` / `review.cancel` / `review.approve` / `review.publish` | — | — | ✅ | 保留码 |
+| `system.roles` / `system.users` | — | — | ✅ | aoi 视图 + 闸门 |
+| `system.audit` | — | — | ✅ | aoi 视图 |
+| `system.storage` / `system.ml` / `system.webhook` / `system.labels` | — | — | ✅ | 闸门 |
+| `system.view` / `system.create` / `system.update` / `system.cancel` / `system.approve` / `system.publish` | — | — | ✅ | 保留码 |
 
-- **接口**：`GET /api/core/permissions` 返回当前用户 `{user_id, roles:[...], perms:[...]}`；`super_admin` 可 `CRUD /api/core/roles`、`POST /api/core/users/{id}/roles` 分配角色。
+> 统计：视图使用 19 码 + 闸门专用 6 码 + 保留码 13 码 = 38。**保留码**仅入库、不授给 `operator`/`admin`，供二期直接启用，避免新增码时再改播种逻辑。
+
+- **语义澄清**：`datasets.update` 指「aoi 数据集/导入/标注操作」，**不含** LS 项目配置与 label config 改写（后者归 `datasets.config`）；`review.update` 指工作项认领/处理，`review.finalize` 指终裁。
+
+- **接口**：`GET /api/core/permissions` 返回当前用户 `{user_id, roles:[...], perms:[...]}`（形状不变，供前端按钮/菜单显隐）；`super_admin` 可 `CRUD /api/core/roles`、`GET /api/core/users`、`POST /api/core/users/{id}/roles|deactivate|activate`。端点语义详见 §4.0。
 - **不共享**：RBAC 属 A 侧业务权限，**不进 `packages/`**；平台 B 无用户体系。
-- **审计**：角色/授权变更写 `aoi_audit.audit_log`。
+- **审计**：角色/授权变更写 `aoi_audit.audit_log`（`role.create`/`role.update`/`role.delete`/`user.roles.assign`/`user.deactivate`/`user.activate`）。
+
+#### 3.1.1 LS 原生闸门（D4）
+
+> **背景**：LS 原生 `has_permission` 在 LSO 下等价于「未被移出组织」（`projects/mixins.py`，单组织部署），任何已登录用户都能改项目配置、导出数据、改存储/ML/Webhook 配置。RBAC 只覆盖 aoi 视图，因此需要一道闸门堵住原生绕过路径。
+
+- **实现**：`aoi.common.native_gate.AoiNativeGatePermission` 注入 `REST_FRAMEWORK.DEFAULT_PERMISSION_CLASSES` **首位**（见 §2.4 红线口径）。之所以不用 Django 中间件：D3 已移除 JWT 中间件，`MIDDLEWARE` 中 `request.user` 只有 session 身份，Bearer/`X-Api-Key` 调用者不可见；DRF 层认证已完成，三种身份都正确。
+- **语义**：**deny-list，默认放行**——不在拦截表内的一律放行；`SAFE_METHODS`（GET/HEAD/OPTIONS）默认放行，**除**导出产物读取。用 allow-list 会让标注主流程直接不可用。
+- **拦截表**（4 类高危 + 1 条权限锚点）：
+
+| 类别 | 方法 + 路径 | 权限点 |
+|---|---|---|
+| ① 项目删除/配置改写 | `DELETE /api/projects/{pk}/` | `datasets.delete` |
+| | `PATCH` / `PUT /api/projects/{pk}/` | `datasets.config` |
+| | `POST /api/projects/{pk}/summary/reset/` | `datasets.config` |
+| ② 导出 | `POST /api/projects/{pk}/export`、`POST /api/projects/{pk}/exports/`、`DELETE /api/projects/{pk}/exports/{id}`、`POST /api/projects/{pk}/exports/{id}/convert` | `datasets.export` |
+| | `GET /api/projects/{pk}/export/files`、`GET /api/auth/export/` | `datasets.export` |
+| ③ 基础设施配置 | 写方法 `/api/storages/**` | `system.storage` |
+| | 写方法 `/api/ml/**` | `system.ml` |
+| | 写方法 `/api/webhooks/**` | `system.webhook` |
+| | 写方法 `/api/labels/**` | `system.labels` |
+| ④ 组织与用户 | 写方法 `/api/organizations/**`、`/api/invite`、`/api/invite/reset-token`、`/api/users/**` | `system.users` |
+| ⑤ 权限锚点（非高危） | `POST /api/projects/` | `datasets.create`（operator 放行） |
+
+- **前缀陷阱**：`/api/auth/login`、`/api/auth/logout` 是 **aoi 端点**必须放行，而 `/api/auth/export/` 是上游导出链路**必须拦截** —— 不得用 `/api/auth/**` 通配放行（契约测试有专项断言）。
+- **豁免**（显式声明，回归断言对象）：`/api/token/**`、`/api/auth/login|logout`、`/api/current-user/**`、`/api/tasks/**`、`/api/annotations/**`、`/api/drafts/**`、`/api/predictions/**`、`/api/dm/**`、`/api/projects/{pk}/next/`、`/api/projects/{pk}/tasks/`、`/api/prelabel/**`、`/api/ingest/**`、`/heidi-tips/`、`/admin/**`、`/django-rq/**`、`/health`、`/user/login/`、`/user/signup/`，以及所有 `GET /api/projects/**`（`export/files` 除外）。
+- **错误语义**：命中拦截且缺码 → DRF `PermissionDenied` → 上游 `core.utils.common.custom_exception_handler` 返回 **LS 方言 `{"detail": ...}`**，**不是** aoi 信封（§2.3）。前端需能处理两种错误体；契约测试分两组断言。
+- **fail-open**：闸门自身异常一律放行并 `logger.warning`——闸门是加固手段，不得因自身缺陷锁死平台。
+- **不做**：LS 原生全量写端点矩阵（只做上述 4 类）；A→B 无实例管理/心跳，与本闸门无关。
 
 ### 3.2 `aoi_datasets`
 
 ```sql
 CREATE TABLE aoi_datasets.image (
   id SERIAL PRIMARY KEY,
-  object_key VARCHAR(128) UNIQUE NOT NULL,   -- images/{md5}.jpg
+  object_key VARCHAR(128) UNIQUE NOT NULL,   -- 两态：B 回传=images/{md5}.jpg；A 导入=LS 上传路径 upload/{project}/{uuid8}-{filename}
   md5 CHAR(32) NOT NULL,
   source VARCHAR(24) NOT NULL,               -- manual_real/camera/reflux_review/prelabel_model_{id}
   station_code VARCHAR(32), seq BIGINT, captured_at TIMESTAMPTZ,
@@ -179,7 +246,7 @@ CREATE TABLE aoi_datasets.image (
 
 CREATE TABLE aoi_datasets.defect_class (
   id SERIAL PRIMARY KEY,
-  code VARCHAR(32) UNIQUE NOT NULL,          -- object_fault_type_XX
+  code VARCHAR(32) UNIQUE NOT NULL,          -- <object>_<fault_type>_NN（前缀≤28，总长≤31）
   name_cn VARCHAR(64) NOT NULL,
   risk_level SMALLINT NOT NULL,              -- 3=高 2=中 1=低
   aliases JSONB DEFAULT '[]', active BOOLEAN DEFAULT TRUE
@@ -220,6 +287,18 @@ CREATE TABLE aoi_datasets.prelabel_task (
   status VARCHAR(16) DEFAULT 'queued',       -- P1：queued/running/succeeded/failed/canceled，服务端控制
   route_bucket JSONB,                        -- A 侧产出，只读（客户端不可写）
   created_by INT
+);
+
+CREATE TABLE aoi_datasets.import_job (       -- D5：导入包裹任务（Celery 异步，契约 §4.1/§5.2）
+  id SERIAL PRIMARY KEY,
+  job_id VARCHAR(16) UNIQUE NOT NULL,        -- uuid12，对外标识（URL 中的 {job_id}）
+  status VARCHAR(16) DEFAULT 'queued',       -- queued/running/succeeded/failed
+  total INT DEFAULT 0, ok INT DEFAULT 0, dup INT DEFAULT 0, bad INT DEFAULT 0,
+  bad_items JSONB DEFAULT '[]',              -- [{filename, reason}]；reason ∈ unsupported_extension/too_large/decode_failed
+  file_upload_ids JSONB DEFAULT '[]',        -- 复用 LS 上传生成的 FileUpload 主键（任务侧消费）
+  source VARCHAR(24), station_code VARCHAR(32), dataset_id INT,
+  created_by INT, created_at TIMESTAMPTZ, finished_at TIMESTAMPTZ,
+  error_message TEXT
 );
 ```
 
@@ -385,20 +464,32 @@ CREATE TABLE aoi_audit.audit_log (
 |---|---|---|
 | `POST /api/auth/login` | 匿名 | `{email, password}` → `{access, refresh, token_type, expires_in, user:{id,email}}`；凭据错误 `40100`（不区分账号/口令），字段缺失 `42200` |
 | `POST /api/auth/logout` | 登录用户 | `{refresh}` 加入黑名单 → `{revoked: bool}`；幂等（无效/已吊销 → `revoked=false`），refresh 不属于当前用户 → `40300` |
-| `GET /api/core/permissions` | 登录用户 | `{user_id, roles:[...], perms:[...]}`，供 A 前端控制按钮显隐（B 不调用，B 无 RBAC） |
-| `CRUD /api/core/roles`、`POST /api/core/users/{id}/roles` | system.roles / system.users（super_admin） | 角色/权限点查看、用户角色分配（写审计） |
+| `GET /api/core/permissions` | 登录用户（豁免权限点） | `{user_id, roles:[code...], perms:[code...]}`，供 A 前端控制按钮/菜单显隐（B 不调用，B 无 RBAC）。无角色 → `perms=[]`；匿名 → `40100` |
+| `GET /api/core/roles` | system.roles（super_admin） | 分页角色列表，每项含 `permissions:[code...]` |
+| `POST /api/core/roles` | system.roles | `{code ≤32, name_cn ≤64, description?, permissions?}`；code 冲突 → `40900`；字段非法 → `42200`；写审计 `role.create` + 版本号 +1 |
+| `GET /api/core/roles/{id}` | system.roles | 角色详情（含 `permissions`）；不存在 → `40401` |
+| `PUT /api/core/roles/{id}` | system.roles | 改 `name_cn`/`description`；带 `permissions:[code]` 时**全量覆盖** `role_permission`；内置角色**禁改 `code`、禁删**；审计 `role.update`（记 perms 差集）+ 版本号 +1 |
+| `DELETE /api/core/roles/{id}` | system.roles | 内置角色 → `40900`；删除后 `user_role` 级联清理 + 审计 `role.delete` + 版本号 +1 |
+| `POST /api/core/users/{id}/roles` | system.users | `{roles:[code...]}` **全量覆盖**（传 `[]` 即清空）；未知 role code → `42200`；用户不存在 → `40401`；审计 `user.roles.assign` + 版本号 +1。`roles` 支持字符串或数组 |
 
 ### 4.1 数据域 `/api/datasets`
 
 | 方法/路径 | 权限 | 说明 |
 |---|---|---|
-| `POST /import` | datasets.create | **包裹 LS 上传**：走 LS Upload/预签名入 MinIO → aoi 去重(md5)/坏图质检/元数据登记 → 登记入 LS project 任务。multipart `files[]` + form `source`/`station_code` → `{job_id}` |
-| `GET /import/{job_id}` | datasets.view | `{status, total, ok, dup, bad, bad_items:[{filename, reason}]}` |
-| `GET /images`、`GET /images/{id}/download` | datasets.view | 筛选/预签名下载 |
-| `GET/POST/PUT /defects`、`POST /defects/publish` | datasets.* | 字典 CRUD；发布 → 渲染 label config（RectangleLabels，code=`object_fault_type_XX`）+ 版本快照 |
-| `GET/POST /datasets`、`GET/PUT/DELETE /datasets/{id}`、`POST /datasets/{id}/versions` | datasets.* | 数据集/版本；发布触发划分 + **测试集红线**（违反 → 42200） |
+| `POST /import` | datasets.create | **包裹 LS 上传（D5 真实化，Celery 异步）**：multipart `files[]` + form `dataset_id`（必填）/`source`（可选，默认 `manual_real`，其它值 → `42200`）/`station_code`（可选 ≤32）→ `{job_id}`。校验：dataset 不存在 → `40401`；dataset 无 `ls_project_id` 或 LS 项目不存在 → `42200`（提示先创建数据集）；`files` 全空 → `42200`。逐文件预检：扩展名 ∉ {`.jpg`,`.jpeg`,`.png`,`.bmp`} → `bad_items` 记 `unsupported_extension`（不上传）；>100MB → 记 `too_large`（不上传）；**部分成功语义**（单坏文件不卡整批）。合法文件复用 LS `data_import.uploader.create_file_upload` 入 LS 存储（生产=MinIO），再由 Celery `default` 队列任务（§5.2）登记 `aoi_datasets.image`（`object_key`=LS 上传路径）并建 LS 任务（镜像上游 `async_import_background`：`ProjectSummary` 行锁 + `ImportApiSerializer` 批量建任务 + `update_tasks_counters_and_task_states` + `update_data_columns`；不 emit webhook）；任务内逐文件结局：md5 **全局**去重命中 → `dup`（不建任务、不重复登记，其 FileUpload 字节保留为已知行为）；PIL 解码失败 → `bad_items` 记 `decode_failed` 并登记 `Image(qc_status='rejected')`；成功 → `Image(qc_status='ok')` + LS 任务。broker 不可用 → `50300`（job 留 queued，已上传 FileUpload 为已知孤儿字节） |
+| `GET /import/{job_id}` | datasets.view | `{status, total, ok, dup, bad, bad_items:[{filename, reason}]}`；未知 `job_id` → `40401`（D5 起查真实任务表，不再有 stub） |
+| `GET /images`、`GET /images/{id}/download`、`GET /images/{id}`、`DELETE /images/{id}` | `GET`=datasets.view；`DELETE`=datasets.update | 筛选/预签名下载；详情（D5 收尾新增）。`GET /images` 查询参数：`source`/`station_code`/`dataset_id`（按导入前缀 `upload/{ls_project_id}/` 过滤，未知数据集 → `40401`）/`unassigned=true`（只看不属于任何数据集的图，如 B 线回流 `images/{md5}.jpg`）（D5 收尾第六轮，图库按数据集展示）；每张图带 `dataset_id` 归属。`DELETE`（D5 收尾新增）：删除图片登记 + 其 LS 任务（镜像上游删任务路径，删后重算计数）+ 存储字节（`FileUpload`）+ 版本明细（`dataset_item`）；未知 id → `40401`。任务按 `data.image` 精确（裸对象键）或后缀（`/data/upload/...` 同源 URL）匹配，兼容存量数据 |
+| `GET/POST/PUT /defects`、`POST /defects/publish`、`GET /defects/versions` | `GET`=datasets.view（含 `/defects/versions`）；`POST`=**datasets.create**；`PUT`=datasets.update；发布=**datasets.publish**（admin+super） | 字典 CRUD；发布 → 渲染 label config（RectangleLabels，`value`=code、`html`=中文展示名）+ 版本快照，并**回写已建 AOI 标注项目的 label config**（响应带 `projects_synced`；D5 收尾 #2）。（D5 权限澄清：写拆分为 POST=create / PUT=update，三角色对两码同持，行为无回退；**D5 收尾：`PUT` 为部分更新语义**——只校验/更新携带字段，启停开关只带 `{code, active}` 即可，`code` 仅用于定位不可改）。**`GET /defects/versions`（D5 收尾 #1 新增）**：发布历史（最新在前），条目 `{id, version, published_by, published_by_name, published_at, defect_count, labels:[{code,index,color,name_cn,risk_level}], is_latest}`；旧快照缺 `name_cn` 时回退查当前字典补展示名 |
+| `GET/POST /datasets`、`GET/PUT/DELETE /datasets/{id}`、`POST /datasets/{id}/versions` | `GET`=datasets.view；`POST`=datasets.create；`PUT`/`DELETE`=datasets.update | 数据集/版本。**D5 起 `ls_project_id` 由服务端生成**（标注项目创建自 D6 提前）：`POST` 必填 `name`，服务端取最新已发布缺陷字典版本并按 `aoi/datasets/ls_project.py` 模板创建真实 LS 项目；可选 `dict_source`（D5 收尾第三轮，新建向导用）：`latest_published`（缺省，最新已发布版本）/ `active_defects`（强制用当前启用缺陷，`draft` 语义）；非法值 → `42200`。**无任何已发布版本时自动回退当前启用缺陷（`active=True`）以 `draft` 语义建项目（D5 收尾：支持未发布字典先建数据集）**，连启用缺陷都没有 → `42200`；响应回显 `dict_version` / `dict_source`；客户端携带 `ls_project_id`（`POST`/`PUT`）→ `42200`。发布触发划分 + **测试集红线**（违反 → 42200）。`GET /datasets` 投影含 `versions:[{id,version,status,phase}]`（D5 收尾）、`image_count` 与 `preview_images`（最多 5 张，图库概览用；D5 收尾第六轮）。`DELETE /datasets/{id}`（D5 收尾改为级联清理）：删 LS 项目（含任务/标注，镜像上游 `perform_destroy` 断信号）、项目内导入的图片登记/任务/存储字节、版本与 `dataset_item`；视图锚点仍是 `datasets.update`（D4 不动视图锚点）；`datasets.delete` 专供 §3.1.1 闸门拦截 LS 原生项目删除 |
 | `GET /datasets/{id}/versions/{v}/export` | datasets.view | **复用 LS data_export（YOLO）** → zip 落 MinIO `datasets/exports/` |
 | `GET /annotation-stats` | datasets.view | LS 标注/审核状态只读投影（不建表） |
+
+**AOI 标注项目模板（D4，`aoi/datasets/ls_project.py`）**
+
+- 形态：**代码级常量模板 + 纯函数**（`AOI_PROJECT_DEFAULTS` / `build_project_kwargs(...)`），无表、无端点、无 IO。
+- **D5 起 `POST /api/datasets` 由服务端创建真实 LS 项目**（标注项目创建自 D6 提前，`ls_project_id` 改为服务端生成，见上表）；快照还原规则：取最新 `defect_dict_version.snapshot` 的 `{labels:{code:{index,color}}}` 按 `index` 排序还原 defects 后渲染 label config。
+- 模板钉住的 LS Project 字段（显式钉死，不依赖上游默认值漂移）：`label_config`（由缺陷字典渲染）、`title`=`{dataset_name}`、`description`（含 dataset/version/dict_version）、`color`=`#FFFFFF`（**不使用品牌色**，裁定 2026-09-14）、`maximum_annotations=1`、`show_overlap_first=False`、`sampling=SEQUENCE`、`skip_queue=REQUEUE_FOR_OTHERS`、`show_skip_button=True`、`expert_instruction`（标注规范文案）、`show_instruction=True`、`show_collab_predictions=True`、`evaluate_predictions_automatically=False`、`reveal_preannotations_interactively=True`、**`enable_empty_annotation=True`（OK 图必须能提交空标注，用于 YOLO 负样本）**、`show_annotation_history=False`、`show_ground_truth_first=False`、`min_annotations_to_start_training=0`。
+- **不含任何 review 设置**：LS OSS 无 Review 流（§10.1、§1 实测）。
 
 ### 4.2 训练域 `/api/train`
 
@@ -473,7 +564,7 @@ A 侧登记：LS 原生 ML 设置页 `MLBackend(url={A}/api/prelabel/{task_id})`
 
 | 方法/路径 | 权限 | 说明 |
 |---|---|---|
-| `GET /workitems` / `POST /workitems/{id}/claim` / `POST /workitems/{id}/finalize` | review.* | 队列（支持 `source`/`dataset_version_id`/`bucket`/`status` 过滤）/认领/终裁；item 含 `bucket`（high/medium/low）+ 颜色 + `forced`；终裁 `{verdict, boxes?, final_reason, note, action, annotation?}`（原因必填；低桶/`forced` 必须带 `action ∈ {relabeled,no_defect,unlabelable}` 或 `annotation`） |
+| `GET /workitems` / `POST /workitems/{id}/claim` / `POST /workitems/{id}/finalize` | review.* | 队列（支持 `source`/`dataset_version_id`/`bucket`/`status` 过滤）/认领/终裁；item 含 `bucket`（high/medium/low）+ 颜色 + `forced`；终裁 `{verdict, boxes?, final_reason, note, action, annotation?}`（原因必填；低桶/`forced` 必须带 `action ∈ {relabeled,no_defect,unlabelable}` 或 `annotation`）。**D7 加性投影**：item 内嵌 `fact`（`station_code/station_name/seq/captured_at/verdict/latency_ms/instance_code`，`fact_id` 为空时为 `null`）与 `image`（`{id, object_key, url, width, height, size_bytes}`，`url` 按 §4.1 图片 URL 规则；无图为 `null`），复审页看图/定位用 |
 | `GET /suggestions` / `POST /suggestions/batch-confirm` | review.view/update | 建议清单/确认回流 |
 | `GET /bad-images` / `POST /bad-images/{id}/handle` | review.* | 错误图片清单（人工重标签/重传入口） |
 
@@ -519,8 +610,16 @@ A 侧登记：LS 原生 ML 设置页 `MLBackend(url={A}/api/prelabel/{task_id})`
 | 队列 | 用途 | 资源 |
 |---|---|---|
 | `training` | YOLO 训练 / ONNX 导出 / 金标准回归 | GPU |
-| `default` | 导入包裹 / 导出 / 统计 | CPU |
+| `default` | 导入包裹（D5 已落地）/ 导出 / 统计 | CPU |
 | `publish` | 模型发布（构建镜像 + docker push + 重试） | CPU + 网络 |
+
+**Celery 落地口径（D5）**：
+
+- broker = 环境变量 `CELERY_BROKER_URL`，默认 `redis://localhost:6379/1`——与 LS 自带 `django_rq` 的 Redis DB 0 **隔离**，LS 原生 RQ 保持不动。
+- app 定义在 `label_studio/aoi/celery.py`（`Celery('aoi')` + `config_from_object('django.conf:settings', namespace='CELERY')` + `autodiscover_tasks()`）；`aoi/__init__.py` 导入 `celery_app` 使 `@shared_task`/`.delay()` 绑定 aoi app。
+- `CELERY_TASK_ROUTES = {'aoi.*': {'queue': 'default'}}`：**仅 `default` 队列有真实任务**（导入包裹 `aoi.datasets.tasks.process_import_job`）；`training`/`publish` 队列暂无任务，路由待各自任务落地时再加（不配占位路由）。
+- 测试口径：契约测试 autouse fixture 强制 `CELERY_TASK_ALWAYS_EAGER=True` + `CELERY_TASK_EAGER_PROPAGATES=True`（eager 同步执行，任务异常直接外抛）。
+- worker 启动：`celery -A aoi worker --queues=default --loglevel=info`（docker-compose `worker` 服务 / 宿主机 `make run-celery`）。
 
 - LS 自带 `django_rq` 仅服务 LS 原生功能，保持不动；**aoi 二开任务统一 Celery**。
 - 任务幂等：`Idempotency-Key` + 状态机 CAS；失败可重试，重试不产生重复副作用。
@@ -599,7 +698,9 @@ A 侧生成 `model.yaml` 的数据来源（字段级别见跨平台契约 §2.3�
 
 ## 10. 复审 / 重标签 / 回流契约
 
-1. **复审自研（D2 裁定）**：LS OSS 无 Review 流，**不复用 LS Review**；复审由 `aoi/review` 自研接口承担（`workitems/claim/finalize`、`suggestions`、`bad-images`）。
+1. **复审自研（D2 裁定，D4 复验）**：LS OSS 无 Review 流，**不复用 LS Review**；复审由 `aoi/review` 自研接口承担（`workitems/claim/finalize`、`suggestions`、`bad-images`）。
+   **D4 复验依据**（`label-studio 1.24.0.dev0 @30a7f330d`）：`core/utils/common.py::is_community()` 判定为社区版（企业能力在未安装的 `label_studio_enterprise`）；全仓 `class AnnotationReview\|class Review` 零命中；`Project` 无任何 review 设置字段；所有 `urls.py` 无 review 路由；`web/` 无 review 页面；`users/firewall.py` 在 LSO 下是显式 no-op（docstring「LSE swaps in an enterprise implementation」）。
+   `feature_flags.json` 中的 `review_routing_rules`、`annotator_reviewer_firewall` 等是**两版共用的云端下发 flag 文件**，不构成 OSS 能力，不得作为依据。故《MVP开发计划》D5/D6/§2.1 的「Review 流配置验证 / 复用 LS Review」为陈旧表述，已回写。
 2. **首轮训练 → 预标签 → 三桶复审（主流程，D2 确认）**：用户在少量已标注图片上做**首轮训练**（不是外部预训练）；训练出的模型对**剩余未标注图片**做预标签（`scope=unlabeled_only`），写入 LS predictions 并由 `pipeline-core` 输出 `verdict ∈ {auto_pass, recheck, manual}` → 三桶：
    - 高/`auto_pass`/绿：系统**自动转 annotation**，写 auto-finalized 复审记录（`final_fact.action=accepted_prediction`）；
    - 中/`recheck`/黄：生成 `review_workitem`（`route=manual`），建议人工确认/微调；
@@ -644,10 +745,28 @@ class RecheckBackend(ABC):
 ### 13.1 契约测试
 
 - `tests/contracts/test_pipeline_core.py`（共享包，A/B 同跑）：切片/合并/三档判定/`load_config`/StubRuntimeModel。
-- `tests/contracts/test_platform_a_api.py`：信封/鉴权/**权限锚点（每视图声明权限点；D2 恒放行，见下）**/导入幂等/训练状态机（approve/publish 门禁与 40401）/**模型发布（model.yaml 生成 + 镜像 tag 规范 + `(model_ref, tag)` 唯一 + 批量上传逐条独立 + 未 `retired` 删除 → 40900 + 软删不删仓库镜像 + 恢复回 published）**/`/api/ingest/findings` 幂等（含半写补建）/复审状态机（claim/finalize 并发与低桶强制）。
-  - **RBAC 覆盖延期（P1 标注）**：三角色矩阵、越权 `40300`、授权缓存失效属 **D4** 交付（`AoiPermission.has_permission` 目前仅要求登录）；D2 只测试"权限锚点已声明 + 匿名 40100"，避免文档声称了不存在的覆盖。
+- `tests/contracts/test_platform_a_api.py`：信封/鉴权/**权限锚点（每视图声明权限点）**/导入幂等/训练状态机（approve/publish 门禁与 40401）/**模型发布（model.yaml 生成 + 镜像 tag 规范 + `(model_ref, tag)` 唯一 + 批量上传逐条独立 + 未 `retired` 删除 → 40900 + 软删不删仓库镜像 + 恢复回 published）**/`/api/ingest/findings` 幂等（含半写补建）/复审状态机（claim/finalize 并发与低桶强制）。
+  - **RBAC 与闸门（D4 已交付，取代原「RBAC 覆盖延期」标注）**：新增 9 组用例——
+    | 类 | 断言 |
+    |---|---|
+    | `TestPermissionCodeRegistry` | 每个视图 `aoi_perm`/`aoi_perm_by_method` ∈ `PERMISSION_CODES`；码表 38 且无重复；`DEFAULT_ROLE_MATRIX` 码集 == `PERMISSION_CODES` |
+    | `TestRbacMatrix` | 三角色 × 38 码逐码断言（期望值**硬编码在测试**，不读实现常量） |
+    | `TestRbacForbidden40300` | operator 越权（`datasets.export`/`datasets.publish`/`training.create`/`system.roles`）→ `40300`；无角色 → `40300`；匿名 → `40100` |
+    | `TestPermCacheInvalidation` | 授予/撤销后**同进程立即**生效；`authz_state.version` 递增 |
+    | `TestRoleAdminApi` | `PUT` 带 `permissions` 全量覆盖（含清空）；内置角色禁删 `40900`；未知码 `42200`；`user_role` 级联 |
+    | `TestGrantRoleCommand` | `aoi_grant_role` 全量覆盖 + `--list`；未知角色退出码非 0；审计落 `user.roles.assign` |
+    | `TestNativeGate` | 四类高危按角色拦截；**前缀陷阱**：`/api/auth/export/` 拦、`/api/auth/login\|logout` 放行；`GET /api/projects/{pk}/imports\|reimports/{id}/` 放行 |
+    | `TestNativeGateAnnotationFlow` | 标注主流程 10 条豁免路径**全部不被拦**（最高优先级回归） |
+    | `TestSeedRbac` | 播种幂等；内置角色矩阵不被二次覆盖；super_admin 补授只加不减 |
+  - **组织管理（D5 已交付）**：新增 4 组用例——
+    | 类 | 断言 |
+    |---|---|
+    | `TestUserAdminApi` | 非超管 `GET /api/core/users`/停用/启用 → `40300`；列表项含 aoi 角色；任命 admin/operator 后**同进程立即生效**、卸任立即失效；停用组合拳三件套（`is_active=False` + 角色清空 + `OrganizationMember.deleted_at`）且**已签发 JWT 立即被拒**；启用恢复访问且角色为空；审计 `user.deactivate`/`user.activate` 落库 |
+    | `TestLastSuperAdminGuard` | 停用/清角色两路导致活跃超管归零 → `40900`；存在第二个活跃超管时放行 |
+    | `TestBootstrapSuperAdmin` | 固定超管播种幂等（重跑不重置密码）、组织成员与 `active_organization` 接线、`super_admin` 只加不减 |
+    | `TestAoiSpaPages` | `/datasets`、`/training`、`/review`、`/system`、`/organization-admin`（含尾斜杠）登录后 200；未登录 → 登录页重定向（H22） |
 - fixtures：`detect_result_sample.json`、`findings_ingest_sample.json`、`model_yaml_sample.yaml`、`ml_backend_predict_sample.json`、`goldens.json`。
-- stub 原则：aoi API 在 D3 前全量 stub + OpenAPI。
+- stub 原则：aoi API 在 D3 前全量 stub + OpenAPI。**D4 起 `/api/core/*` 已由 `aoi_core` 真表承载**，不再是进程内 stub。
 
 ### 13.2 LS 原生 smoke 清单（D2 复用验证日逐项实测，以实测为准回写本文档）
 
@@ -678,5 +797,8 @@ class RecheckBackend(ABC):
 
 | 2026-09-10 | D2 review P0/P1 修复（**语义变更**） | ① `model_publish` 唯一性 `UNIQUE(model_ref)` → **`UNIQUE(model_ref, tag)`**（fp16 才能单独发布）；② `prelabel_task.status` 补默认 `queued` + 枚举，状态由服务端控制（`route_bucket` 只读）；`dataset_version` 创建时 `status/phase` 一律 draft；③ RBAC 判定入口由 `AoiPermission('x')`（实例，DRF 不可用）改为 **`aoi_permission('x')` 工厂 + 视图 `aoi_perm` 锚点**；④ 明确 RBAC 三角色矩阵/40300/缓存失效为 D4 交付（§13.1 标注） | ① 本表 + §3.1/§3.2/§3.3/§4.1/§4.3/§13.1；② stub 与迁移：`aoi_training/0003`、`aoi_datasets/0003`、`aoi_review/0003`；③ fixture 无字段变化（`aoi_api_paths.json` 已含相关路径）；④ `TestTrainingPublishGuards`/`TestStateMachineInjection`/`TestPermissionAnchors`/`TestReviewStateMachine` |
 | 2026-09-10 | 认证链路标准化（D3，**语义变更**） | ① 新增 `POST /api/auth/login`（匿名，email+password → access/refresh）与 `POST /api/auth/logout`（refresh 进黑名单，幂等）；② Bearer 校验从 `jwt_auth.middleware.JWTAuthenticationMiddleware` 迁到 **DRF 认证类**（`aoi.common.authentication.AoiJWTAuthentication`），中间件已从 `MIDDLEWARE` 移除；③ 显式 `SIMPLE_JWT`（access 30 min / refresh 7 天 / 不轮换，理由见 §2.4）；④ 上游 `/api/token/*`、`/user/login/`（浏览器 session）与 `X-Internal-Token` **语义不变** | ① 本表 + §2.4/§4.0；② 实现 `label_studio/aoi/core/auth.py`、`aoi/common/authentication.py`、`core/settings/base.py`、`aoi/urls.py`；③ fixture `aoi_api_paths.json`（版本 `d3-20260910`，新增两条 auth 路径与 `auth: public`）；④ `TestAoiJwtAuth`（15 例：登录/刷新/登出黑名单/Bearer 打 aoi 与 LS 原生端点/浏览器 session 回归/中间件移除守卫） |
+| 2026-09-14 | RBAC 真实化 + LS 原生闸门（D4，**语义变更**） | ① `aoi_core` 由进程内 stub 改为**五表**（原四表 + `authz_state` 版本号表），随 `aoi_core/0001` 迁移创建 schema；② 权限码 **38 个**（`ACTIONS` 不扩，新增 6 码进 `EXTRA_PERMISSIONS`：`datasets.delete`/`datasets.config`/`system.storage`/`system.ml`/`system.webhook`/`system.labels`），矩阵补齐 `datasets.publish`/`review.update`；③ 播种改为 **`post_migrate`**（非「启动时」）+ 幂等命令 `aoi_seed_rbac`，内置角色**仅首次写入**、`super_admin` **只加不减补授**；④ 判定缓存改为 **`(user_id, version)` + 每请求读版本号**（`CACHES` 未配置，LocMemCache 跨进程不共享），授权变更**零延迟生效**；⑤ 首个超管由 `aoi_grant_role` 命令产生；⑥ **全局 DRF 权限类红线改口**：允许在 `DEFAULT_PERMISSION_CLASSES` 首位插入 `aoi.common.native_gate.AoiNativeGatePermission`（§2.4/§3.1.1）；⑦ 闸门为 **deny-list 4 类高危 + 默认放行 + fail-open**，被拦返回 **LS 方言 `{"detail": …}`**；⑧ `datasets.update` 语义澄清（不含 LS 项目配置改写）；⑨ `PUT /api/core/roles/{id}` 支持 `permissions` 全量覆盖、`POST /api/core/users/{id}/roles` 为全量覆盖 | ① 本表 + §1/§2.4/§3.1/§3.1.1/§4.0/§4.1/§10.1/§13.1；② 实现 `aoi/core/{models,migrations/0001_initial,permissions,authz,views,serializers,apps}.py`、`aoi/core/management/commands/{aoi_seed_rbac,aoi_grant_role}.py`、`aoi/common/{permissions,native_gate,audit}.py`、`core/settings/base.py`（注入点 1）；③ fixture 无字段变化（`aoi_api_paths.json` 路径不变），`tests/contracts/conftest.py` 移除 `reset_aoi_stub_state`；④ `TestPermissionCodeRegistry`/`TestRbacMatrix`/`TestRbacForbidden40300`/`TestPermCacheInvalidation`/`TestRoleAdminApi`/`TestGrantRoleCommand`/`TestNativeGate`/`TestNativeGateAnnotationFlow`/`TestSeedRbac` |
+| 2026-09-15 | 组织管理页 + 固定超管 + SPA 深链（D5，**语义变更**） | ① 新增 `GET /api/core/users`、`POST /api/core/users/{id}/deactivate\|activate`（均 `system.users`）；「删除用户」裁定为**停用组合拳**（`is_active=False` + 清角色 + 软移除组织成员）；② **最后超管守卫**：任何授权变更导致活跃超管归零 → `40900`（roles 与 deactivate 两路）；③ 固定超管 `superadmin@nbhx.com` 随 `post_migrate`/`aoi_seed_rbac` 幂等播种（已存在不重置密码）；④ `aoi/urls.py` 点名注册 5 个 aoi SPA 页面路由渲染壳模板（H22 结项）；⑤ 前端摘除原生 `/organization` 注册并删 Menubar 入口，Menubar 按 `perms` 显隐（H23 结项），新增 `/organization-admin` 页（仅 `system.users`） | ① 本表 + §2.2/§3.1/§4.0/§13.1；② 实现 `aoi/core/{views,urls,bootstrap,apps}.py`、`aoi/pages.py`、`label_studio/templates/aoi/page.html`、`web/.../src/aoi/usePerms.ts`、`web/.../src/pages/OrganizationAdmin/`、Menubar.jsx（**注入点 3**）、pages/index.js（**注入点 4**）；③ fixture `aoi_api_paths.json` +3 路径；④ `TestUserAdminApi`/`TestLastSuperAdminGuard`/`TestBootstrapSuperAdmin`/`TestAoiSpaPages` |
 
 *本契约于 D2 冻结；D9、D15 评审窗口。破坏性变更四件套：改文档 + 改 stub + 改 fixture + 双方测试过。*
+

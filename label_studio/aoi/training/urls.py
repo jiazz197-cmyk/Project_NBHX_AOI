@@ -13,6 +13,11 @@ urlpatterns = [
     path('/jobs/<int:id>/cancel', views.TrainJobCancelView.as_view(), name='job-cancel'),
     path('/jobs/<int:id>/progress', views.TrainJobProgressView.as_view(), name='job-progress'),
     path('/models', views.ModelListView.as_view(), name='model-list'),
+    path('/models/publish', views.ModelBatchPublishView.as_view(), name='model-publish-batch'),
     path('/models/<int:id>/approve', views.ModelApproveView.as_view(), name='model-approve'),
     path('/models/<int:id>/publish', views.ModelPublishView.as_view(), name='model-publish'),
+    path('/models/<int:id>/retire', views.ModelRetireView.as_view(), name='model-retire'),
+    path('/publishes', views.PublishListView.as_view(), name='publish-list'),
+    path('/publishes/<int:id>/delete', views.PublishDeleteView.as_view(), name='publish-delete'),
+    path('/publishes/<int:id>/restore', views.PublishRestoreView.as_view(), name='publish-restore'),
 ]

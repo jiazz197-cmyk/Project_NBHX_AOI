@@ -4,7 +4,7 @@ import { DatasetsPage } from "./Datasets/DatasetsPage";
 import { TrainingPage } from "./Training/TrainingPage";
 import { ReviewPage } from "./Review/ReviewPage";
 import { SystemPage } from "./System/SystemPage";
-import { OrganizationPage } from "./Organization";
+import { OrganizationAdminPage } from "./OrganizationAdmin/OrganizationAdminPage";
 import { ModelsPage } from "./Organization/Models/ModelsPage";
 import { pages } from "@humansignal/app-common";
 
@@ -16,7 +16,7 @@ export const Pages = [
   TrainingPage,
   ReviewPage,
   SystemPage,
-  OrganizationPage,
+  OrganizationAdminPage,
   ModelsPage,
   pages.AccountSettingsPage,
 ].filter(Boolean);

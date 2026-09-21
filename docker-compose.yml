@@ -66,11 +66,53 @@ services:
       - AOI_PUBLISH_MODE=${AOI_PUBLISH_MODE:-fake}
       - AOI_REGISTRY_PROXY=${AOI_REGISTRY_PROXY:-}
       - AOI_PUBLISH_ARTIFACTS_DIR=${AOI_PUBLISH_ARTIFACTS_DIR:-tmp/publish}
+      # AOI 二开（D5）：导入包裹 Celery 异步任务；broker 与 LS django_rq（Redis DB 0）隔离走 DB 1
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/1}
       - DEBUG=${DEBUG:-false}
     #      - LOG_LEVEL=DEBUG
     volumes:
       - ./mydata:/label-studio/data:rw
     command: label-studio-uwsgi
+
+  # AOI 二开（D5）：Celery worker，执行导入包裹异步任务（契约 §5.2 default 队列）
+  worker:
+    build: .
+    image: heartexlabs/label-studio:latest
+    restart: unless-stopped
+    depends_on:
+      - db
+      - redis
+    environment:
+      - DJANGO_DB=default
+      - POSTGRE_NAME=${POSTGRE_NAME:-postgres}
+      - POSTGRE_USER=${POSTGRE_USER:-postgres}
+      - POSTGRE_PASSWORD=${POSTGRE_PASSWORD:-postgres}
+      - POSTGRE_PORT=5432
+      - POSTGRE_HOST=db
+      - LABEL_STUDIO_HOST=${LABEL_STUDIO_HOST:-}
+      - JSON_LOG=1
+      - MINIO_STORAGE_ENDPOINT=${MINIO_STORAGE_ENDPOINT:-}
+      - MINIO_STORAGE_BUCKET_NAME=${MINIO_STORAGE_BUCKET_NAME:-aoi-images}
+      - MINIO_STORAGE_ACCESS_KEY=${MINIO_STORAGE_ACCESS_KEY:-}
+      - MINIO_STORAGE_SECRET_KEY=${MINIO_STORAGE_SECRET_KEY:-}
+      - MINIO_SKIP=${MINIO_SKIP:-false}
+      - INTERNAL_TOKEN=${INTERNAL_TOKEN:-}
+      - AOI_PRELABEL_REQUIRE_INTERNAL_TOKEN=${AOI_PRELABEL_REQUIRE_INTERNAL_TOKEN:-false}
+      - AOI_PUBLISH_MODE=${AOI_PUBLISH_MODE:-fake}
+      - AOI_PUBLISH_ARTIFACTS_DIR=${AOI_PUBLISH_ARTIFACTS_DIR:-tmp/publish}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/1}
+      - DEBUG=${DEBUG:-false}
+    volumes:
+      - ./mydata:/label-studio/data:rw
+    command: celery -A aoi worker --queues=default --loglevel=info
+
+  # AOI 二开（D5）：Celery broker（Redis DB 1；LS django_rq 的 DB 0 不在这里）
+  redis:
+    image: redis:7-alpine
+    hostname: redis
+    restart: unless-stopped
+    volumes:
+      - ${REDIS_DATA_DIR:-./redis-data}:/data
 
   db:
     image: pgautoupgrade/pgautoupgrade:17-alpine

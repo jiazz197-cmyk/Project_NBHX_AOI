@@ -18,6 +18,7 @@ import { Button, Userpic, ThemeToggle } from "@humansignal/ui";
 import { useConfig } from "../../providers/ConfigProvider";
 import { useContextComponent, useFixedLocation } from "../../providers/RoutesProvider";
 import { useAuth } from "@humansignal/core/providers/AuthProvider";
+import { usePerms } from "../../aoi/usePerms";
 import { cn } from "../../utils/bem";
 import { absoluteURL, isDefined } from "../../utils/helpers";
 import { Breadcrumbs } from "../Breadcrumbs/Breadcrumbs";
@@ -56,6 +57,7 @@ export const Menubar = ({ enabled, defaultOpened, defaultPinned, children, onSid
   const menuDropdownRef = useRef();
   const useMenuRef = useRef();
   const { user, isLoading } = useAuth();
+  const { has: hasAoiPerm } = usePerms();
   const location = useFixedLocation();
 
   const _config = useConfig();
@@ -222,14 +224,33 @@ export const Menubar = ({ enabled, defaultOpened, defaultPinned, children, onSid
             >
               <Menu>
                 <Menu.Item label="Home" to="/" icon={<IconHome />} data-external exact />
-                <Menu.Item label="Projects" to="/projects" icon={<IconFolder />} data-external exact />
-                <Menu.Item label="Organization" to="/organization" icon={<IconPeople />} data-external exact />
-
-                {/* AOI 二开入口（注入点 3，见 CHANGES.md）；仅数据驱动，不改上游组件逻辑 */}
-                <Menu.Item label="Datasets" to="/datasets" icon={<IconFolder />} data-external exact />
-                <Menu.Item label="Training" to="/training" icon={<IconTerminal />} data-external exact />
-                <Menu.Item label="Review" to="/review" icon={<IconPeople />} data-external exact />
-                <Menu.Item label="System" to="/system" icon={<IconBook />} data-external exact />
+                {/* D5 收尾第三轮：原生「Projects」菜单入口已移除——在原生页建项目/传图不会登记
+                    aoi_datasets.dataset/image（无字典、无版本、无 md5 去重与质检、无删除级联），
+                    属于"孤儿数据"旁路；AOI 建项目统一走 /datasets 的新建向导（自动生成标注项目）。
+                    标注仍走 /projects/{id}/data 深链（数据集列表「标注项目」列）。 */}
+                {/* AOI 二开入口（注入点 3，见 CHANGES.md）：按 aoi 权限点显隐（契约 §3.1，H23）。 */}
+                {/* D5：原生「Organization」入口已移除，组织管理由 /organization-admin 承载（仅 system.users）。 */}
+                {hasAoiPerm("datasets.view") && (
+                  <Menu.Item label="Datasets" to="/datasets" icon={<IconFolder />} data-external exact />
+                )}
+                {hasAoiPerm("training.view") && (
+                  <Menu.Item label="Training" to="/training" icon={<IconTerminal />} data-external exact />
+                )}
+                {hasAoiPerm("review.view") && (
+                  <Menu.Item label="Review" to="/review" icon={<IconPeople />} data-external exact />
+                )}
+                {hasAoiPerm("system.view") && (
+                  <Menu.Item label="System" to="/system" icon={<IconBook />} data-external exact />
+                )}
+                {hasAoiPerm("system.users") && (
+                  <Menu.Item
+                    label="Organization Admin"
+                    to="/organization-admin"
+                    icon={<IconPersonInCircle />}
+                    data-external
+                    exact
+                  />
+                )}
 
                 <Menu.Spacer />
 
