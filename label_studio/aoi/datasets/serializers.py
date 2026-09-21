@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
+    'image_url',
     'serialize_image',
     'serialize_defect',
     'serialize_dataset',
@@ -22,12 +23,26 @@ def _iso(value: Any) -> Any:
     return value.isoformat() if value is not None and hasattr(value, 'isoformat') else value
 
 
+def image_url(obj: Any) -> str:
+    """图片的浏览器可加载地址（D6）。
+
+    - LS 导入图（``upload/`` 前缀，有 ``FileUpload`` 行）：同源鉴权代理 ``/data/{key}``；
+    - 其余对象键（B 回传 ``images/{md5}.{ext}`` 等，无 ``FileUpload`` 行、``/data/`` 无路由）：
+      aoi 流式端点 ``/api/datasets/images/{id}/raw``（session/JWT 鉴权）。
+    """
+    key = obj.object_key or ''
+    if key.startswith('upload/'):
+        return f'/data/{key}'
+    return f'/api/datasets/images/{obj.id}/raw'
+
+
 def serialize_image(obj: Any, *, dataset_id: int | None = None) -> dict[str, Any]:
     """图片投影；``dataset_id`` 由调用方按导入前缀反查后传入（``image`` 表无 dataset 外键）。"""
     return {
         'id': obj.id,
         'dataset_id': dataset_id,
         'object_key': obj.object_key,
+        'url': image_url(obj),
         'md5': obj.md5,
         'source': obj.source,
         'station_code': obj.station_code,

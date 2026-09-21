@@ -1,183 +1,18 @@
 /**
- * AOI 数据集工作台样式（D5 收尾第四轮 · frontend-design 重设计）。
+ * AOI 数据集工作台样式（D5 定稿 · D7 起共享 chrome 抽到 src/aoi/page.css）。
  *
  * 文件名注意：**故意不叫 `*.prefix.css`**。仓库的 postcss 插件
  * （`web/postcss-prefix-lsf.cjs`）会把所有 `*.prefix.css` 里的类名统一加 `lsf-` 前缀，
  * 于是 `className="aoi-ds__stage"` 就对不上 `.lsf-aoi-ds__stage`，样式会整页失效（踩过一次）。
  * 这里的类本来就带 `aoi-ds__` 命名空间，无需再加前缀。
  *
- * 设计约定（为什么这样写，避免后人"顺手"改回卡片套件）：
- * 1. 颜色是数据，不是装饰——chrome 只用宿主 sand 中性 token，全部彩色都用来编码
- *    缺陷类别（字典 8 色）与质检状态；本页不新增任何强调色相。
- * 2. 台面（.aoi-ds__stage）在两套主题下都是深色：看图要在暗底上才准（灯箱/暗房常识），
- *    这是本页唯一的"大胆"之处，其余一律克制。
- * 3. 编号只出现在真实工序上（建数据集 → 传图 → 发布字典）。
- * 4. 数字用 tabular-nums，结果区靠三个大数字说话，不用彩色横幅。
+ * 本文件只留数据集页自己的部分：导入台面（拖放/胶片条）、向导、缺陷字典、
+ * contact sheet 图库、发布历史；页头/工序轨道/账本/按钮/空态等公共件见 `aoi/page.css`。
  */
 
-.aoi-ds {
-  min-height: calc(100vh - var(--header-height));
-  background: var(--color-neutral-background);
-  color: var(--color-neutral-content);
+@import "../../aoi/page.css";
 
-  /* 台面与刻度：刻意与主题解耦（深色底 + 浅刻度线） */
-  --aoi-stage: #101317;
-  --aoi-stage-raised: #171b21;
-  --aoi-stage-line: rgba(255, 255, 255, 0.07);
-  --aoi-stage-line-strong: rgba(255, 255, 255, 0.16);
-  --aoi-stage-ink: #eef2f6;
-  --aoi-stage-ink-dim: #9aa6b4;
-  --aoi-stage-signal: #e8f24c; /* 仅台面内的扫描/落点标记，页面其它地方禁用 */
-}
-
-[data-color-scheme="dark"] .aoi-ds {
-  --aoi-stage: #0b0d10;
-  --aoi-stage-raised: #14181d;
-}
-
-.aoi-ds__wrap {
-  margin: 0 auto;
-  max-width: 1180px;
-  padding: 32px 40px 72px;
-}
-
-/* ── 页头 ─────────────────────────────────────────────── */
-.aoi-ds__head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.aoi-ds__title {
-  margin: 0;
-  font-size: 30px;
-  line-height: 1.15;
-  letter-spacing: -0.015em;
-  font-weight: 650;
-}
-
-.aoi-ds__lede {
-  margin: 6px 0 0;
-  max-width: 62ch;
-  font-size: 13px;
-  line-height: 1.65;
-  color: var(--color-neutral-content-subtle);
-}
-
-/* ── 工序轨道（真序列，编号有意义）────────────────────── */
-.aoi-ds__rail {
-  margin-top: 24px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  border-top: 1px solid var(--color-neutral-border-subtler);
-  border-bottom: 1px solid var(--color-neutral-border-subtler);
-  padding: 10px 0;
-}
-
-.aoi-ds__step {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 6px 14px 6px 12px;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  background: none;
-  text-align: left;
-  cursor: pointer;
-  transition: background-color 120ms ease;
-
-  &:hover {
-    background: var(--color-neutral-surface-hover);
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--color-primary-focus-outline, var(--color-primary-border-bold));
-    outline-offset: 2px;
-  }
-}
-
-.aoi-ds__step--active {
-  /* 浅色主题下 surface 与 background 几乎同色，靠 inset 底 + 底部 2px 靛条表达"当前工序" */
-  background: var(--color-neutral-surface-inset);
-  border-color: var(--color-neutral-border-subtler);
-  box-shadow: inset 0 -2px 0 0 var(--color-primary-content);
-}
-
-.aoi-ds__step-index {
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.08em;
-  color: var(--color-neutral-content-subtlest);
-}
-
-.aoi-ds__step--active .aoi-ds__step-index {
-  color: var(--color-primary-content);
-}
-
-.aoi-ds__step-label {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--color-neutral-content-subtle);
-}
-
-.aoi-ds__step--active .aoi-ds__step-label {
-  color: var(--color-neutral-content);
-}
-
-.aoi-ds__step-meta {
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
-  color: var(--color-neutral-content-subtlest);
-}
-
-.aoi-ds__body {
-  margin-top: 24px;
-}
-
-/* ── 台面：拖放 / 预览 / 结果 ─────────────────────────── */
-.aoi-ds__stage {
-  position: relative;
-  border-radius: 12px;
-  background: var(--aoi-stage);
-  color: var(--aoi-stage-ink);
-  background-image:
-    linear-gradient(var(--aoi-stage-line) 1px, transparent 1px),
-    linear-gradient(90deg, var(--aoi-stage-line) 1px, transparent 1px);
-  background-size: 28px 28px;
-  overflow: hidden;
-}
-
-.aoi-ds__stage--over {
-  box-shadow: inset 0 0 0 2px var(--aoi-stage-signal);
-}
-
-.aoi-ds__stage-inner {
-  padding: 22px 24px 24px;
-}
-
-.aoi-ds__stage-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.aoi-ds__stage-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--aoi-stage-ink);
-}
-
-.aoi-ds__stage-note {
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
-  color: var(--aoi-stage-ink-dim);
-}
-
+/* ── 台面：拖放 ───────────────────────────────────────── */
 .aoi-ds__drop {
   margin-top: 16px;
   display: flex;
@@ -494,45 +329,6 @@
   display: inline-block;
 }
 
-/* ── 数据集账本 + 图库 ───────────────────────────────── */
-.aoi-ds__ledger {
-  border-top: 1px solid var(--color-neutral-border-subtler);
-}
-
-.aoi-ds__row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 16px;
-  padding: 14px 8px;
-  border-bottom: 1px solid var(--color-neutral-border-subtler);
-
-  &:hover {
-    background: var(--color-neutral-surface-hover);
-  }
-}
-
-.aoi-ds__row-name {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--color-neutral-content);
-}
-
-.aoi-ds__row-meta {
-  margin-top: 4px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
-  color: var(--color-neutral-content-subtle);
-}
-
-.aoi-ds__row-actions {
-  display: flex;
-  gap: 8px;
-}
-
 /* contact sheet：等宽瓦片，图片是主角 */
 .aoi-ds__sheet {
   display: grid;
@@ -636,21 +432,6 @@
   color: var(--aoi-stage-ink);
 }
 
-/* ── 空态 / 加载 ─────────────────────────────────────── */
-.aoi-ds__empty {
-  border: 1px dashed var(--color-neutral-border);
-  border-radius: 12px;
-  padding: 40px 24px;
-  text-align: center;
-  color: var(--color-neutral-content-subtle);
-}
-
-.aoi-ds__empty-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-neutral-content);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .aoi-ds__scan::after {
     animation: none;
@@ -665,17 +446,9 @@
 }
 
 @media (max-width: 720px) {
-  .aoi-ds__wrap {
-    padding: 20px 16px 56px;
-  }
-
   .aoi-ds__wizard-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 8px;
-  }
-
-  .aoi-ds__row {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -777,93 +550,6 @@
   color: var(--color-neutral-content-subtle);
 }
 
-/* ── 按钮：本页统一一套（替掉默认 outlined 的"半透明灰"观感）──────
-   主按钮＝墨色实底（浅色主题深墨、暗色主题浅墨，靠语义 token 自动翻转），
-   次按钮＝发丝描边幽灵态，危险按钮＝只在文字上用 negative 色；
-   圆角 8px、高度 30px、12.5px/600 —— 与台面、账本同一套工程感。 */
-.aoi-ds__btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 12px;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  font-size: 12.5px;
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  transition:
-    background-color 120ms ease,
-    border-color 120ms ease,
-    color 120ms ease;
-
-  &:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--color-primary-focus-outline, var(--color-primary-border-bold));
-    outline-offset: 2px;
-  }
-}
-
-.aoi-ds__btn--primary {
-  background: var(--color-neutral-content);
-  color: var(--color-neutral-background);
-
-  &:hover:not(:disabled) {
-    background: var(--color-neutral-content-subtle);
-  }
-}
-
-.aoi-ds__btn--ghost {
-  background: transparent;
-  border-color: var(--color-neutral-border);
-  color: var(--color-neutral-content);
-
-  &:hover:not(:disabled) {
-    background: var(--color-neutral-surface-hover);
-    border-color: var(--color-neutral-border-bold);
-  }
-}
-
-.aoi-ds__btn--quiet {
-  background: transparent;
-  border-color: transparent;
-  color: var(--color-neutral-content-subtle);
-  padding: 0 8px;
-
-  &:hover:not(:disabled) {
-    background: var(--color-neutral-surface-hover);
-    color: var(--color-neutral-content);
-  }
-}
-
-.aoi-ds__btn--danger {
-  background: transparent;
-  border-color: var(--color-neutral-border);
-  color: var(--color-negative-content);
-
-  &:hover:not(:disabled) {
-    background: var(--color-negative-surface);
-    border-color: var(--color-negative-border);
-    color: var(--color-negative-surface-content);
-  }
-}
-
-.aoi-ds__btn--on-stage {
-  background: var(--aoi-stage-ink);
-  color: var(--aoi-stage);
-
-  &:hover:not(:disabled) {
-    background: #fff;
-  }
-}
-
 /* 数据集分组（图库概览） */
 .aoi-ds__group {
   padding: 18px 0;
@@ -947,13 +633,4 @@
     border-color: var(--color-neutral-border-bold);
     color: var(--color-neutral-content);
   }
-}
-
-/* 下钻时的返回条 */
-.aoi-ds__backrow {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 14px;
 }

@@ -564,7 +564,7 @@ A 侧登记：LS 原生 ML 设置页 `MLBackend(url={A}/api/prelabel/{task_id})`
 
 | 方法/路径 | 权限 | 说明 |
 |---|---|---|
-| `GET /workitems` / `POST /workitems/{id}/claim` / `POST /workitems/{id}/finalize` | review.* | 队列（支持 `source`/`dataset_version_id`/`bucket`/`status` 过滤）/认领/终裁；item 含 `bucket`（high/medium/low）+ 颜色 + `forced`；终裁 `{verdict, boxes?, final_reason, note, action, annotation?}`（原因必填；低桶/`forced` 必须带 `action ∈ {relabeled,no_defect,unlabelable}` 或 `annotation`） |
+| `GET /workitems` / `POST /workitems/{id}/claim` / `POST /workitems/{id}/finalize` | review.* | 队列（支持 `source`/`dataset_version_id`/`bucket`/`status` 过滤）/认领/终裁；item 含 `bucket`（high/medium/low）+ 颜色 + `forced`；终裁 `{verdict, boxes?, final_reason, note, action, annotation?}`（原因必填；低桶/`forced` 必须带 `action ∈ {relabeled,no_defect,unlabelable}` 或 `annotation`）。**D7 加性投影**：item 内嵌 `fact`（`station_code/station_name/seq/captured_at/verdict/latency_ms/instance_code`，`fact_id` 为空时为 `null`）与 `image`（`{id, object_key, url, width, height, size_bytes}`，`url` 按 §4.1 图片 URL 规则；无图为 `null`），复审页看图/定位用 |
 | `GET /suggestions` / `POST /suggestions/batch-confirm` | review.view/update | 建议清单/确认回流 |
 | `GET /bad-images` / `POST /bad-images/{id}/handle` | review.* | 错误图片清单（人工重标签/重传入口） |
 

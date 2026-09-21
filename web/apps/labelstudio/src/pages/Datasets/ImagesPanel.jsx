@@ -27,8 +27,11 @@ const UNASSIGNED_QUERY_KEY = ["aoi", "images", "unassigned"];
 const PAGE_SIZE = 48;
 const ACCEPT = "image/jpeg,image/png,image/bmp";
 
-/** 同源缩略图地址：与 `GET /images/{id}/download` 返回的 url 同一约定 */
-const thumbSrc = (objectKey) => {
+/** 同源缩略图地址：优先用后端给的 url（D6 起按对象键分流，B 回传图走 /raw），缺省回落 /data/ 约定 */
+const thumbSrc = (image) => {
+  if (!image) return "";
+  if (image.url) return image.url;
+  const objectKey = image.object_key;
   if (!objectKey) return "";
   if (objectKey.startsWith("http")) return objectKey;
   return objectKey.startsWith("/") ? objectKey : `/data/${objectKey}`;
@@ -52,7 +55,7 @@ const flagKind = (qcStatus) =>
 /** 小缩略图（数据集概览用） */
 const Mini = ({ image }) => {
   const [broken, setBroken] = useState(false);
-  const src = thumbSrc(image.object_key);
+  const src = thumbSrc(image);
   if (broken || !src) {
     return (
       <span className="aoi-ds__mini grid place-items-center" title={image.object_key}>
@@ -84,7 +87,7 @@ const Mini = ({ image }) => {
 /** 大瓦片（下钻用） */
 const Tile = ({ image, canWrite, onDownload, onDelete }) => {
   const [broken, setBroken] = useState(false);
-  const src = thumbSrc(image.object_key);
+  const src = thumbSrc(image);
 
   return (
     <figure className="aoi-ds__tile m-0">

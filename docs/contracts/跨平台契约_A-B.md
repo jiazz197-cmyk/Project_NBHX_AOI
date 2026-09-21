@@ -111,8 +111,8 @@ dataset_version: 1.0.0            # 必填
 dict_version: 20260901-1          # 可选：缺陷字典版本
 base_model: yolov8s.pt            # 可选
 precision: fp32                   # 必填：fp32/fp16/int8
-created_at: 2026-09-08T08:30:00Z  # 必填
-published_at: 2026-09-08T09:00:00Z  # 可选
+created_at: 2026-09-08T08:30:00Z  # 必填；A 侧发布镜像内固定为 epoch（digest 可复现，见 §2.4）
+published_at: 2026-09-08T09:00:00Z  # 可选；发布镜像内不写（时间信息在 A 侧 model_publish）
 description: 门板表面缺陷检测 v3     # 可选
 tags: [doorpanel, surface]        # 可选
 license: Apache-2.0               # 可选
@@ -288,15 +288,15 @@ extensions: {}                    # 任意扩展字段；B 原样保存、不解
    POST /api/train/models/publish {"model_ids":[...], "precision"?:"fp32"}
    （单模型亦可 POST /api/train/models/{id}/publish）
    → 逐条独立执行：某条失败不影响其余，返回每条结果（成功 publish_id / 失败原因）
-3. 生成 model.yaml（含 onnx.sha256）→ 构建镜像（FROM scratch + COPY /model/*）
-4. docker build -t <registry>/<org>/aoi-model:<tag> .
-5. docker push
-6. 取 digest：docker inspect --format '{{index .RepoDigests 0}}'
-7. 写 aoi_training.model_publish{image, tag, digest, status=published}
-8. model.lifecycle → published
+3. 生成 model.yaml（含 onnx.sha256）→ 构建镜像（`FROM scratch` 单层，仅含 `/model/{model.onnx, model.onnx.sha256, model.yaml}`）
+4. 推送仓库（`docker build` + `docker push` 等价）：A 侧实现为 Python 构造 docker schema2 产物 + Registry HTTP v2 API 直推（token → blob 上传 → manifest PUT），不依赖 docker daemon
+5. 取 digest：**以仓库回执 `Docker-Content-Digest`（manifest 与每个 blob）为准并核对**；仓库不回回执一律视为发布失败（不得拿本地自算值兜底）；回执与本地不一致视为仓库异常
+6. 写 aoi_training.model_publish{image, tag, digest, status=published}
+7. model.lifecycle → published
 ```
 
-- 发布失败（网络/鉴权/磁盘）：`model_publish.status=failed` + `error_message`，指数退避重试 3 次（30s / 2m / 10m），可人工重推。
+- **digest 可复现**：同一 `model_ref` + 同一产物内容，任意时刻重建推送必须得到同一 digest（§2.2「同 tag 不同 digest → 禁止覆盖」与「B 按 digest 记录」都依赖它）。因此镜像内字节**零墙钟**：`model.yaml.created_at` 固定为 epoch（`1970-01-01T00:00:00Z`）、`published_at` 不写入镜像（真实训练/发布时间由 A 侧 `model_publish.published_at`、`config_snapshot` 与审计承载）；tar mtime=0、gzip mtime=0、config history 时间戳固定。
+- 发布失败（网络/鉴权/磁盘）：`model_publish.status=failed` + `error_message`，MVP 以人工重推为主（重推复用同一记录）；指数退避自动重试（30s / 2m / 10m）为后续增强。
 - A 侧记录 digest；B 拉取后回报的 digest 若不一致，视为仓库被篡改并告警。
 
 **已上传模型的管理（A 侧）**：

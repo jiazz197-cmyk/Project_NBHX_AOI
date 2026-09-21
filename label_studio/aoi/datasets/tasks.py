@@ -48,10 +48,10 @@ def _image_value(file_upload) -> str:
     """
     if settings.CLOUD_FILE_STORAGE_ENABLED:
         name = (file_upload.file.name or '').lstrip('/')
-        url = f"{settings.MEDIA_URL}{name}"  # '/data/' + 'upload/<project>/<uuid8>-<filename>'
+        url = f'{settings.MEDIA_URL}{name}'  # '/data/' + 'upload/<project>/<uuid8>-<filename>'
         script_name = getattr(settings, 'FORCE_SCRIPT_NAME', '') or ''
-        if script_name and not url.startswith(f"{script_name}/"):
-            url = f"{script_name}{url}"
+        if script_name and not url.startswith(f'{script_name}/'):
+            url = f'{script_name}{url}'
         return url
     return file_upload.url
 

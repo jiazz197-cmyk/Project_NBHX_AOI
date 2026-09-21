@@ -201,8 +201,8 @@
 |---|---|---|---|
 | D4 | 数据整理工具；B 前端「概览」页骨架 | **自研 RBAC 三角色（✅ 已完成）**：`aoi_core` 五表 + 38 码 + 判定/缓存 + `/api/core/*` 真实化 + `aoi_grant_role` 引导；**LS 原生闸门（✅ 已完成）**；LS 项目模板 `aoi/datasets/ls_project.py`（✅ 已完成）；**前端素材更换（✅ 已完成）** | `pipeline-core` 切片/NMS 真逻辑；ONNX Runtime 适配器；B 检测记录落库 |
 | D5 | 假数据生成（OK + 缺陷图）；B 前端「检测记录」页 | 缺陷字典 + label config 生成（✅ 已完成）；**导入包裹（✅ 已完成：Celery `default` 队列异步 + 复用 LS 上传 + md5 全局去重）**；**标注项目创建（✅ 自 D6 提前完成：`POST /api/datasets` 服务端按 `ls_project.py` 模板创建 LS 项目）**；前端素材更换完成；**A 侧前端「数据集」页（✅ 已完成：字典/图片/数据集三块）** | `/api/v1/inspect/image` 完整链路；单图推理 + 三档判定；B 记录查询接口 |
-| D6 | 节拍模拟器（打 B 的 `/api/v1/inspect/image`） | 标注项目创建（**✅ 已提前至 D5 完成**，应用 `aoi/datasets/ls_project.py` 模板）；**不做 LS Review 配置**；**`/api/ingest/findings` 完整实现（图片落 MinIO + fact + workitem/bad_image）**；A 侧前端「复审」页骨架 | 相机适配器壳（DirectorySource）+ 坏图登记 + outbox 回传真实打通 |
-| D7 | 双机联调 + 离线包初版；B 前端「工位与相机」页 | **模型发布服务真实推送**（在模型库中**勾选模型**（支持多选批量，逐条独立）→ `/model/{model.onnx, model.onnx.sha256, model.yaml}` → `FROM scratch` 单层镜像 → `docker push` → 写 `model_publish{image,tag,digest,status}`；权重先用基模导出的占位 ONNX，D12 真模型复用同一条流水线，**不得只发 `model.yaml`**）；**已上传记录的下线/软删/恢复后端**（软删只清 A 侧记录，仓库镜像保留）；A 侧前端「训练」页骨架 | **B 模型拉取真实打通**（Registry v2 manifest/层解包/校验/注册）+ **远端可用 tag 列表与一键拉取**；B 前端联调 |
+| D6 | 节拍模拟器（打 B 的 `/api/v1/inspect/image`） | 标注项目创建（**✅ 已提前至 D5 完成**，应用 `aoi/datasets/ls_project.py` 模板）；**不做 LS Review 配置**；**`/api/ingest/findings` 完整实现（✅ 已完成：图片落 MinIO + fact + workitem/bad_image，存储失败 503 回滚不留半写）**；**A 侧前端「复审」页骨架（✅ 已完成：桶过滤 tab + 工作项账本 + 暗房灯箱 claim/终裁 + 坏图）** | 相机适配器壳（DirectorySource）+ 坏图登记 + outbox 回传真实打通 |
+| D7 | 双机联调 + 离线包初版；B 前端「工位与相机」页 | **模型发布服务真实推送（✅ A 侧已完成：勾选模型多选批量、逐条独立 → `/model/{model.onnx, model.onnx.sha256, model.yaml}` → `FROM scratch` 单层镜像 → Registry v2 直推（docker push 等价实现）→ 写 `model_publish{image,tag,digest,status}`；digest 可复现已修死，见验收附加项 ✅；权重暂用占位 ONNX，D12 真模型复用同一条流水线）**；**已上传记录的下线/软删/恢复后端（✅ 已完成：retire/delete/restore + publishes 列表；软删只清 A 侧记录，仓库镜像保留）**；**A 侧前端「训练」页骨架（✅ 已完成：①模型库勾选批量上传 → ②发布仓库逐条结果/重试 → ③已上传下线/删除/恢复）** | **B 模型拉取真实打通**（Registry v2 manifest/层解包/校验/注册）+ **远端可用 tag 列表与一键拉取**；B 前端联调 |
 | D8 | **M1 联调** + B 前端「系统」页 | **M1 联调**（复审工作项可见） | **M1 联调**（端到端稳定） |
 | **M1** | A 发布镜像 → B 拉取 → 配一个工位模板 → 假图按节拍推理 → 三档判定 → 错图回传 → A 建复审工作项；B 概览页可见统计；界面为公司 logo/平台描述、无上游署名与 LS 营销文案 | | |
 
@@ -210,10 +210,10 @@
 >
 > | # | 要求 | 验收方式 |
 > |---|---|---|
-> | 1 | **digest 必须来自仓库回执**：每次推送以仓库返回的 `Docker-Content-Digest`（manifest 与每个 blob）为准并核对；**仓库不回回执一律视为失败**（不拿本地 manifest sha256 兜底），错误如实落 `model_publish.error_message` | 契约测试：仓库不回执 → 发布失败、状态 `failed`、`digest` 为空；回执与本地不一致 → 同样失败 |
-> | 2 | **digest 可复现**：同一 `model_ref` + 同一产物内容，任意时刻重建推送必须得到**同一个 digest**（跨平台契约 §2.2「同 tag 不同 digest → 禁止覆盖」与 §2.4「B 按 digest 记录」都依赖它） | 契约测试：同一模型跨"不同时刻"连续发布两次，digest 必须相等（该用例当前以"必须不等"锁定待修事实，D7 修复后翻转为相等断言） |
-> | 3 | 修法方向（实现自选，但须**同时**满足 1、2） | 时间戳（`model.yaml.created_at`/`published_at`）不参与 digest：① 落盘/推送前把时间戳从镜像内 `model.yaml` 中剔除，或固定为构建批次时间；② 或改由 `model_publish`/`config_snapshot` 承载时间信息，镜像内保持可复现字节 |
-> | 4 | 三处口径同步 | `publish.py` 模块头「字节可复现」的措辞、跨平台契约 §2.4 的发布步骤、B 侧 digest 校验口径 |
+> | 1 | **digest 必须来自仓库回执**：每次推送以仓库返回的 `Docker-Content-Digest`（manifest 与每个 blob）为准并核对；**仓库不回回执一律视为失败**（不拿本地 manifest sha256 兜底），错误如实落 `model_publish.error_message` | 契约测试：仓库不回执 → 发布失败、状态 `failed`、`digest` 为空；回执与本地不一致 → 同样失败 ✅（D7：`test_registry_without_receipt_fails_publish`） |
+> | 2 | **digest 可复现**：同一 `model_ref` + 同一产物内容，任意时刻重建推送必须得到**同一个 digest**（跨平台契约 §2.2「同 tag 不同 digest → 禁止覆盖」与 §2.4「B 按 digest 记录」都依赖它） | 契约测试：同一模型跨"不同时刻"连续发布两次，digest 必须相等（该用例当前以"必须不等"锁定待修事实，D7 修复后翻转为相等断言）✅（D7：`test_same_model_rebuilt_later_yields_same_digest`） |
+> | 3 | 修法方向（实现自选，但须**同时**满足 1、2） | 时间戳（`model.yaml.created_at`/`published_at`）不参与 digest：① 落盘/推送前把时间戳从镜像内 `model.yaml` 中剔除，或固定为构建批次时间；② 或改由 `model_publish`/`config_snapshot` 承载时间信息，镜像内保持可复现字节 ✅（D7：镜像内 `model.yaml.created_at` 固定为 epoch，`published_at` 不写入镜像，落 `model_publish.published_at`；tar mtime=0） |
+> | 4 | 三处口径同步 | `publish.py` 模块头「字节可复现」的措辞、跨平台契约 §2.4 的发布步骤、B 侧 digest 校验口径 ✅（D7：三处已同步） |
 
 ### P2 训练 + 预标闭环（D9–D14）→ M2(D14)
 

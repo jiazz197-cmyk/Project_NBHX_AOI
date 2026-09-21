@@ -1,6 +1,6 @@
 {
- "version": "d5-20260921-1",
- "note": "T2.9 datasets CRUD 路径裁定为 /api/datasets + /api/datasets/{id}；旧 /api/datasets/datasets* 不存在；D3 新增 /api/auth/login（匿名）与 /api/auth/logout（jwt）；D5 新增 /api/core/users 与 /api/core/users/{id}/deactivate|activate（组织管理，契约 §4.0）；D5 收尾新增 GET/DELETE /api/datasets/images/{id}（图片删除）与 GET /api/datasets/defects/versions（发布历史）",
+ "version": "d7-20260921-1",
+ "note": "T2.9 datasets CRUD 路径裁定为 /api/datasets + /api/datasets/{id}；旧 /api/datasets/datasets* 不存在；D3 新增 /api/auth/login（匿名）与 /api/auth/logout（jwt）；D5 新增 /api/core/users 与 /api/core/users/{id}/deactivate|activate（组织管理，契约 §4.0）；D5 收尾新增 GET/DELETE /api/datasets/images/{id}（图片删除）与 GET /api/datasets/defects/versions（发布历史）；D7 新增 POST /api/train/models/publish（批量上传）、POST /api/train/models/{id}/retire、GET /api/train/publishes、POST /api/train/publishes/{id}/delete|restore（已上传管理，契约 §4.2）与 GET /api/datasets/images/{id}/raw（回传图片字节）",
  "paths": [
   {
    "method": "POST",
@@ -95,6 +95,12 @@
   {
    "method": "GET",
    "path": "/api/datasets/images/{id}/download",
+   "tag": "aoi-datasets",
+   "auth": "jwt"
+  },
+  {
+   "method": "GET",
+   "path": "/api/datasets/images/{id}/raw",
    "tag": "aoi-datasets",
    "auth": "jwt"
   },
@@ -245,6 +251,36 @@
   {
    "method": "GET",
    "path": "/api/train/models/{id}/publish",
+   "tag": "aoi-train",
+   "auth": "jwt"
+  },
+  {
+   "method": "POST",
+   "path": "/api/train/models/publish",
+   "tag": "aoi-train",
+   "auth": "jwt"
+  },
+  {
+   "method": "POST",
+   "path": "/api/train/models/{id}/retire",
+   "tag": "aoi-train",
+   "auth": "jwt"
+  },
+  {
+   "method": "GET",
+   "path": "/api/train/publishes",
+   "tag": "aoi-train",
+   "auth": "jwt"
+  },
+  {
+   "method": "POST",
+   "path": "/api/train/publishes/{id}/delete",
+   "tag": "aoi-train",
+   "auth": "jwt"
+  },
+  {
+   "method": "POST",
+   "path": "/api/train/publishes/{id}/restore",
    "tag": "aoi-train",
    "auth": "jwt"
   },

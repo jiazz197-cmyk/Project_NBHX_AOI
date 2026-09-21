@@ -8,6 +8,7 @@ D5：导入包裹真实化（复用 LS 上传 + Celery ``default`` 队列异步�
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
 import uuid
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ from aoi.common.views import AoiAPIView
 from aoi.datasets import label_config
 from aoi.datasets.models import Dataset, DatasetVersion, DefectClass, DefectDictVersion, Image, ImportJob
 from aoi.datasets.serializers import (
+    image_url,
     serialize_dataset,
     serialize_dataset_version,
     serialize_defect,
@@ -338,7 +340,7 @@ def _dataset_id_for_key(object_key: str, prefix_map: dict[str, int]) -> int | No
 
 @extend_schema(tags=['aoi-datasets'])
 class ImageDownloadView(AoiAPIView):
-    """``GET /api/datasets/images/{id}/download`` → 预签名 URL（D4 接 MinIO）。"""
+    """``GET /api/datasets/images/{id}/download`` → 浏览器可加载的 URL（D6 起按对象键分流）。"""
 
     aoi_perm = 'datasets.view'
 
@@ -349,10 +351,37 @@ class ImageDownloadView(AoiAPIView):
             {
                 'id': id,
                 'object_key': object_key,
-                'url': f'/data/{object_key}',
+                'url': image_url(obj) if obj is not None else f'/api/datasets/images/{id}/raw',
                 'expires_in': 3600,
             }
         )
+
+
+@extend_schema(tags=['aoi-datasets'])
+class ImageRawView(AoiAPIView):
+    """``GET /api/datasets/images/{id}/raw`` → 图片原始字节（D6，B 回传图的看图通道）。
+
+    ``upload/`` 前缀的 LS 导入图已有 ``/data/`` 同源代理；本端点服务其余对象键
+    （``images/{md5}.{ext}``）。未知 id 或存储缺对象 → ``40401``。
+    """
+
+    aoi_perm = 'datasets.view'
+
+    def get(self, request, id: int):
+        from django.core.files.storage import default_storage
+        from django.http import FileResponse
+
+        obj = Image.objects.filter(pk=id).first()
+        if obj is None:
+            raise AoiError(CODE_NOT_FOUND, f'image not found: {id}')
+        try:
+            storage_file = default_storage.open(obj.object_key, 'rb')
+        except Exception as exc:
+            raise AoiError(CODE_NOT_FOUND, f'image object missing in storage: {obj.object_key}') from exc
+        content_type, _encoding = mimetypes.guess_type(obj.object_key)
+        response = FileResponse(storage_file, content_type=content_type or 'application/octet-stream')
+        response['Content-Disposition'] = f'inline; filename="{obj.object_key.rsplit("/", 1)[-1]}"'
+        return response
 
 
 @extend_schema(tags=['aoi-datasets'])
@@ -446,7 +475,9 @@ def _validate_defect_patch(payload: dict[str, Any]) -> dict[str, Any]:
             patch['risk_level'] = int(risk_level)
     if 'aliases' in payload:
         aliases = payload.get('aliases')
-        if aliases is not None and (not isinstance(aliases, list) or any(not isinstance(alias, str) for alias in aliases)):
+        if aliases is not None and (
+            not isinstance(aliases, list) or any(not isinstance(alias, str) for alias in aliases)
+        ):
             fields['aliases'] = 'must be a list of strings'
         else:
             patch['aliases'] = aliases or []
@@ -635,7 +666,6 @@ def _sync_dataset_projects(label_config_xml: str) -> int:
             project.save(update_fields=['label_config'])
             updated += 1
     return updated
-
 
 
 @extend_schema(tags=['aoi-datasets'])

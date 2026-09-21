@@ -786,3 +786,89 @@ JSX 用到的类名 ↔ CSS 定义的类名（本次 63/63 全部命中，无遗
 新增契约用例 `TestImageGrouping`（5 例：按数据集过滤、未知数据集 40401、未归属排除数据集图、
 数据集预览图、5 张上限）；平台 A 全量 **260 passed**；biome 干净；build + collectstatic 完成，
 按浏览器 URL 复核 `/react-app/style-*.css`（89 个裸 `.aoi-ds__*` 选择器、`lsf-` 残留 0）。
+
+## D6+D7：ingest 图片落存储 / 发布 digest 可复现 + 已上传管理 / 复审·训练页骨架（2026-09-21）
+
+### 1. 契约先行（文档 + samples + fixture 同步）
+- 跨平台契约 §2.4 发布步骤改写为「Python 构造 schema2 产物 + Registry v2 直推（docker push 的等价实现），
+  digest 以 `Docker-Content-Digest` 回执为准」；补「digest 可复现」口径（镜像内 `model.yaml.created_at`
+  固定 epoch、`published_at` 不写镜像、tar mtime=0）。§2.3 字段注释同步；B 侧 `pull.py` 补 digest
+  口径注释（逻辑不动）。
+- 平台 A 契约：§4.2 新增 5 个发布管理端点、§4.4 `GET /workitems` 补 fact/image 加性投影；
+  `samples.py` 增 6 条路径（批量 publish、retire、publishes 列表、软删、恢复 + D6 的 raw 图片路由），
+  `aoi_api_paths.json` 重生成（版本 `d7-20260921-1`）。**顺序敏感**：raw 路由必须排在
+  `images/{id}` 的 DELETE 之前（巡检按序走，DELETE 会删掉图片 1）。
+
+### 2. 后端
+- **ingest 落存储（D6 收口）**：`_store_image` 用 `_decode_format` 判扩展名（jpeg→jpg），object_key
+  `images/{md5}.{ext}`；`Image.objects.get_or_create` 后 `_upload_image_bytes`（`default_storage`，
+  已存在则短路；存储失败 → `50300` 且整个事务回滚，不留「有登记无字节」的半写）。新增
+  `GET /api/datasets/images/{id}/raw`（`datasets.view`，FileResponse 流式回原字节）；
+  `serialize_image` 增 `url`（`upload/` 前缀 → `/data/…` 既有通道，其余 → raw 路由）；
+  `ImagesPanel` 缩略图改走 `image.url`（ingest 图不再依赖 FileUpload 行才能显示）。
+- **digest 可复现（D7 验收附加项）**：`publish.py` 的 `model.yaml.created_at` 固定为
+  `1970-01-01T00:00:00Z`，`published_at` 不进镜像、落 `model_publish.published_at`；测试从
+  「必须不等」翻转为 `test_same_model_rebuilt_later_yields_same_digest`（monkeypatch 两个时刻，断言 digest 相等）。
+- **发布管理 5 端点**：`POST /api/train/models/publish`（批量逐条独立，`{results,succeeded,failed}`，
+  某条失败不回滚其余；`model_ids` 非法 → 42200，未知 id 记该条失败）；`POST /api/train/models/{id}/retire`
+  （幂等下线）；`GET /api/train/publishes`（默认隐藏软删记录，`include_deleted=1` 可见，联表 model
+  带出 `model_lifecycle`）；`POST /api/train/publishes/{id}/delete`（**前置 retired** → 否则 40900；
+  只清 A 侧记录：`deleted_at/deleted_by` + 审计 `model.publish.deleted`，镜像/tag/digest 一律不动，
+  幂等不重复审计）；`POST /api/train/publishes/{id}/restore`（清软删 + lifecycle 回 `published`，
+  审计 `model.publish.restored`）。迁移 0004：`ModelPublish.deleted_at/deleted_by`。
+- **workitem 投影**：`GET /api/review/workitems` 的 item 内嵌 `fact`（工位/序号/拍摄时间/verdict/
+  latency/instance_code）与 `image`（含 `url`）；列表页对 fact/image 各做一次批量查询防 N+1；
+  预标来源或无图时为 `null`，不伪造。
+
+### 3. 前端（frontend-design 同一套语言）
+- **共享基座抽取**：新增 `src/aoi/page.css`（`.aoi-ds` root + 台面 token、页头、工序轨道、账本、
+  按钮、空态、返回条、深色台面），`Datasets.css` 只留数据集页部件并 `@import` 基座——
+  类名保持 `aoi-ds__*`，Datasets 的 JSX **零改动**；拆分后选择器集合与每条规则体逐脚本对账
+  （与 HEAD 版本 0 差异）。
+- **复审页骨架** `ReviewPage.jsx` + `Review.css`（`aoi-rv__*`）：桶过滤 tab（绿/黄/红＝桶含义本身，
+  带计数）+ 状态筛选；工作项账本（缩略图 + 检测事实摘要）；点行开**暗房灯箱**（复用 `.aoi-ds__stage`，
+  claim + 终裁内联表单——低桶/forced 提示必须选处理动作，Esc/点背景关闭）；坏图账本 + 「核过」。
+  空态直说数据从哪来（B 侧 `/api/ingest/findings` 回传）。
+- **训练页骨架** `TrainingPage.jsx` + `Training.css`（`aoi-tr__*`）：工序轨道 ①模型库（勾选
+  approved 模型 + 精度选择 + 批量上传；stub 模型如实标注「契约样例，未落库」且不可选）→
+  ②发布仓库（逐条结果 + 单条重试 + 流水线说明）→ ③已上传（下线 / 删除——disabled 直到
+  model_lifecycle=retired，确认文案如实「仅移除 A 侧记录，仓库镜像保留，B 仍可拉取」/ 恢复）。
+  训练任务区 D9 前保持诚实空态。
+
+### 4. 教训 / 注意
+- **测试里显式写 `pk=1` 不推进序列**：巡检 fixture 写死 Model pk=1 后，同用例里任何
+  `Model.objects.create()` 都会拿 nextval=1 撞 `model_pkey`；修复＝`_advance_model_id_sequence()`
+  （setval 到 `MAX(id)`）后再建行，种子一律 `update_or_create`。
+- **共享 media 目录跨用例存在**：同 md5 字节会让 `_upload_image_bytes` 的 exists 短路生效，
+  「存储失败」用例测不到 save——monkeypatch `exists → False` 强制走到 save。
+- Django 5.2 运行时改 `settings.MEDIA_ROOT` **不会**重置已实例化的 `default_storage`
+  （`storages_changed` 只监听 STORAGES/STATIC_*），测试直接依赖 `BASE_DATA_DIR` 环境。
+- 沙箱 uv 缓存（`/data/jiazhenyu/.cache/uv`）不可写：一律 `UV_CACHE_DIR=$PWD/.uv-cache`；
+  `make test` 用的测试依赖在 `test` dependency-group，本地要 `uv run --group test`（`mock` 等在其中）。
+
+### 验证
+- 契约（两侧各自按运行手册跑，**不能混在同一个 pytest 进程**：A 需要
+  `DJANGO_SETTINGS_MODULE=core.settings.label_studio` + `PYTHONPATH=label_studio`，B 是 FastAPI
+  自带 env，共享包要 editable 安装，见 `infer-platform/backend/pyproject.toml` 头注）：
+  - 平台 A：`PYTHONPATH=label_studio pytest tests/contracts/test_platform_a_api.py` → **281 passed**
+    （新增批量发布 4 例、管理 7 例、ingest 落存储 4 例含 503 回滚与坏图证据、workitem 投影 1 例）；
+  - 平台 B + 跨端：`cd infer-platform/backend && uv run --frozen pytest
+    ../../tests/contracts/test_platform_b_api.py ../../tests/contracts/test_cross_platform.py` →
+    **23 passed**（首次需 `uv pip install -e ../../packages/skillname -e ../../packages/pipeline-core`）；
+  - 其余契约（skillname / pipeline_core 等）：**373 passed, 8 skipped**。
+  - 踩坑记录：把整个 `tests/contracts` 从仓库根一把跑会在 B 侧炸出 6 failed + 14 errors——全是
+    「A venv 里没有 fastapi / Django settings 打到 FastAPI 用例」的环境错，非回归。
+- 前端：biome 对全部改动文件 0 错误；`bun run build` 成功；collectstatic 完成
+  （沙箱里 `make frontend-build-collect` 的 collectstatic 一步被 uv 缓存权限卡住，改用
+  `UV_CACHE_DIR=$PWD/.uv-cache .venv/bin/python manage.py collectstatic` 单独跑，产物一致）。
+- CSS 对账（D5 方法）：构建产物 `style-*.css` 中 JSX 用到的 **124/124** 个 `aoi-*__*` 类全部命中
+  （另 2 个为动态生命周期变体，基类兜底），`lsf-aoi` 残留 0。
+- 单测套件（`make test` 等价命令 `uv run --group test pytest label_studio -m "not integration_tests"`）：
+  **存量问题、与本次无关**——①收集期：上游 `label_studio/fsm/tests/conftest.py` 反向引用
+  `label_studio.tests.conftest.aws_credentials` 等存储 fixture，fork 主 conftest 没有这些定义
+  （fork 骨架提交起就如此，`--ignore=label_studio/fsm` 绕开）；②全量跑到 40 分钟超时仍未完
+  （上游套件体量问题）；③对失败区段逐模块隔离复跑定位：`core/tests/test_check_schema_drift.py`（本
+  里程碑新增迁移唯一可能波及的模块）68 passed，`data_export/tests/test_models.py` 等 30 passed，
+  仅 `tests/webhooks/test_webhooks.py` 2 failed + 4 error——403 on create project，是 D4 RBAC
+  收紧后上游用例未适配的**存量断言**（本里程碑未触碰 projects/权限/webhooks）。结论：aoi 代码
+  全部行为由契约套件锁定（281 passed），上游失败与本次改动无关。

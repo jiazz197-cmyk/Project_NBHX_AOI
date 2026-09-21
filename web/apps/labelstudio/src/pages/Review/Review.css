@@ -1,0 +1,238 @@
+/**
+ * AOI「复审」页样式（D7 · frontend-design 同一套语言，命名空间 aoi-rv__*）。
+ *
+ * 共享 chrome（页头/账本/按钮/深色台面）来自 `src/aoi/page.css`（aoi-ds__*）；
+ * 这里只放复审页自己的部分：桶过滤 tab、缩略图、灯箱、终裁表单。
+ *
+ * ⚠ 不叫 `*.prefix.css`（postcss 会加 `lsf-` 前缀导致类名对不上，见 aoi/page.css 顶部说明）。
+ * 颜色约定：桶色（绿/黄/红）是数据——只出现在桶标记上，chrome 不新增彩色。
+ */
+
+@import "../../aoi/page.css";
+
+/* ── 队列过滤：桶 tab（颜色＝桶含义本身）──────────────── */
+.aoi-rv__filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.aoi-rv__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: none;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-neutral-content-subtle);
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+
+  &:hover {
+    background: var(--color-neutral-surface-hover);
+    color: var(--color-neutral-content);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-primary-focus-outline, var(--color-primary-border-bold));
+    outline-offset: 2px;
+  }
+}
+
+.aoi-rv__tab--active {
+  background: var(--color-neutral-surface-inset);
+  border-color: var(--color-neutral-border-subtler);
+  color: var(--color-neutral-content);
+}
+
+.aoi-rv__tab-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+
+.aoi-rv__tab-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: var(--color-neutral-content-subtlest);
+}
+
+.aoi-rv__tab--active .aoi-rv__tab-count {
+  color: var(--color-neutral-content-subtle);
+}
+
+.aoi-rv__status {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--color-neutral-content-subtle);
+}
+
+.aoi-rv__status select {
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--color-neutral-border);
+  background: var(--color-neutral-surface);
+  padding: 0 8px;
+  font-size: 12.5px;
+  color: var(--color-neutral-content);
+}
+
+/* ── 队列账本行：缩略图 + 事实摘要 ────────────────────── */
+.aoi-rv__row {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.aoi-rv__thumb {
+  width: 72px;
+  height: 54px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--aoi-stage);
+  box-shadow: 0 0 0 1px var(--color-neutral-border-subtler);
+  display: block;
+}
+
+.aoi-rv__bucket-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.aoi-rv__bucket-flag i {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+/* ── 灯箱：暗房里看图 + 终裁 ──────────────────────────── */
+.aoi-rv__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(8, 10, 13, 0.78);
+  backdrop-filter: blur(2px);
+}
+
+.aoi-rv__dialog {
+  width: min(980px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+
+.aoi-rv__media img {
+  display: block;
+  width: 100%;
+  max-height: 56vh;
+  object-fit: contain;
+  background: #000;
+}
+
+.aoi-rv__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 22px;
+  margin-top: 12px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--aoi-stage-ink-dim);
+}
+
+.aoi-rv__facts b {
+  font-weight: 600;
+  color: var(--aoi-stage-ink);
+}
+
+/* 终裁表单（台面上的深色控件，与 Datasets 导入表单同款工程感） */
+.aoi-rv__form {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.aoi-rv__field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--aoi-stage-ink-dim);
+}
+
+.aoi-rv__field select {
+  min-width: 168px;
+  border-radius: 8px;
+  border: 1px solid var(--aoi-stage-line-strong);
+  background: var(--aoi-stage-raised);
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--aoi-stage-ink);
+  outline: none;
+
+  &:focus {
+    border-color: var(--aoi-stage-signal);
+  }
+}
+
+.aoi-rv__form-note {
+  flex-basis: 100%;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--aoi-stage-ink-dim);
+}
+
+.aoi-rv__form-error {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: #ff9c6f;
+}
+
+.aoi-rv__close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+}
+
+/* ── 坏图（B 侧回传的采集失败，登记后人工核）────────── */
+.aoi-rv__section {
+  margin-top: 36px;
+}
+
+.aoi-rv__section-title {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--color-neutral-content);
+}
+
+.aoi-rv__handled {
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-neutral-content-subtlest);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aoi-rv__tab {
+    transition: none;
+  }
+}

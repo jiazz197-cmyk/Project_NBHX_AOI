@@ -330,6 +330,9 @@ def aoi_api_paths() -> dict[str, Any]:
         entry('GET', '/api/datasets/import/{job_id}', 'aoi-datasets'),
         entry('GET', '/api/datasets/images', 'aoi-datasets'),
         entry('GET', '/api/datasets/images/{id}/download', 'aoi-datasets'),
+        # D6：回传图片原始字节（B 回传图 images/{md5}.{ext} 无 /data/ 代理路由，走 aoi 流式端点）。
+        # 位置在 DELETE images/{id} 之前：巡检循环按列表顺序执行，DELETE 后图片 1 已不存在
+        entry('GET', '/api/datasets/images/{id}/raw', 'aoi-datasets'),
         # D5 收尾：图片详情/删除
         entry('GET', '/api/datasets/images/{id}', 'aoi-datasets'),
         entry('DELETE', '/api/datasets/images/{id}', 'aoi-datasets'),
@@ -358,6 +361,12 @@ def aoi_api_paths() -> dict[str, Any]:
         entry('POST', '/api/train/models/{id}/approve', 'aoi-train'),
         entry('POST', '/api/train/models/{id}/publish', 'aoi-train'),
         entry('GET', '/api/train/models/{id}/publish', 'aoi-train'),
+        # D7：批量上传 + 已上传管理（契约 §4.2 / 跨平台契约 §2.4）
+        entry('POST', '/api/train/models/publish', 'aoi-train'),
+        entry('POST', '/api/train/models/{id}/retire', 'aoi-train'),
+        entry('GET', '/api/train/publishes', 'aoi-train'),
+        entry('POST', '/api/train/publishes/{id}/delete', 'aoi-train'),
+        entry('POST', '/api/train/publishes/{id}/restore', 'aoi-train'),
         # prelabel（契约 §4.3）
         entry('GET', '/api/prelabel/tasks', 'aoi-prelabel'),
         entry('POST', '/api/prelabel/tasks', 'aoi-prelabel'),
@@ -382,12 +391,15 @@ def aoi_api_paths() -> dict[str, Any]:
         entry('POST', '/api/ingest/findings', 'aoi-ingest', auth='internal-token'),
     ]
     return {
-        'version': 'd5-20260921-1',
+        'version': 'd7-20260921-1',
         'note': (
             'T2.9 datasets CRUD 路径裁定为 /api/datasets + /api/datasets/{id}；旧 /api/datasets/datasets* 不存在；'
             'D3 新增 /api/auth/login（匿名）与 /api/auth/logout（jwt）；'
             'D5 新增 /api/core/users 与 /api/core/users/{id}/deactivate|activate（组织管理，契约 §4.0）；'
-            'D5 收尾新增 GET/DELETE /api/datasets/images/{id}（图片删除）与 GET /api/datasets/defects/versions（发布历史）'
+            'D5 收尾新增 GET/DELETE /api/datasets/images/{id}（图片删除）与 GET /api/datasets/defects/versions（发布历史）；'
+            'D7 新增 POST /api/train/models/publish（批量上传）、POST /api/train/models/{id}/retire、'
+            'GET /api/train/publishes、POST /api/train/publishes/{id}/delete|restore（已上传管理，契约 §4.2）'
+            '与 GET /api/datasets/images/{id}/raw（回传图片字节）'
         ),
         'paths': paths,
     }

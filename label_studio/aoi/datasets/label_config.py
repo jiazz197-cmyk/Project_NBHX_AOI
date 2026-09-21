@@ -158,7 +158,9 @@ def snapshot_from_defects(defects: Iterable[Any] | None) -> dict[str, Any]:
     }
 
 
-def defects_from_snapshot(snapshot: dict[str, Any] | None, name_lookup: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def defects_from_snapshot(
+    snapshot: dict[str, Any] | None, name_lookup: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     """从字典发布快照还原 defects（按 ``index`` 排序），供模板渲染与发布历史展示。
 
     ``name_lookup``：``{code: {'name_cn':…, 'risk_level':…}}``（通常来自当前 ``DefectClass``），

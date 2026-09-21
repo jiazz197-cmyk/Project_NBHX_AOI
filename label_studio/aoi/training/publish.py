@@ -1,13 +1,12 @@
-"""模型发布服务（D3 stub：假 build + 双模式 push）。
+"""模型发布服务（构建 schema2 单层镜像 + Registry v2 真推送）。
 
-契约依据：跨平台契约 §2.4（发布 8 步）/ §2.2（tag 规范）；平台A §3.3 / §4.2；
-计划 D3「发布服务 stub（假 build/push）」。
+契约依据：跨平台契约 §2.4（发布步骤/digest 回执/可复现）/ §2.2（tag 规范）；平台A §3.3 / §4.2。
 
-D3 语义
--------
-1. **假 build**：不依赖 docker daemon，用 Python 直接构造与 ``FROM scratch + COPY model/ /model/``
-   等价的 docker schema2 单层镜像产物（``layer.tar.gz`` / ``config.json`` / ``manifest.json``）；
-   权重是确定性占位 ONNX（**不是**真实训练权重），``model.yaml`` 由 ``aoi.training.model_yaml`` 生成。
+语义
+----
+1. **构建**：不依赖 docker daemon，用 Python 直接构造与 ``FROM scratch + COPY model/ /model/``
+   字节等价的 docker schema2 单层镜像产物（``layer.tar.gz`` / ``config.json`` / ``manifest.json``）；
+   ``model.yaml`` 由 ``aoi.training.model_yaml`` 生成。
 2. **push 双模式**（``AOI_PUBLISH_MODE``）：
    - ``fake``（默认）：不联网，digest 取本地 manifest 的 sha256，供离线开发与契约测试；
    - ``registry``：走 Registry v2 HTTP API 真推送（token → blob 单块上传 → manifest PUT），
@@ -18,14 +17,19 @@ D3 语义
 3. **状态机**：``queued → building → pushing → published``，每步落库（GET 可观察）；
    失败 → ``failed`` + ``error_message``，可人工重推（``attempts`` 递增，见 ``ModelPublishView``）。
 4. **成功副作用**：``model_publish{digest, published_at}`` + ``model.lifecycle=published`` +
-   ``model.config_snapshot['model_yaml']`` 快照 + 审计 ``model.published``（平台A §5.1）。
+   ``model.config_snapshot`` 快照（含发布时间）+ 审计 ``model.published``（平台A §5.1）。
 5. **产物落盘**（``AOI_PUBLISH_ARTIFACTS_DIR``，默认 ``tmp/publish/<tag>/``）：供人工核查与
    「有网机器手工直推」临时通道（``push.sh``）；``tmp/`` 已在 ``.gitignore``，不会进版本库。
+6. **digest 可复现**（跨平台契约 §2.4）：镜像内字节零墙钟——``model.yaml.created_at`` 固定为
+   epoch、``published_at`` 不写入镜像，tar/gzip/config.history 时间戳固定；真实时间由
+   ``model_publish.published_at``、``model.config_snapshot`` 与审计承载。同 ``model_ref`` + 同产物
+   内容任意时刻重建推送必得同一 digest。
 
-D7 出界（本模块预留的接缝）
----------------------------
-真实权重导出、Celery ``publish`` 队列异步化、指数退避重试（30s/2m/10m，``PUBLISH_RETRY``）、
-镜像物理清理。``run_publish()`` 即未来 worker 的调用入口，发布器与状态机逻辑不必重写。
+出界（本模块预留的接缝）
+------------------------
+真实权重导出（D12 替换 ``build_fake_onnx``，同管线）、Celery ``publish`` 队列异步化、
+指数退避重试（30s/2m/10m，``PUBLISH_RETRY``）、镜像物理清理。``run_publish()`` 即未来 worker
+的调用入口，发布器与状态机逻辑不必重写。
 """
 
 from __future__ import annotations
@@ -39,7 +43,6 @@ import logging
 import re
 import tarfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -118,18 +121,20 @@ DIGEST_POLICIES = (DIGEST_POLICY_STRICT, DIGEST_POLICY_READBACK)
 
 #: manifest 的 config.history 固定时间戳：保证同输入构建产物字节可复现（mtime/diff_id 稳定）
 FIXED_BUILD_CREATED = '1970-01-01T00:00:00Z'
-BUILD_CREATED_BY = 'AOI publish stub (D3: python-built FROM-scratch layer, no docker; real pipeline at D7)'
+#: 镜像内 ``model.yaml.created_at`` 的固定值（digest 可复现，跨平台契约 §2.4；真实时间在 model_publish）
+MODEL_YAML_FIXED_CREATED_AT = FIXED_BUILD_CREATED
+BUILD_CREATED_BY = 'AOI publish pipeline (python-built FROM-scratch layer, no docker)'
 
 _BEARER_PARAM_RE = re.compile(r'(\w+)="([^"]*)"')
 
 DOCKERFILE_TEXT = """# AOI 模型镜像（跨平台契约 §2.1/§2.4）：单层 FROM scratch，仅含 /model/*
-# 真实流水线（D7）为 `docker build -t <registry>/<repo>:<tag> .` + `docker push`
+# 发布服务用 Python 构造字节等价产物直推；本 Dockerfile 供有 docker 的机器复核/重建
 FROM scratch
 COPY model/ /model/
 """
 
 PUSH_SH_TEMPLATE = """#!/usr/bin/env bash
-# AOI 发布产物「手工直推」临时通道（D3~D7 之间；D7 起由发布服务 registry 模式 / docker 流水线取代）
+# AOI 发布产物「手工直推」备用通道（发布服务 registry 模式不可达时的离线兜底）
 #
 # 用途：本机/机房与外网隔离时，把落盘产物拷到有网机器上直接推仓库（无需 docker daemon）。
 # 仅覆盖 Docker Hub（registry-1.docker.io / auth.docker.io）；其它 registry 请用平台 registry 模式。
@@ -230,10 +235,6 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
-
-
 def build_fake_onnx(model: Any) -> bytes:
     """确定性占位权重（**非**真实 ONNX，仅供 B 侧拉取/校验链路与镜像产物验证）。
 
@@ -248,7 +249,12 @@ def build_fake_onnx(model: Any) -> bytes:
 
 
 def build_model_files(model: Model) -> tuple[bytes, dict[str, Any], str]:
-    """生成 ``(占位权重, model.yaml dict, model.yaml 文本)``；校验不过抛 ``PublishBuildError``。"""
+    """生成 ``(占位权重, model.yaml dict, model.yaml 文本)``；校验不过抛 ``PublishBuildError``。
+
+    镜像内 ``model.yaml`` 零墙钟（``created_at`` 固定 epoch、不写 ``published_at``），
+    保证同输入重建同 digest（跨平台契约 §2.4）；真实时间由 ``run_publish`` 落
+    ``model_publish.published_at`` / ``model.config_snapshot``。
+    """
     onnx_bytes = build_fake_onnx(model)
     defect_classes = list(DefectClass.objects.filter(active=True).order_by('id'))
     tensor_names = model.tensor_names or {}
@@ -258,7 +264,7 @@ def build_model_files(model: Model) -> tuple[bytes, dict[str, Any], str]:
         'sha256': _sha256(onnx_bytes),
         'size_bytes': len(onnx_bytes),
         'opset': 17,
-        'producer': 'aoi-publish-stub',
+        'producer': 'aoi-publish-pipeline',
         'input_shape': input_shape,
         'input': {
             'name': tensor_names.get('input') or 'images',
@@ -276,9 +282,10 @@ def build_model_files(model: Model) -> tuple[bytes, dict[str, Any], str]:
         defect_classes=defect_classes,
         onnx_meta=onnx_meta,
         source={
-            'published_at': _utcnow_iso(),
-            'tags': ['publish-stub'],
-            'description': 'D3 发布 stub 产物：占位权重，非真实训练权重（D7 起换成真实导出）',
+            'created_at': MODEL_YAML_FIXED_CREATED_AT,
+            'published_at': None,
+            'tags': ['aoi-model'],
+            'description': 'AOI 模型镜像产物（权重为占位 ONNX；真实导出复用同一条发布流水线）',
         },
     )
     errors = validate_model_yaml(doc)
@@ -288,13 +295,11 @@ def build_model_files(model: Model) -> tuple[bytes, dict[str, Any], str]:
 
 
 def build_image_artifacts(onnx_bytes: bytes, model_yaml_text: str) -> PublishArtifacts:
-    """把 ``模型文件`` 打成 docker schema2 单层镜像产物（与 ``FROM scratch`` 构建等价）。
+    """把 ``模型文件`` 打成 docker schema2 单层镜像产物（与 ``FROM scratch`` 构建字节等价）。
 
-    确定性：tar 成员 ``mtime=0``、顺序固定、``gzip(mtime=0)``、config 时间戳固定，
-    **同一份 ``model_yaml_text`` 输入**恒定输出同字节 → 同 digest。
-
-    注意（D7 待修）：``model.yaml`` 本身带 ``created_at``/``published_at``（秒级时间戳），
-    因此**换时刻重建**同一模型会得到不同 digest。修法见 ``docs/MVP开发计划.md`` §5 D7「验收附加项」。
+    确定性（跨平台契约 §2.4 digest 可复现）：tar 成员 ``mtime=0``、顺序固定、``gzip(mtime=0)``、
+    config 时间戳固定；调用方须保证 ``model_yaml_text`` 本身零墙钟（``build_model_files`` 已固定
+    ``created_at``、不写 ``published_at``）→ 同输入恒定输出同字节 → 同 digest。
     """
     onnx_sha256 = _sha256(onnx_bytes)
     payloads = {
@@ -709,14 +714,17 @@ def run_publish(
             detail=str(exc),
         ) from exc
 
+    published_at = django_timezone.now()
     publish.digest = digest
     publish.status = ModelPublish.STATUS_PUBLISHED
-    publish.published_at = django_timezone.now()
+    publish.published_at = published_at
     publish.error_message = None
     publish.save(update_fields=['digest', 'status', 'published_at', 'error_message'])
 
+    # 镜像内 model.yaml 零墙钟（digest 可复现）；真实时间只在 A 侧承载
     snapshot = dict(model.config_snapshot or {})
     snapshot['model_yaml'] = doc
+    snapshot['published_at'] = published_at.isoformat()
     model.config_snapshot = snapshot
     model.lifecycle = Model.LIFECYCLE_PUBLISHED
     model.save(update_fields=['config_snapshot', 'lifecycle'])
@@ -732,6 +740,7 @@ def run_publish(
             'tag': publish.tag,
             'digest': digest,
             'mode': mode,
+            'published_at': published_at.isoformat(),
         },
         request_id=request_id,
     )

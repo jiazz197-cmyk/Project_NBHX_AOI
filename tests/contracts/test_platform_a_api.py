@@ -25,6 +25,7 @@ from aoi.common.settings import get_internal_token
 from conftest import TEST_USER_EMAIL, TEST_USER_PASSWORD
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import Resolver404, resolve
+from django.utils.dateparse import parse_datetime
 from rest_framework.test import APIClient
 from samples import (
     build_model_yaml_sample,
@@ -92,6 +93,8 @@ def payload_for(entry: dict, predict_request: dict | None = None):
         return {'dataset_version': '1.0.0', 'framework': 'yolo', 'preset': {'class_subset': ['object_fault_type_01']}}
     if path == '/api/train/models/{id}/approve':
         return {'decision': 'approve', 'note': 'ok'}
+    if path == '/api/train/models/publish' and method == 'POST':
+        return {'model_ids': [1]}
     if path == '/api/prelabel/tasks' and method == 'POST':
         return {'dataset_id': 1, 'model_ref': '3-yolo@ds1'}
     if path == '/api/prelabel/{task_id}/predict':
@@ -491,6 +494,54 @@ def _reset_review_workitem():
     )
 
 
+def _advance_model_id_sequence():
+    """巡检 fixture 显式写 ``Model(pk=1)`` 不推进序列；建行前先把序列拨到 ``MAX(id)``。
+
+    不写的话 ``Model.objects.create()`` 会拿到 nextval=1，撞 ``model_pkey``。
+    """
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'SELECT setval(pg_get_serial_sequence(\'"aoi_training"."model"\', \'id\'), '
+            'GREATEST((SELECT COALESCE(MAX(id), 1) FROM "aoi_training"."model"), 1))'
+        )
+
+
+def _seed_retired_publish(version: str, *, deleted: bool = False):
+    """D7 已上传管理巡检种子：模型（已下线）+ 一条发布记录，可选预置软删标记。
+
+    与巡检顺序无关（delete/restore 各用独立 model_ref）；建行前先修序列（见上）。
+    """
+    from aoi.training.models import Model, ModelPublish
+
+    _advance_model_id_sequence()
+    model, _ = Model.objects.update_or_create(
+        version=version,
+        defaults={
+            'framework': 'yolo',
+            'dataset_version': '9',
+            'precision': 'fp32',
+            'class_names': ['object_fault_type_01'],
+            'gate_status': Model.GATE_PASSED,
+            'lifecycle': Model.LIFECYCLE_RETIRED,
+        },
+    )
+    publish, _ = ModelPublish.objects.update_or_create(
+        model_ref=model.version,
+        tag='1-yolo-ds9',
+        defaults={
+            'registry': 'docker.io',
+            'image': 'docker.io/rekal1018/aoi-model',
+            'digest': 'sha256:' + '0' * 64,
+            'status': ModelPublish.STATUS_PUBLISHED,
+            'deleted_at': parse_datetime('2026-09-21T02:00:00Z') if deleted else None,
+            'deleted_by': 1 if deleted else None,
+        },
+    )
+    return publish
+
+
 class TestAllStubs:
     @pytest.fixture(autouse=True)
     def _ingest_token(self, settings):
@@ -634,6 +685,30 @@ class TestAllStubs:
             if path.startswith('/api/review/workitems/') and method == 'POST':
                 workitem = _reset_review_workitem()
                 url = f'/api/review/workitems/{workitem.id}/{path.rsplit("/", 1)[-1]}'
+            if path == '/api/train/models/{id}/retire':
+                # D7：retire 幂等，用专用种子模型，避免污染 model 1 的 publish 巡检链
+                from aoi.training.models import Model
+
+                _advance_model_id_sequence()
+                target, _ = Model.objects.update_or_create(
+                    version='90-yolo@ds9',
+                    defaults={
+                        'framework': 'yolo',
+                        'dataset_version': '9',
+                        'precision': 'fp32',
+                        'class_names': ['object_fault_type_01'],
+                        'gate_status': Model.GATE_PASSED,
+                        'lifecycle': Model.LIFECYCLE_APPROVED,
+                    },
+                )
+                url = f'/api/train/models/{target.id}/retire'
+            if path == '/api/train/publishes/{id}/delete':
+                # D7：软删要求 lifecycle=retired —— 专用种子（模型已下线 + 发布记录），与巡检顺序无关
+                publish = _seed_retired_publish('91-yolo@ds9')
+                url = f'/api/train/publishes/{publish.id}/delete'
+            if path == '/api/train/publishes/{id}/restore':
+                publish = _seed_retired_publish('92-yolo@ds9', deleted=True)
+                url = f'/api/train/publishes/{publish.id}/restore'
 
             if auth == 'jwt':
                 client.force_authenticate(user=test_user)
@@ -645,6 +720,14 @@ class TestAllStubs:
                 assert response.status_code == 200, (method, path)
                 content = b''.join(response.streaming_content)
                 assert b'"phase": "finished"' in content
+                continue
+
+            if path == '/api/datasets/images/{id}/raw':
+                # D6：二进制端点（回传图片字节），不回 aoi 信封 —— 校验字节本身
+                client.force_authenticate(user=test_user)
+                response = client.get(url)
+                assert response.status_code == 200, (method, path, response.status_code)
+                assert b''.join(response.streaming_content) == jpeg_bytes
                 continue
 
             if auth == 'optional-internal-token':
@@ -1171,6 +1254,134 @@ class TestIngestFindings:
         response = self._post(client, self._meta(kind='other', seq=7777))
         assert response.status_code == 422
         assert_envelope(response, code=42200)
+
+    # ------------------------------------------------------------------ D6：图片落对象存储
+    @staticmethod
+    def _unique_jpeg(seed: int) -> bytes:
+        """生成唯一内容的有效 JPEG（media 目录跨用例共享，md5 必须互不相同才能触发新写入）。"""
+        from io import BytesIO
+
+        from PIL import Image as PILImage
+
+        buf = BytesIO()
+        PILImage.new('RGB', (16, 16), color=(seed % 256, 0, 0)).save(buf, format='JPEG')
+        return buf.getvalue()
+
+    def test_suspicious_image_bytes_stored_and_served(self, api_client, test_user, settings):
+        """suspicious 的图片字节真实落存储（生产 MinIO，测试 = MEDIA_ROOT），raw 端点可回原字节。"""
+        from aoi.datasets.models import Image
+        from django.core.files.storage import default_storage
+
+        payload = self._unique_jpeg(11)
+        client = APIClient()
+        response = self._post(
+            client, self._meta(), file=SimpleUploadedFile('ST01_1042.jpg', payload, content_type='image/jpeg')
+        )
+        first = assert_envelope(response)['data']
+
+        image = Image.objects.get(pk=first['image_id'])
+        assert image.object_key.startswith('images/') and image.object_key.endswith('.jpg')
+        assert image.qc_status == 'ok' and image.width == 16
+        assert default_storage.exists(image.object_key)
+        assert default_storage.open(image.object_key).read() == payload
+
+        viewer = APIClient()
+        viewer.force_authenticate(user=test_user)
+        served = viewer.get(f'/api/datasets/images/{image.id}/raw')
+        assert served.status_code == 200
+        assert b''.join(served.streaming_content) == payload
+
+    def test_duplicate_ingest_does_not_duplicate_storage_object(self, api_client, settings):
+        from aoi.datasets.models import Image
+        from django.core.files.storage import default_storage
+
+        payload = self._unique_jpeg(12)
+        client = APIClient()
+        for _ in range(2):
+            response = self._post(
+                client, self._meta(), file=SimpleUploadedFile('a.jpg', payload, content_type='image/jpeg')
+            )
+            assert response.status_code == 200
+        assert Image.objects.count() == 1
+        image = Image.objects.first()
+        assert default_storage.exists(image.object_key)
+
+    def test_storage_failure_rolls_back_everything_50300(self, api_client, monkeypatch):
+        """存储不可用 → 50300 且 image/fact/workitem 全部回滚（不留「有登记无字节」的半写）。"""
+        from aoi.datasets.models import Image
+        from aoi.review.models import InspectionFact, ReviewWorkitem
+        from django.core.files.storage import default_storage
+
+        def boom(*args, **kwargs):
+            raise ConnectionError('minio unreachable')
+
+        # exists 拨 False：排除「同 md5 字节已在共享 media 目录」的幂等短路，强制走到 save
+        monkeypatch.setattr(default_storage, 'exists', lambda key: False)
+        monkeypatch.setattr(default_storage, 'save', boom)
+        payload = self._unique_jpeg(13)
+        response = self._post(
+            APIClient(),
+            self._meta(seq=1051),
+            file=SimpleUploadedFile('a.jpg', payload, content_type='image/jpeg'),
+        )
+        assert response.status_code == 503
+        assert_envelope(response, code=50300)
+        assert Image.objects.count() == 0
+        assert InspectionFact.objects.count() == 0
+        assert ReviewWorkitem.objects.count() == 0
+
+    def test_bad_kind_with_undecodable_image_keeps_evidence(self, api_client, settings):
+        """bad 分支带坏字节：仍落存储当证据，登记 qc=rejected（不拒绝整条回传）。"""
+        from aoi.datasets.models import Image
+        from django.core.files.storage import default_storage
+
+        payload = b'broken-camera-bytes-1'
+        response = self._post(
+            APIClient(),
+            self._meta(kind='bad', error_code='decode_failed', verdict=None, boxes=[], seq=8888),
+            file=SimpleUploadedFile('broken.jpg', payload, content_type='image/jpeg'),
+        )
+        assert response.status_code == 200
+        first = assert_envelope(response)['data']
+        image = Image.objects.get(pk=first['image_id'])
+        assert image.qc_status == 'rejected' and image.qc_reason == 'decode_failed'
+        assert image.size_bytes == len(payload)
+        assert default_storage.open(image.object_key).read() == payload
+
+    def test_workitem_list_embeds_fact_and_image(self, api_client, test_user):
+        """D7 加性投影：队列 item 内嵌 fact（工位/序号）与 image（含可加载 url），复审页看图用。"""
+        payload = self._unique_jpeg(21)
+        response = self._post(
+            APIClient(),
+            self._meta(seq=1071),
+            file=SimpleUploadedFile('a.jpg', payload, content_type='image/jpeg'),
+        )
+        data = assert_envelope(response)['data']
+
+        viewer = APIClient()
+        viewer.force_authenticate(user=test_user)
+        listing = assert_envelope(viewer.get('/api/review/workitems'))['data']
+        item = next(entry for entry in listing['items'] if entry['id'] == data['workitem_id'])
+        assert item['fact']['station_code'] == 'ST01'
+        assert item['fact']['seq'] == 1071
+        assert item['fact']['verdict'] == 'recheck'
+        assert item['image']['object_key'].startswith('images/')
+        assert item['image']['url'] == f'/api/datasets/images/{item["image"]["id"]}/raw'
+        assert item['image']['width'] == 16
+
+        # 无 fact/image 的预标工作项：两块为 null，不伪造
+        from aoi.review.models import ReviewWorkitem
+
+        prelabel = ReviewWorkitem.objects.create(
+            source=ReviewWorkitem.SOURCE_PRELABEL,
+            dataset_version_id=1,
+            model_ref='3-yolo@ds1',
+            verdict='recheck',
+            bucket=ReviewWorkitem.BUCKET_MEDIUM,
+        )
+        listing2 = assert_envelope(viewer.get('/api/review/workitems'))['data']
+        prelabel_item = next(entry for entry in listing2['items'] if entry['id'] == prelabel.id)
+        assert prelabel_item['fact'] is None and prelabel_item['image'] is None
 
 
 @pytest.mark.django_db
@@ -1947,15 +2158,12 @@ class TestPublishRegistryMode:
         assert row.status == ModelPublish.STATUS_PUBLISHED
         assert row.digest == data['digest']
 
-    def test_same_model_rebuilt_later_yields_different_digest(self, auth_client, settings, monkeypatch):
-        """**D7 待修事实锁定**：同一个 model_ref 在**不同时刻**重建 → digest 不同。
+    def test_same_model_rebuilt_later_yields_same_digest(self, auth_client, settings, monkeypatch):
+        """D7 验收附加项 ②：同一 model_ref 在**不同时刻**重建推送 → digest 必须相等（跨平台契约 §2.4）。
 
-        根因：``model.yaml`` 里写了 ``created_at``（``model_yaml._utcnow()``，秒级）与发布器传入的
-        ``published_at``，二者都参与 manifest 字节 → 影响跨平台契约 §2.2「同 tag 不同 digest → 禁止覆盖」的判定。
-        修法见 ``docs/MVP开发计划.md`` §5 D7「digest 可复现」；修好后本用例应改成断言两次相等。
-
-        这里显式把两次构建钉在**不同秒**（而非依赖真实时钟）：同一秒内重建产物本来就可复现，
-        真正不可复现的是「换个时刻重建」。
+        镜像内 model.yaml 零墙钟（``created_at`` 固定 epoch、不写 ``published_at``），时间信息只落
+        A 侧 ``model_publish.published_at`` / ``config_snapshot``。两次发布把发布时间钉在**不同时刻**
+        （而非依赖真实时钟碰巧同秒），断言 digest 相等。
         """
         from aoi.training.models import Model, ModelPublish
 
@@ -1964,17 +2172,19 @@ class TestPublishRegistryMode:
 
         digests = []
         for stamp in ('2026-09-11T02:25:00Z', '2026-09-11T02:29:00Z'):
-            monkeypatch.setattr('aoi.training.model_yaml._utcnow', lambda stamp=stamp: stamp)
-            monkeypatch.setattr('aoi.training.publish._utcnow_iso', lambda stamp=stamp: stamp)
+            monkeypatch.setattr('aoi.training.publish.django_timezone.now', lambda stamp=stamp: parse_datetime(stamp))
             model.lifecycle = Model.LIFECYCLE_APPROVED
             model.save(update_fields=['lifecycle'])
             ModelPublish.objects.filter(model_ref=model.version).delete()
             with requests_mock.Mocker() as mock:
                 self._mock_registry(mock)
                 response = auth_client.post(f'/api/train/models/{model.id}/publish', {}, format='json')
-            digests.append(assert_envelope(response)['data']['digest'])
+            data = assert_envelope(response)['data']
+            digests.append(data['digest'])
+            row = ModelPublish.objects.get(model_ref=model.version)
+            assert row.published_at.isoformat() == parse_datetime(stamp).isoformat()
 
-        assert digests[0] != digests[1], '若相等说明 model.yaml 已不再带时间戳 —— 请更新本用例与 D7 计划项'
+        assert digests[0] == digests[1], '同内容重推 digest 不等：镜像字节又被墙钟污染（契约 §2.4 可复现被破坏）'
 
     def test_registry_without_receipt_fails_publish(self, auth_client, settings):
         """仓库不回 ``Docker-Content-Digest`` → 发布失败 50300、状态 failed，绝不落「本地自算 digest」。"""
@@ -1995,6 +2205,184 @@ class TestPublishRegistryMode:
         assert row.status == ModelPublish.STATUS_FAILED
         assert row.digest in (None, '')  # 不落「本地自算值」当仓库确认值
         assert 'receipt missing' in (row.error_message or '')
+
+
+@pytest.mark.django_db
+class TestBatchPublish:
+    """D7 批量上传：逐条独立执行，某条失败不影响其余（契约 §4.2 / 跨平台契约 §2.4）。"""
+
+    def _model(self, version, *, lifecycle='approved', precision='fp32', **overrides):
+        from aoi.training.models import Model
+
+        defaults = {
+            'version': version,
+            'framework': 'yolo',
+            'dataset_version': '9',
+            'precision': precision,
+            'class_names': ['object_fault_type_01'],
+            'cover_classes': ['object_fault_type_01'],
+            'gate_status': Model.GATE_PASSED,
+            'lifecycle': lifecycle,
+        }
+        defaults.update(overrides)
+        return Model.objects.create(**defaults)
+
+    def test_batch_publishes_each_item_independently(self, auth_client):
+        from aoi.training.models import Model, ModelPublish
+
+        ok_model = self._model('40-yolo@ds9')
+        blocked_model = self._model('41-yolo@ds9', lifecycle='candidate')
+
+        response = auth_client.post(
+            '/api/train/models/publish',
+            {'model_ids': [ok_model.id, blocked_model.id]},
+            format='json',
+        )
+        body = assert_envelope(response)['data']
+        assert body['succeeded'] == 1 and body['failed'] == 1
+        first, second = body['results']
+        assert first['model_id'] == ok_model.id and first['status'] == 'published'
+        assert first['tag'] == '40-yolo-ds9' and first['publish_id']
+        assert second['model_id'] == blocked_model.id and second['status'] == 'failed'
+        assert 'approved' in second['error']
+
+        # 失败条目不产生发布记录；成功条目正常推进生命周期
+        assert ModelPublish.objects.filter(model_ref='41-yolo@ds9').exists() is False
+        assert Model.objects.get(pk=blocked_model.id).lifecycle == Model.LIFECYCLE_CANDIDATE
+
+    def test_batch_publish_empty_or_non_list_42200(self, auth_client):
+        for payload in ({}, {'model_ids': []}, {'model_ids': '1'}, {'model_ids': [True]}):
+            response = auth_client.post('/api/train/models/publish', payload, format='json')
+            assert response.status_code == 422, payload
+            assert_envelope(response, code=42200)
+
+    def test_batch_publish_unknown_id_fails_per_item(self, auth_client):
+        response = auth_client.post('/api/train/models/publish', {'model_ids': [424242]}, format='json')
+        body = assert_envelope(response)['data']
+        assert body['results'] == [{'model_id': 424242, 'status': 'failed', 'error': 'model not found'}]
+
+    def test_batch_publish_precision_override_tag(self, auth_client):
+        from aoi.training.models import ModelPublish
+
+        model = self._model('42-yolo@ds9')
+        response = auth_client.post(
+            '/api/train/models/publish', {'model_ids': [model.id], 'precision': 'fp16'}, format='json'
+        )
+        data = assert_envelope(response)['data']['results'][0]
+        assert data['tag'] == '42-yolo-ds9-fp16'
+        assert ModelPublish.objects.get(model_ref='42-yolo@ds9', tag='42-yolo-ds9-fp16').status == 'published'
+
+
+@pytest.mark.django_db
+class TestPublishManagement:
+    """D7 已上传管理：下线 / 软删（只清 A 侧记录）/ 恢复（契约 §4.2 / 跨平台契约 §2.4）。"""
+
+    def _published_model(self, auth_client, version):
+        """造一个「已发布」状态：approved 模型 + fake 模式发布一次，返回 (model, publish)。"""
+        from aoi.training.models import Model, ModelPublish
+
+        model = Model.objects.create(
+            version=version,
+            framework='yolo',
+            dataset_version='9',
+            precision='fp32',
+            class_names=['object_fault_type_01'],
+            cover_classes=['object_fault_type_01'],
+            gate_status=Model.GATE_PASSED,
+            lifecycle=Model.LIFECYCLE_APPROVED,
+        )
+        response = auth_client.post(f'/api/train/models/{model.id}/publish', {}, format='json')
+        assert response.status_code == 200, response.content[:200]
+        return model, ModelPublish.objects.get(model_ref=version)
+
+    def test_delete_requires_retired_model(self, auth_client):
+        from aoi.training.models import Model, ModelPublish
+
+        model, publish = self._published_model(auth_client, '50-yolo@ds9')
+        response = auth_client.post(f'/api/train/publishes/{publish.id}/delete', {}, format='json')
+        assert response.status_code == 409
+        body = assert_envelope(response, code=40900)
+        assert body['data']['detail']['fields']['lifecycle'] == Model.LIFECYCLE_PUBLISHED
+
+        # 下线是删除前置条件
+        assert auth_client.post(f'/api/train/models/{model.id}/retire', {}, format='json').status_code == 200
+        assert Model.objects.get(pk=model.id).lifecycle == Model.LIFECYCLE_RETIRED
+
+        delete = auth_client.post(f'/api/train/publishes/{publish.id}/delete', {}, format='json')
+        assert delete.status_code == 200
+        publish.refresh_from_db()
+        assert publish.deleted_at is not None and publish.deleted_by is not None
+        # 只软删 A 侧记录：digest/镜像地址不动，仓库镜像保留（B 仍可拉取）
+        assert publish.digest and publish.status == ModelPublish.STATUS_PUBLISHED
+        assert Model.objects.get(pk=model.id).lifecycle == Model.LIFECYCLE_RETIRED
+
+    def test_delete_is_idempotent_and_audited_once(self, auth_client):
+        from aoi.audit.models import AuditLog
+        from aoi.training.models import ModelPublish
+
+        model, publish = self._published_model(auth_client, '51-yolo@ds9')
+        auth_client.post(f'/api/train/models/{model.id}/retire', {}, format='json')
+        assert auth_client.post(f'/api/train/publishes/{publish.id}/delete', {}, format='json').status_code == 200
+        again = auth_client.post(f'/api/train/publishes/{publish.id}/delete', {}, format='json')
+        assert again.status_code == 200
+        assert AuditLog.objects.filter(action='model.publish.deleted', object_id=str(publish.id)).count() == 1
+        assert ModelPublish.objects.get(pk=publish.id).deleted_at is not None
+
+    def test_publishes_list_hides_deleted_and_restores(self, auth_client):
+        from aoi.training.models import Model
+
+        model, publish = self._published_model(auth_client, '52-yolo@ds9')
+        auth_client.post(f'/api/train/models/{model.id}/retire', {}, format='json')
+        auth_client.post(f'/api/train/publishes/{publish.id}/delete', {}, format='json')
+
+        visible = assert_envelope(auth_client.get('/api/train/publishes'))['data']
+        assert visible['items'] == []
+        with_deleted = assert_envelope(auth_client.get('/api/train/publishes?include_deleted=1'))['data']
+        row = next(item for item in with_deleted['items'] if item['publish_id'] == publish.id)
+        assert row['deleted_at'] is not None
+        assert row['model_id'] == model.id
+        assert row['model_lifecycle'] == Model.LIFECYCLE_RETIRED
+
+        restore = auth_client.post(f'/api/train/publishes/{publish.id}/restore', {}, format='json')
+        assert restore.status_code == 200
+        publish.refresh_from_db()
+        model.refresh_from_db()
+        assert publish.deleted_at is None and publish.deleted_by is None
+        # 恢复零成本：仓库镜像仍在（digest 不变），lifecycle 回 published
+        assert publish.digest is not None
+        assert model.lifecycle == Model.LIFECYCLE_PUBLISHED
+
+    def test_publishes_list_filters(self, auth_client):
+        _, publish = self._published_model(auth_client, '53-yolo@ds9')
+        self._published_model(auth_client, '54-yolo@ds9')
+
+        by_ref = assert_envelope(auth_client.get('/api/train/publishes?model_ref=53-yolo@ds9'))['data']
+        assert [item['publish_id'] for item in by_ref['items']] == [publish.id]
+        by_status = assert_envelope(auth_client.get('/api/train/publishes?status=published'))['data']
+        assert by_status['total'] == 2
+
+    def test_delete_and_restore_unknown_40401(self, auth_client):
+        for path in ('/api/train/publishes/424242/delete', '/api/train/publishes/424242/restore'):
+            response = auth_client.post(path, {}, format='json')
+            assert response.status_code == 404, path
+            assert_envelope(response, code=40401)
+
+    def test_retire_unknown_40401(self, auth_client):
+        response = auth_client.post('/api/train/models/424242/retire', {}, format='json')
+        assert response.status_code == 404
+        assert_envelope(response, code=40401)
+
+    def test_publish_management_is_admin_only(self, client_for):
+        """批量上传/下线/删除/恢复受 ``training.publish`` 控制（operator → 40300）。"""
+        for method, path, payload in (
+            ('post', '/api/train/models/publish', {'model_ids': [1]}),
+            ('post', '/api/train/models/1/retire', {}),
+            ('post', '/api/train/publishes/1/delete', {}),
+            ('post', '/api/train/publishes/1/restore', {}),
+        ):
+            response = getattr(client_for('operator'), method)(path, payload, format='json')
+            assert response.status_code == 403, path
+            assert_envelope(response, code=40300)
 
 
 @pytest.mark.django_db
@@ -3609,7 +3997,6 @@ def import_surface(test_user):
 
     D5 收尾的删除类用例（TestImageDelete/TestDatasetDeleteCascade）不在该类内，无法复用类内 fixture。
     """
-    from aoi.datasets import label_config
     from aoi.datasets.ls_project import build_project_kwargs
     from aoi.datasets.models import Dataset
     from organizations.models import Organization
@@ -3787,9 +4174,7 @@ class TestDatasetDraftDictionaryFallback:
         assert 'defects' in body['data']['detail']['fields']
 
     def test_dict_source_invalid_value_42200(self, auth_client, org):
-        response = auth_client.post(
-            '/api/datasets', {'name': '非法来源', 'dict_source': 'whatever'}, format='json'
-        )
+        response = auth_client.post('/api/datasets', {'name': '非法来源', 'dict_source': 'whatever'}, format='json')
         assert response.status_code == 422
         body = assert_envelope(response, code=42200)
         assert 'dict_source' in body['data']['detail']['fields']
@@ -3818,7 +4203,7 @@ class TestImageGrouping:
         assert [item['id'] for item in scoped['items']] == [image.id]
         assert scoped['items'][0]['dataset_id'] == dataset.id
 
-        empty = assert_envelope(auth_client.get(f"/api/datasets/images?dataset_id={other['id']}"))['data']
+        empty = assert_envelope(auth_client.get(f'/api/datasets/images?dataset_id={other["id"]}'))['data']
         assert empty['items'] == [] and empty['total'] == 0
 
     def test_images_filter_by_dataset_id_unknown_is_40401(self, auth_client):

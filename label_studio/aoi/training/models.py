@@ -157,6 +157,9 @@ class ModelPublish(models.Model):
     status = models.CharField(max_length=16, default=STATUS_QUEUED, choices=STATUS_CHOICES)
     attempts = models.IntegerField(default=0)
     error_message = models.TextField(null=True, blank=True)
+    # 软删（D7）：只清 A 侧管理记录，仓库镜像与 tag 一律保留（B 仍可拉取/回滚）
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.IntegerField(null=True, blank=True)
     published_by = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     published_at = models.DateTimeField(null=True, blank=True)
