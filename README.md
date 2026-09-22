@@ -9,12 +9,28 @@
 [![Django](https://img.shields.io/badge/Django-DRF-44B78B.svg)](https://www.djangoproject.com/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-%E2%9A%A1-009688.svg)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/frontend-React%2018-61DAFB.svg)](web/)
+[![Sanitized](https://img.shields.io/badge/Edition-脱敏开源版-lightgrey.svg)]()
 
 *平台 A（训练与标注平台，Label Studio 1.x 二开）+ 平台 B（推理与检测平台，独立轻量前后端），跨机器部署。*
 
 [快速开始](#-快速开始) · [架构](#-架构) · [测试](#-测试) · [文档](#-文档) · [路线图](#-路线图) · [贡献](#-贡献) · [许可证](#-许可证)
 
 </div>
+
+---
+
+> [!IMPORTANT]
+> ### 🔒 本仓库为「脱敏开源版本」（Sanitized Open-Source Edition）
+>
+> 本仓库面向开源分享与技术交流，已对企业敏感信息做脱敏处理：
+>
+> - **密钥与凭证**：真实 Token / 口令 / 证书均已移除，示例配置统一使用占位符（`<...>`、`minioadmin`、`postgres` 等本地默认值）；
+> - **配置与数据**：只保留配置字段结构与示例值，不含生产配置、业务数据与数据库导出；
+> - **模型与资产**：不含模型权重，镜像仓库凭据需由部署方自行创建并注入。
+>
+> ⚠️ 仓库内出现的任何账号、口令、Token 均为**占位符或本地开发默认值**，不对应任何生产系统，**请勿直接复用**；请勿将本仓库的示例配置用于生产环境。
+>
+> 企业名称与业务场景描述仅用于交代项目背景，不构成任何数据披露或授权。
 
 ---
 
@@ -201,6 +217,14 @@ cd web && bun --bun run biome check <改动的前端文件>
 - 本仓库 fork 自 [Label Studio](https://github.com/HumanSignal/label-studio)（Apache-2.0），修改与新增代码
   同样以 Apache-2.0 提供；上游原有版权与许可声明保留于 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
 - 版权声明：`Copyright 2026 The Project_NBHX_AOI Authors`（见 [NOTICE](NOTICE)）。
+
+### 脱敏开源版本声明
+
+本仓库为**脱敏开源版本**：仓库中不含企业真实凭证与密钥，示例配置一律使用占位符（`<...>`）或本地开发默认值（`postgres` / `minioadmin`），配置仅保留字段结构，不含生产配置、业务数据与模型权重。
+
+- 仓库内出现的任何账号、口令、Token 均为**占位符或本地开发默认值**，不对应任何生产系统，**请勿直接复用**；
+- 镜像仓库（Docker Hub / 私有 Registry）凭据需由部署方自行创建，并通过环境变量、CI 变量或 Secret 注入，**不要提交到 Git**；
+- 如需基于本仓库二次开发，请在部署前完整复核 `.env.example` 与 [`docs/docker-registry-setup.md`](docs/docker-registry-setup.md)，替换全部占位值。
 
 ## 🙏 致谢
 

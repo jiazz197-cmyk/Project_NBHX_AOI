@@ -1,24 +1,28 @@
 # Docker Hub 镜像仓库配置
 
-> Docker Hub 账号: `rekal1018`
-> 镜像命名: `rekal1018/aoi-model`
+> Docker Hub 账号: `<dockerhub-username>`（部署方自行指定）
+> 镜像命名: `<dockerhub-username>/aoi-model`
+
+> ⚠️ **本仓库为脱敏开源版本，任何真实 Token 一律不入库。**
+> 请自行在 Docker Hub → Account Settings → Personal access tokens 创建 Token，
+> 并通过环境变量 / CI 变量 / Secret 注入，**不要提交到 Git**。
 
 ## Token 分配
 
 | 平台 | 权限 | Token | 用途 |
 |---|---|---|---|
 | B（推理端） | 只读 | 见 `infer-platform/.env.example` | 产线工控机拉取模型（含 `GET /tags/list` 列 tag） |
-| A（训练端） | 读写 | `<dockerhub-access-token>` | 中心机房发布模型 |
+| A（训练端） | 读写 | 部署方自行创建并注入 | 中心机房发布模型 |
 
 ## A 平台配置
 
-角色B在 A 平台的环境变量或 CI 配置中填入：
+在 A 平台的环境变量或 CI 配置中填入（**值由部署方自行生成**）：
 
 ```
 MODEL_REGISTRY=docker.io
-MODEL_REGISTRY_USER=rekal1018
+MODEL_REGISTRY_USER=<dockerhub-username>
 MODEL_REGISTRY_PASSWORD=<dockerhub-access-token>
-MODEL_IMAGE_REPO=rekal1018/aoi-model
+MODEL_IMAGE_REPO=<dockerhub-username>/aoi-model
 ```
 
 ## B 平台配置
